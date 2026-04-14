@@ -29,8 +29,9 @@ export function setupPlugin(deps: SetupDeps): Elysia {
 set -e
 HUB="${host}"
 echo "Registering claude-net MCP server..."
-claude mcp add --transport stdio \\
+claude mcp add \\
   -e CLAUDE_NET_HUB=http://$HUB \\
+  --transport stdio \\
   claude-net -- bun run http://$HUB/plugin.ts
 echo ""
 echo "claude-net registered. Start Claude Code with:"

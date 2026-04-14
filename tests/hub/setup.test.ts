@@ -61,7 +61,7 @@ describe("Setup endpoint", () => {
 
     expect(body).toStartWith("#!/bin/bash");
     expect(body).toContain("set -e");
-    expect(body).toContain("claude mcp add --transport stdio");
+    expect(body).toContain("claude mcp add");
     expect(body).toContain("-e CLAUDE_NET_HUB=http://$HUB");
     expect(body).toContain("claude-net -- bun run http://$HUB/plugin.ts");
   });

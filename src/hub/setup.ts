@@ -30,7 +30,7 @@ set -e
 HUB="${host}"
 echo "Registering claude-net MCP server..."
 claude mcp add --transport stdio \\
-  --env CLAUDE_NET_HUB=http://$HUB \\
+  -e CLAUDE_NET_HUB=http://$HUB \\
   claude-net -- bun run http://$HUB/plugin.ts
 echo ""
 echo "claude-net registered. Start Claude Code with:"

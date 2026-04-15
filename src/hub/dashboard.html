@@ -408,6 +408,10 @@
         addMessage(event);
         break;
 
+      case 'dashboard:message':
+        addMessage(event);
+        break;
+
       case 'team:changed':
         if (event.action === 'deleted') {
           teams.delete(event.team);

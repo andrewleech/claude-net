@@ -1,4 +1,4 @@
-import type { DashboardEvent } from "@/shared/types";
+import type { DashboardEvent, InboundMessageFrame } from "@/shared/types";
 import type { Elysia } from "elysia";
 import type { Registry } from "./registry";
 import type { Teams } from "./teams";
@@ -10,6 +10,9 @@ interface DashboardWs {
 
 const dashboardClients = new Set<DashboardWs>();
 
+export const DASHBOARD_AGENT_NAME = "dashboard@hub";
+export const DASHBOARD_SHORT_NAME = "dashboard";
+
 export function broadcastToDashboards(event: DashboardEvent): void {
   const payload = JSON.stringify(event);
   for (const client of dashboardClients) {
@@ -19,6 +22,30 @@ export function broadcastToDashboards(event: DashboardEvent): void {
       // Client may have disconnected; remove on next close event
     }
   }
+}
+
+/**
+ * Route a message addressed to dashboard@hub to all connected dashboard clients.
+ * Returns true if at least one dashboard client received the message.
+ */
+export function routeToDashboard(frame: InboundMessageFrame): boolean {
+  if (dashboardClients.size === 0) return false;
+  const payload = JSON.stringify({
+    event: "dashboard:message",
+    ...frame,
+  });
+  for (const client of dashboardClients) {
+    try {
+      client.send(payload);
+    } catch {
+      // ignore
+    }
+  }
+  return true;
+}
+
+export function hasDashboardClients(): boolean {
+  return dashboardClients.size > 0;
 }
 
 function pushInitialState(

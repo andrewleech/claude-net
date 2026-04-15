@@ -1,6 +1,12 @@
 import type { InboundMessageFrame, MessageType } from "@/shared/types";
 import type { Registry } from "./registry";
 import type { Teams } from "./teams";
+import {
+  DASHBOARD_AGENT_NAME,
+  DASHBOARD_SHORT_NAME,
+  hasDashboardClients,
+  routeToDashboard,
+} from "./ws-dashboard";
 
 export class Router {
   private registry: Registry;
@@ -20,6 +26,27 @@ export class Router {
   ):
     | { ok: true; message_id: string; delivered: true }
     | { ok: false; error: string } {
+    // Handle dashboard@hub as a virtual agent
+    if (to === DASHBOARD_AGENT_NAME || to === DASHBOARD_SHORT_NAME) {
+      if (!hasDashboardClients()) {
+        return { ok: false, error: "Dashboard is not connected." };
+      }
+      const message_id = crypto.randomUUID();
+      const timestamp = new Date().toISOString();
+      const frame: InboundMessageFrame = {
+        event: "message",
+        message_id,
+        from,
+        to: DASHBOARD_AGENT_NAME,
+        type,
+        content,
+        timestamp,
+        ...(reply_to ? { reply_to } : {}),
+      };
+      routeToDashboard(frame);
+      return { ok: true, message_id, delivered: true };
+    }
+
     const resolved = this.registry.resolve(to);
     if (!resolved.ok) {
       return { ok: false, error: resolved.error };

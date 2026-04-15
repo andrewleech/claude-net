@@ -90,14 +90,12 @@ already claimed that name.
 The FIRST time the user asks you to do anything with claude-net
 (send a message, list agents, join a team, etc.) you MUST first call
 whoami() to confirm your identity. If whoami returns an error saying
-you are not registered, STOP and ask the user what name they would like
-this session to use. Explain that the default name was taken — likely
-because another Claude Code session in the same folder on this host
-claimed it first. After the user gives you a name, call register(name)
-to claim it, then proceed with their request.
-
-Do NOT pick a random or arbitrary name on behalf of the user. Names are
-how users address agents — the user needs to choose a meaningful one.
+you are not registered, use the AskUserQuestion tool to ask which name
+to register as. Offer these options:
+  1. The current session name (if you know it from session context)
+  2. A "Type your own" free-text option
+Explain briefly that the default name was already taken.
+After the user picks, call register(name) and proceed with their request.
 
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.
@@ -517,7 +515,7 @@ async function handleToolCall(
   if (name === "whoami") {
     if (!registeredName) {
       return notConnectedError(
-        `Not registered with the hub. The default name "${storedName}" is already taken — likely another Claude Code session in the same folder on this host claimed it first. STOP and ask the user what name they would like this session to use, then call register(name) with their chosen name. Do not pick a name on behalf of the user.`,
+        `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
       );
     }
     return toolResult({ name: registeredName });
@@ -538,7 +536,7 @@ async function handleToolCall(
   // Block messaging tools when not registered — force the identity flow
   if (name !== "register" && !registeredName) {
     return notConnectedError(
-      `Cannot use claude-net messaging tools: this session is not registered. The default name "${storedName}" was already taken. STOP and ask the user what name they would like this session to use, then call register(name) with their chosen name before retrying.`,
+      "Not registered — call whoami first, then use AskUserQuestion to let the user pick a name.",
     );
   }
 

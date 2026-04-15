@@ -1,4 +1,9 @@
 import type { AgentInfo } from "@/shared/types";
+import {
+  DASHBOARD_AGENT_NAME,
+  DASHBOARD_SHORT_NAME,
+  hasDashboardClients,
+} from "./ws-dashboard";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -188,6 +193,19 @@ export class Registry {
         status: "offline",
         teams: [...entry.teams],
         connectedAt: entry.disconnectedAt.toISOString(),
+      });
+    }
+
+    // Include dashboard as a virtual agent when clients are connected
+    if (hasDashboardClients()) {
+      result.push({
+        name: DASHBOARD_AGENT_NAME,
+        fullName: DASHBOARD_AGENT_NAME,
+        shortName: DASHBOARD_SHORT_NAME,
+        host: "hub",
+        status: "online",
+        teams: [],
+        connectedAt: new Date().toISOString(),
       });
     }
 

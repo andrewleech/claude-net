@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildDefaultName,
   createChannelNotification,
   mapToolToFrame,
+  writeSessionState,
 } from "@/plugin/plugin";
 
 describe("plugin helpers", () => {
@@ -184,6 +186,63 @@ describe("plugin helpers", () => {
     test("unknown tool: returns null", () => {
       const frame = mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();
+    });
+  });
+
+  describe("writeSessionState", () => {
+    const stateDir = "/tmp/claude-net";
+    const stateFile = path.join(stateDir, `state-${process.ppid}.json`);
+
+    afterEach(() => {
+      try {
+        fs.unlinkSync(stateFile);
+      } catch {
+        // ignore
+      }
+    });
+
+    test("writes online state file with correct shape", () => {
+      writeSessionState({
+        name: "test@host",
+        status: "online",
+        hub: "ws://localhost:4815/ws",
+        cwd: "/tmp/test",
+      });
+
+      const content = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+      expect(content.name).toBe("test@host");
+      expect(content.status).toBe("online");
+      expect(content.hub).toBe("ws://localhost:4815/ws");
+      expect(content.cwd).toBe("/tmp/test");
+      expect(content.updated_at).toBeDefined();
+    });
+
+    test("writes error state file with error field", () => {
+      writeSessionState({
+        name: "",
+        status: "error",
+        error: "Name already taken.",
+        hub: "ws://localhost:4815/ws",
+        cwd: "/tmp/test",
+      });
+
+      const content = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+      expect(content.status).toBe("error");
+      expect(content.error).toBe("Name already taken.");
+      expect(content.name).toBe("");
+    });
+
+    test("writes disconnected state file", () => {
+      writeSessionState({
+        name: "agent@host",
+        status: "disconnected",
+        hub: "ws://localhost:4815/ws",
+        cwd: "/tmp/test",
+      });
+
+      const content = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+      expect(content.status).toBe("disconnected");
+      expect(content.name).toBe("agent@host");
     });
   });
 });

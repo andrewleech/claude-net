@@ -6,6 +6,7 @@
 // `bun run http://hub:4815/plugin.ts`. It CAN import npm packages but
 // CANNOT import local project files. Types are duplicated inline.
 
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -171,6 +172,40 @@ function log(msg: string): void {
   process.stderr.write(`[claude-net] ${msg}\n`);
 }
 
+// ── Session state file (for statusline) ──────────────────────────────────
+
+const STATE_DIR = "/tmp/claude-net";
+const STATE_FILE = path.join(STATE_DIR, `state-${process.ppid}.json`);
+
+export function writeSessionState(state: {
+  name: string;
+  status: "online" | "error" | "disconnected";
+  error?: string;
+  hub: string;
+  cwd: string;
+}): void {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(
+      STATE_FILE,
+      JSON.stringify({
+        ...state,
+        updated_at: new Date().toISOString(),
+      }),
+    );
+  } catch (err) {
+    log(`Failed to write state file: ${err}`);
+  }
+}
+
+function deleteSessionState(): void {
+  try {
+    fs.unlinkSync(STATE_FILE);
+  } catch {
+    // ignore — file may not exist
+  }
+}
+
 // ── WebSocket client state ────────────────────────────────────────────────
 
 let ws: WebSocket | null = null;
@@ -287,11 +322,24 @@ function connectWebSocket(): void {
         .then(() => {
           registeredName = storedName;
           log(`Auto-registered as ${storedName}`);
+          writeSessionState({
+            name: storedName,
+            status: "online",
+            hub: hubWsUrl,
+            cwd: process.cwd(),
+          });
         })
         .catch((err: unknown) => {
           registeredName = "";
           const message = err instanceof Error ? err.message : String(err);
           log(`Auto-registration failed: ${message}`);
+          writeSessionState({
+            name: "",
+            status: "error",
+            error: message,
+            hub: hubWsUrl,
+            cwd: process.cwd(),
+          });
           emitSystemNotification(
             `claude-net: the default name "${storedName}" is already taken (${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools. Do not pick a name on behalf of the user.`,
           );
@@ -306,6 +354,14 @@ function connectWebSocket(): void {
   ws.on("close", () => {
     log("Disconnected from hub");
     ws = null;
+    if (registeredName) {
+      writeSessionState({
+        name: registeredName,
+        status: "disconnected",
+        hub: hubWsUrl,
+        cwd: process.cwd(),
+      });
+    }
     scheduleReconnect();
   });
 
@@ -498,6 +554,12 @@ async function handleToolCall(
     if (name === "register" && args.name) {
       storedName = args.name;
       registeredName = args.name;
+      writeSessionState({
+        name: args.name,
+        status: "online",
+        hub: hubWsUrl,
+        cwd: process.cwd(),
+      });
     }
 
     return toolResult(data);
@@ -550,6 +612,7 @@ async function main(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = () => {
+    deleteSessionState();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (ws) {
       ws.removeAllListeners();

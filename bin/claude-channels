@@ -17,7 +17,7 @@ set -euo pipefail
 # ~/.local/share/claude-channels/ and regenerated when the source updates.
 
 CACHE_DIR="$HOME/.local/share/claude-channels"
-PATCHED_CLI="$CACHE_DIR/claude-patched"
+PATCHED_CLI="$CACHE_DIR/claude-patched.js"
 SOURCE_MARKER="$CACHE_DIR/source_path"
 
 # ── Find Claude Code binary ──────────────────────────────────────────────
@@ -64,94 +64,82 @@ find_claude_binary() {
     return 1
 }
 
-# ── Patch the binary ─────────────────────────────────────────────────────
+# ── Patch the JS source ──────────────────────────────────────────────────
+#
+# The compiled Bun binary can't be byte-patched (internal checksums).
+# Instead, install the npm package to get cli.js and patch that with sed
+# (same approach as claude-swarm).
 
 apply_patches() {
     local src="$1"
     local dst="$2"
 
-    echo "Patching Claude Code for channels support..." >&2
+    echo "Patching Claude Code for channels + bypass support..." >&2
 
-    cp "$src" "$dst"
+    # Get the version from the binary
+    local version
+    version=$("$src" --version 2>/dev/null | head -1 | sed 's/ .*//')
+    if [ -z "$version" ]; then
+        echo "ERROR: Could not determine Claude Code version" >&2
+        return 1
+    fi
 
+    # Install npm package to get patchable JS
+    local npm_dir="$CACHE_DIR/npm"
+    local cli_js="$npm_dir/node_modules/@anthropic-ai/claude-code/cli.js"
+
+    if [ ! -f "$cli_js" ] || [ "$src" -nt "$cli_js" ]; then
+        echo "  Installing @anthropic-ai/claude-code@${version} for JS patching..." >&2
+        mkdir -p "$npm_dir"
+        (cd "$npm_dir" && npm install --no-save "@anthropic-ai/claude-code@${version}" 2>&1 | tail -1) >&2
+    fi
+
+    if [ ! -f "$cli_js" ]; then
+        echo "ERROR: Failed to install npm package" >&2
+        return 1
+    fi
+
+    cp "$cli_js" "$dst"
     local orig_size
     orig_size=$(stat -c%s "$dst")
 
-    # ── Patch 1: Feature gate bypass (tengu_harbor → always true) ────────
-    #
-    # Original:  function X(){return Y("tengu_harbor",!1)}
-    # Patched:   function X(){return!0;return Y("tengu_harbor",!1)}
-    #
-    # Stable anchor: "tengu_harbor" string literal in a return statement.
-
-    local gate_pattern='\{return [a-zA-Z0-9_$]+\("tengu_harbor",!1\)\}'
+    # ── Patch 1: Feature gate bypass (tengu_harbor → always true) ────
+    local gate_pattern='function [a-zA-Z0-9_$]\+(){return [a-zA-Z0-9_$]\+("tengu_harbor",!1)}'
     local gate_count
-    gate_count=$(grep -cP "$gate_pattern" "$dst" || true)
+    gate_count=$(grep -cP '\{return [a-zA-Z0-9_$]+\("tengu_harbor",!1\)\}' "$dst" || true)
 
     if [ "$gate_count" -eq 0 ]; then
-        echo "WARNING: Feature gate pattern not found (tengu_harbor). Claude Code version may have changed." >&2
+        echo "  Patch 1: Feature gate — pattern not found" >&2
     else
         echo "  Patch 1: Feature gate (tengu_harbor) — $gate_count match(es)" >&2
         sed -i -E 's/\{return ([a-zA-Z0-9_$]+)\("tengu_harbor",!1\)\}/\{return!0;return \1("tengu_harbor",!1)\}/g' "$dst"
     fi
 
-    # ── Patch 2: Channel registration gate bypass ────────────────────────
-    #
-    # The u4$ function (name changes per build) checks capability, feature
-    # gate, auth, org policy, session channel list, and plugin allowlist.
-    # We keep the capability check (good: only register servers that declare
-    # claude/channel) and bypass everything else.
-    #
-    # Original:  ..."server did not declare claude/channel capability"};if(!
-    # Patched:   ..."server did not declare claude/channel capability"};return{action:"register"};if(!
-    #
-    # Stable anchor: the error string followed by };if(!
-
-    local reg_pattern='server did not declare claude/channel capability"\};if\(!'
+    # ── Patch 2: Channel registration gate bypass ────────────────────
     local reg_count
-    reg_count=$(grep -cP "$reg_pattern" "$dst" || true)
+    reg_count=$(grep -cP 'capability"\};if\(![a-zA-Z0-9_$]+\(\)\)return\{action:"skip",kind:"disabled"' "$dst" || true)
 
     if [ "$reg_count" -eq 0 ]; then
-        echo "WARNING: Channel registration gate pattern not found. Claude Code version may have changed." >&2
+        echo "  Patch 2: Channel registration gate — pattern not found" >&2
     else
         echo "  Patch 2: Channel registration gate — $reg_count match(es)" >&2
-        sed -i 's/server did not declare claude\/channel capability"};if(!/server did not declare claude\/channel capability"};return{action:"register"};if(!/g' "$dst"
+        sed -i -E 's/(capability"\};)(if\(![a-zA-Z0-9_$]+\(\)\)return\{action:"skip",kind:"disabled")/\1return\{action:"register"\};\2/g' "$dst"
     fi
 
-    # ── Patch 3: Auto-accept development channels warning ────────────────
-    #
-    # The NfH() function checks skipDangerousModePermissionPrompt in
-    # various settings scopes. Patch it to always return true.
-    #
-    # This is already handled if the user has skipDangerousModePermissionPrompt
-    # in their settings.json, but this ensures it for all accounts.
-    #
-    # Stable anchor: repeated string "skipDangerousModePermissionPrompt"
-    # in a function that ORs multiple E8() calls.
-
-    local prompt_pattern='\{return!!\(E8\("userSettings"\)\?\.skipDangerousModePermissionPrompt'
+    # ── Patch 3: Auto-accept development channels warning ────────────
     local prompt_count
-    prompt_count=$(grep -cP "$prompt_pattern" "$dst" || true)
+    prompt_count=$(grep -cP '\{return!!\(E8\("userSettings"\)\?\.skipDangerousModePermissionPrompt' "$dst" || true)
 
     if [ "$prompt_count" -eq 0 ]; then
-        echo "  Patch 3: Permission prompt — pattern not found (may already be handled by settings)" >&2
+        echo "  Patch 3: Permission prompt — pattern not found" >&2
     else
         echo "  Patch 3: Permission prompt bypass — $prompt_count match(es)" >&2
         sed -i 's/{return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/{return!0;return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/g' "$dst"
     fi
 
-    # ── Patch 4: Bypass permissions mode gate ───────────────────────────
-    #
-    # The tengu_disable_bypass_permissions_mode Statsig gate blocks
-    # --dangerously-skip-permissions on some accounts/orgs. Patching the
-    # gate wrapper to return false (not disabled) allows bypass mode.
-    #
-    # Original:  function X(){return Y("tengu_disable_bypass_permissions_mode")}
-    # Patched:   function X(){return!1;return Y("tengu_disable_bypass_permissions_mode")}
-
-    local bypass_pattern='\{return [a-zA-Z0-9_$]+\("tengu_disable_bypass_permissions_mode"\)\}'
+    # ── Patch 4: Bypass permissions mode gate ────────────────────────
     local bypass_count
-    bypass_count=$(grep -cP "$bypass_pattern" "$dst" || true)
+    bypass_count=$(grep -cP '\{return [a-zA-Z0-9_$]+\("tengu_disable_bypass_permissions_mode"\)\}' "$dst" || true)
 
     if [ "$bypass_count" -eq 0 ]; then
         echo "  Patch 4: Bypass permissions gate — pattern not found" >&2
@@ -160,21 +148,16 @@ apply_patches() {
         sed -i -E 's/\{return ([a-zA-Z0-9_$]+)\("tengu_disable_bypass_permissions_mode"\)\}/\{return!1;return \1("tengu_disable_bypass_permissions_mode")\}/g' "$dst"
     fi
 
-    # ── Verify ───────────────────────────────────────────────────────────
-
+    # ── Verify ───────────────────────────────────────────────────────
     local new_size
     new_size=$(stat -c%s "$dst")
     local delta=$((new_size - orig_size))
 
     if [ "$delta" -lt 5 ]; then
-        echo "WARNING: No patches applied (size delta: ${delta} bytes). Binary may already be patched or patterns changed." >&2
-    elif [ "$delta" -gt 200 ]; then
-        echo "WARNING: Unexpectedly large size delta (${delta} bytes). Review patches manually." >&2
+        echo "  WARNING: No patches applied (size delta: ${delta} bytes)" >&2
     else
         echo "  Applied successfully (+${delta} bytes)" >&2
     fi
-
-    chmod +x "$dst"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────
@@ -271,4 +254,5 @@ if ! $already_has_channels; then
     fi
 fi
 
-exec "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"
+# Run the patched JS with bun (npm cli.js, not the compiled binary)
+NODE_PATH="$CACHE_DIR/npm/node_modules" exec bun run "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"

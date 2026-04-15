@@ -90,12 +90,13 @@ already claimed that name.
 The FIRST time the user asks you to do anything with claude-net
 (send a message, list agents, join a team, etc.) you MUST first call
 whoami() to confirm your identity. If whoami returns an error saying
-you are not registered, use the AskUserQuestion tool to ask which name
-to register as. Offer these options:
-  1. The current session name (if you know it from session context)
-  2. A "Type your own" free-text option
-Explain briefly that the default name was already taken.
-After the user picks, call register(name) and proceed with their request.
+you are not registered, ask the user to pick a name. If you have the
+AskUserQuestion tool available, use it:
+  AskUserQuestion({ questions: [{ question: "Pick a claude-net agent name for this session (default was taken):",
+    options: [{ label: "<session_name>", description: "Use the session name" }] }] })
+(Users can always choose "Other" for free-text input.)
+If AskUserQuestion is not available, ask in plain text instead.
+After the user picks, call register(name@hostname) and proceed.
 
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.

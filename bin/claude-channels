@@ -133,7 +133,7 @@ if ! $already_has_channels; then
     while IFS= read -r server; do
         [ -n "$server" ] && CHANNEL_ARGS+=("$server")
     done < <(find_channel_servers)
-    [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
+    [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--channels "${CHANNEL_ARGS[@]}")
 fi
 
 exec "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"

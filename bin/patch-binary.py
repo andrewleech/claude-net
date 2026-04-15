@@ -45,6 +45,19 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str]]:
     else:
         log.append("  Patch 3: Bypass permissions gate — pattern not found")
 
+    # ── Patch 4: Channel allowlist bypass ────────────────────────────
+    # Non-dev channels (--channels flag) hit an allowlist check:
+    #   if(!f.dev)return{action:"skip",kind:"allowlist"...}
+    # Replace !f.dev with false (same length) to skip the check.
+    old4 = b'if(!f.dev)return{action:"skip",kind:"allowlist"'
+    new4 = b'if(false )return{action:"skip",kind:"allowlist"'
+    count4 = data.count(old4)
+    if count4:
+        log.append(f"  Patch 4: Channel allowlist bypass — {count4} replacement(s)")
+        data = data.replace(old4, new4)
+    else:
+        log.append("  Patch 4: Channel allowlist — pattern not found")
+
     if len(data) != orig_len:
         log.append(f"  FATAL: size changed ({orig_len} → {len(data)})")
         return data, log

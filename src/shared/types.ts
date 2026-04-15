@@ -150,6 +150,7 @@ export interface AgentInfo {
   name: string;
   fullName: string;
   shortName: string;
+  user: string;
   host: string;
   status: "online" | "offline";
   teams: string[];

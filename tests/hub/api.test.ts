@@ -125,18 +125,18 @@ describe("REST API endpoints", () => {
 
   test("GET /api/agents returns registered agents", async () => {
     const ws = await connect();
-    await registerAgent(ws, "api-agent1@host");
+    await registerAgent(ws, "api-agent1:tester@host");
 
     const resp = await fetch(`${baseUrl}/api/agents`);
     expect(resp.status).toBe(200);
     const body = (await resp.json()) as Msg[];
     const names = body.map((a) => a.name);
-    expect(names).toContain("api-agent1@host");
+    expect(names).toContain("api-agent1:tester@host");
   });
 
   test("GET /api/teams returns team list", async () => {
     const ws = await connect();
-    await registerAgent(ws, "api-teamer@host");
+    await registerAgent(ws, "api-teamer:tester@host");
 
     const joinP = waitForMessage(ws);
     ws.send(
@@ -166,14 +166,17 @@ describe("REST API endpoints", () => {
 
   test("POST /api/send delivers message to connected agent", async () => {
     const ws = await connect();
-    await registerAgent(ws, "api-recv@host");
+    await registerAgent(ws, "api-recv:tester@host");
 
     const inboundP = waitForMessage(ws);
 
     const resp = await fetch(`${baseUrl}/api/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: "api-recv@host", content: "hello from api" }),
+      body: JSON.stringify({
+        to: "api-recv:tester@host",
+        content: "hello from api",
+      }),
     });
     expect(resp.status).toBe(200);
     const body = (await resp.json()) as Msg;
@@ -189,7 +192,10 @@ describe("REST API endpoints", () => {
     const resp = await fetch(`${baseUrl}/api/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: "nonexistent@host", content: "hello" }),
+      body: JSON.stringify({
+        to: "nonexistent:user@host",
+        content: "hello",
+      }),
     });
     expect(resp.status).toBe(400);
     const body = (await resp.json()) as Msg;
@@ -210,8 +216,8 @@ describe("REST API endpoints", () => {
   test("POST /api/broadcast delivers to all connected agents", async () => {
     const wsA = await connect();
     const wsB = await connect();
-    await registerAgent(wsA, "api-bc1@host");
-    await registerAgent(wsB, "api-bc2@host");
+    await registerAgent(wsA, "api-bc1:tester@host");
+    await registerAgent(wsB, "api-bc2:tester@host");
 
     const msgA = waitForMessage(wsA);
     const msgB = waitForMessage(wsB);
@@ -234,8 +240,8 @@ describe("REST API endpoints", () => {
   test("POST /api/send_team delivers to team members", async () => {
     const wsA = await connect();
     const wsB = await connect();
-    await registerAgent(wsA, "api-tm1@host");
-    await registerAgent(wsB, "api-tm2@host");
+    await registerAgent(wsA, "api-tm1:tester@host");
+    await registerAgent(wsB, "api-tm2:tester@host");
 
     // Both join team
     const j1 = waitForMessage(wsA);

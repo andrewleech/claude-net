@@ -115,24 +115,24 @@ describe("WebSocket Plugin (integration)", () => {
 
   test("register agent and receive registered event", async () => {
     const ws = await connect();
-    const messages = await registerAgent(ws, "alice@host");
+    const messages = await registerAgent(ws, "proj:alice@host");
 
     const registered = messages.find((m) => m.event === "registered");
     expect(registered).toBeTruthy();
-    expect(registered?.full_name).toBe("alice@host");
-    expect(registered?.name).toBe("alice");
+    expect(registered?.full_name).toBe("proj:alice@host");
+    expect(registered?.name).toBe("proj");
 
     const response = messages.find((m) => m.event === "response");
     expect(response).toBeTruthy();
     expect(response?.ok).toBe(true);
-    expect(response?.requestId).toBe("reg-alice@host");
+    expect(response?.requestId).toBe("reg-proj:alice@host");
   });
 
   test("send message between two agents", async () => {
     const wsA = await connect();
     const wsB = await connect();
-    await registerAgent(wsA, "sender@host");
-    await registerAgent(wsB, "receiver@host");
+    await registerAgent(wsA, "proj:sender@host");
+    await registerAgent(wsB, "proj:receiver@host");
 
     const inboundP = waitForMessage(wsB);
     const responseP = waitForMessage(wsA);
@@ -140,7 +140,7 @@ describe("WebSocket Plugin (integration)", () => {
     wsA.send(
       JSON.stringify({
         action: "send",
-        to: "receiver@host",
+        to: "proj:receiver@host",
         content: "hello there",
         type: "message",
         requestId: "msg-1",
@@ -154,7 +154,7 @@ describe("WebSocket Plugin (integration)", () => {
     expect((response.data as Msg)?.delivered).toBe(true);
 
     expect(inbound.event).toBe("message");
-    expect(inbound.from).toBe("sender@host");
+    expect(inbound.from).toBe("proj:sender@host");
     expect(inbound.content).toBe("hello there");
     expect(inbound.message_id).toBeTruthy();
   });
@@ -163,9 +163,9 @@ describe("WebSocket Plugin (integration)", () => {
     const wsA = await connect();
     const wsB = await connect();
     const wsC = await connect();
-    await registerAgent(wsA, "broadcaster@host");
-    await registerAgent(wsB, "listener1@host");
-    await registerAgent(wsC, "listener2@host");
+    await registerAgent(wsA, "proj:broadcaster@host");
+    await registerAgent(wsB, "proj:listener1@host");
+    await registerAgent(wsC, "proj:listener2@host");
 
     const msgB = waitForMessage(wsB);
     const msgC = waitForMessage(wsC);
@@ -183,16 +183,16 @@ describe("WebSocket Plugin (integration)", () => {
 
     expect(aResp.ok).toBe(true);
     expect((aResp.data as Msg)?.delivered_to).toBe(2);
-    expect(bMsg.from).toBe("broadcaster@host");
-    expect(cMsg.from).toBe("broadcaster@host");
+    expect(bMsg.from).toBe("proj:broadcaster@host");
+    expect(cMsg.from).toBe("proj:broadcaster@host");
     expect(bMsg.to).toBe("broadcast");
   });
 
   test("join team, send team message, verify delivery", async () => {
     const wsA = await connect();
     const wsB = await connect();
-    await registerAgent(wsA, "tmem1@host");
-    await registerAgent(wsB, "tmem2@host");
+    await registerAgent(wsA, "proj:tmem1@host");
+    await registerAgent(wsB, "proj:tmem2@host");
 
     // Both join team
     const joinP1 = waitForMessage(wsA);
@@ -208,8 +208,8 @@ describe("WebSocket Plugin (integration)", () => {
     );
     const join2 = await joinP2;
     expect(join2.ok).toBe(true);
-    expect((join2.data as Msg)?.members).toContain("tmem1@host");
-    expect((join2.data as Msg)?.members).toContain("tmem2@host");
+    expect((join2.data as Msg)?.members).toContain("proj:tmem1@host");
+    expect((join2.data as Msg)?.members).toContain("proj:tmem2@host");
 
     // Send team message from A
     const teamMsgP = waitForMessage(wsB);
@@ -227,13 +227,13 @@ describe("WebSocket Plugin (integration)", () => {
     const [teamMsg, resp] = await Promise.all([teamMsgP, respP]);
     expect(resp.ok).toBe(true);
     expect((resp.data as Msg)?.delivered_to).toBe(1);
-    expect(teamMsg.from).toBe("tmem1@host");
+    expect(teamMsg.from).toBe("proj:tmem1@host");
     expect(teamMsg.team).toBe("devs");
   });
 
   test("disconnect triggers timeout behavior", async () => {
     const ws = await connect();
-    await registerAgent(ws, "disconnecter@host");
+    await registerAgent(ws, "proj:disconnecter@host");
 
     // Join a team so disconnect tracking kicks in
     const joinP = waitForMessage(ws);
@@ -249,11 +249,11 @@ describe("WebSocket Plugin (integration)", () => {
 
     // Wait a tick for close handler
     await new Promise((r) => setTimeout(r, 50));
-    expect(hub.registry.disconnected.has("disconnecter@host")).toBe(true);
+    expect(hub.registry.disconnected.has("proj:disconnecter@host")).toBe(true);
 
     // Wait for timeout (200ms configured)
     await new Promise((r) => setTimeout(r, 300));
-    expect(hub.registry.disconnected.has("disconnecter@host")).toBe(false);
+    expect(hub.registry.disconnected.has("proj:disconnecter@host")).toBe(false);
   });
 
   test("invalid JSON frame returns error event", async () => {
@@ -267,7 +267,7 @@ describe("WebSocket Plugin (integration)", () => {
 
   test("unknown action returns error response", async () => {
     const ws = await connect();
-    await registerAgent(ws, "unknown@host");
+    await registerAgent(ws, "proj:unknown@host");
 
     const respP = waitForMessage(ws);
     ws.send(JSON.stringify({ action: "foobar", requestId: "unk-1" }));
@@ -297,21 +297,21 @@ describe("WebSocket Plugin (integration)", () => {
   test("list_agents returns registered agents", async () => {
     const wsA = await connect();
     const wsB = await connect();
-    await registerAgent(wsA, "lister@host");
-    await registerAgent(wsB, "listed@host");
+    await registerAgent(wsA, "proj:lister@host");
+    await registerAgent(wsB, "proj:listed@host");
 
     const respP = waitForMessage(wsA);
     wsA.send(JSON.stringify({ action: "list_agents", requestId: "la-1" }));
     const resp = await respP;
     expect(resp.ok).toBe(true);
     const names = (resp.data as Msg[]).map((a) => a.name);
-    expect(names).toContain("lister@host");
-    expect(names).toContain("listed@host");
+    expect(names).toContain("proj:lister@host");
+    expect(names).toContain("proj:listed@host");
   });
 
   test("list_teams returns teams", async () => {
     const ws = await connect();
-    await registerAgent(ws, "teamer@host");
+    await registerAgent(ws, "proj:teamer@host");
 
     const joinP = waitForMessage(ws);
     ws.send(

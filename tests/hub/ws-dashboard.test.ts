@@ -181,18 +181,18 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
 
   test("dashboard receives initial state with existing agents", async () => {
     const agentWs = await agent();
-    await registerAgent(agentWs, "pre-exist@host");
+    await registerAgent(agentWs, "pre-exist:tester@host");
 
     const d = await dash();
     const msg = await waitForEvent(d, "agent:connected");
 
-    expect(msg.full_name).toBe("pre-exist@host");
+    expect(msg.full_name).toBe("pre-exist:tester@host");
     expect(msg.name).toBe("pre-exist");
   });
 
   test("dashboard receives initial state with existing teams", async () => {
     const agentWs = await agent();
-    await registerAgent(agentWs, "team-pre@host");
+    await registerAgent(agentWs, "team-pre:tester@host");
 
     const joinP = waitForMessage(agentWs);
     agentWs.send(
@@ -209,7 +209,8 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     const msgs = await drainMessages(d, 200);
 
     const agentEvent = msgs.find(
-      (m) => m.event === "agent:connected" && m.full_name === "team-pre@host",
+      (m) =>
+        m.event === "agent:connected" && m.full_name === "team-pre:tester@host",
     );
     expect(agentEvent).toBeTruthy();
 
@@ -218,7 +219,7 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     );
     expect(teamEvent).toBeTruthy();
     expect(teamEvent?.action).toBe("created");
-    expect(teamEvent?.members).toContain("team-pre@host");
+    expect(teamEvent?.members).toContain("team-pre:tester@host");
   });
 
   test("dashboard receives agent:connected when agent registers", async () => {
@@ -228,16 +229,16 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
 
     const eventP = waitForEvent(d, "agent:connected");
     const agentWs = await agent();
-    await registerAgent(agentWs, "live-reg@host");
+    await registerAgent(agentWs, "live-reg:tester@host");
 
     const event = await eventP;
-    expect(event.full_name).toBe("live-reg@host");
+    expect(event.full_name).toBe("live-reg:tester@host");
     expect(event.name).toBe("live-reg");
   });
 
   test("dashboard receives agent:disconnected when agent disconnects", async () => {
     const agentWs = await agent();
-    await registerAgent(agentWs, "will-leave@host");
+    await registerAgent(agentWs, "will-leave:tester@host");
 
     const d = await dash();
     await drainMessages(d, 150);
@@ -248,14 +249,14 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     if (idx >= 0) openSockets.splice(idx, 1);
 
     const event = await eventP;
-    expect(event.full_name).toBe("will-leave@host");
+    expect(event.full_name).toBe("will-leave:tester@host");
   });
 
   test("dashboard receives message:routed on direct message", async () => {
     const wsA = await agent();
     const wsB = await agent();
-    await registerAgent(wsA, "dm-sender@host");
-    await registerAgent(wsB, "dm-receiver@host");
+    await registerAgent(wsA, "dm-sender:tester@host");
+    await registerAgent(wsB, "dm-receiver:tester@host");
 
     const d = await dash();
     await drainMessages(d, 150);
@@ -264,7 +265,7 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     wsA.send(
       JSON.stringify({
         action: "send",
-        to: "dm-receiver@host",
+        to: "dm-receiver:tester@host",
         content: "hello dashboard",
         type: "message",
         requestId: "dm-1",
@@ -272,16 +273,16 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     );
 
     const event = await eventP;
-    expect(event.from).toBe("dm-sender@host");
-    expect(event.to).toBe("dm-receiver@host");
+    expect(event.from).toBe("dm-sender:tester@host");
+    expect(event.to).toBe("dm-receiver:tester@host");
     expect(event.content).toBe("hello dashboard");
   });
 
   test("dashboard receives message:routed on broadcast", async () => {
     const wsA = await agent();
     const wsB = await agent();
-    await registerAgent(wsA, "bc-sender@host");
-    await registerAgent(wsB, "bc-listener@host");
+    await registerAgent(wsA, "bc-sender:tester@host");
+    await registerAgent(wsB, "bc-listener:tester@host");
 
     const d = await dash();
     await drainMessages(d, 150);
@@ -296,14 +297,14 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     );
 
     const event = await eventP;
-    expect(event.from).toBe("bc-sender@host");
+    expect(event.from).toBe("bc-sender:tester@host");
     expect(event.to).toBe("broadcast");
     expect(event.content).toBe("broadcast msg");
   });
 
   test("dashboard receives team:changed on join and leave", async () => {
     const agentWs = await agent();
-    await registerAgent(agentWs, "tj@host");
+    await registerAgent(agentWs, "proj:tj@host");
 
     const d = await dash();
     await drainMessages(d, 150);
@@ -350,11 +351,11 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     const event2P = waitForEvent(d2, "agent:connected");
 
     const agentWs = await agent();
-    await registerAgent(agentWs, "multi-dash@host");
+    await registerAgent(agentWs, "multi-dash:tester@host");
 
     const [event1, event2] = await Promise.all([event1P, event2P]);
 
-    expect(event1.full_name).toBe("multi-dash@host");
-    expect(event2.full_name).toBe("multi-dash@host");
+    expect(event1.full_name).toBe("multi-dash:tester@host");
+    expect(event2.full_name).toBe("multi-dash:tester@host");
   });
 });

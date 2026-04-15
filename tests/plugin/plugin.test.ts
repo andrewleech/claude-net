@@ -11,13 +11,17 @@ import {
 
 describe("plugin helpers", () => {
   describe("buildDefaultName", () => {
-    test("returns basename(cwd)@hostname", () => {
-      const expected = `${path.basename(process.cwd())}@${os.hostname()}`;
+    test("returns session:user@hostname format", () => {
+      const session = path.basename(process.cwd());
+      const user = process.env.USER || os.userInfo().username;
+      const host = os.hostname();
+      const expected = `${session}:${user}@${host}`;
       expect(buildDefaultName()).toBe(expected);
     });
 
-    test("contains @ separator", () => {
+    test("contains : and @ separators", () => {
       const name = buildDefaultName();
+      expect(name).toContain(":");
       expect(name).toContain("@");
     });
   });

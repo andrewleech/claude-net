@@ -38,8 +38,7 @@ describe("Setup endpoint", () => {
     const resp = await fetch(`${baseUrl}/setup`);
     const body = await resp.text();
 
-    expect(body).toContain('HUB="mybox:4815"');
-    expect(body).toContain("http://${HUB}");
+    expect(body).toContain("http://mybox:4815");
     expect(body).toContain("claude mcp add");
 
     process.env.CLAUDE_NET_HOST = undefined;
@@ -50,7 +49,7 @@ describe("Setup endpoint", () => {
     const resp = await fetch(`${baseUrl}/setup`);
     const body = await resp.text();
 
-    expect(body).toContain('HUB="mybox.local:4815"');
+    expect(body).toContain("http://mybox.local:4815");
 
     process.env.CLAUDE_NET_HOST = undefined;
   });
@@ -62,8 +61,8 @@ describe("Setup endpoint", () => {
     expect(body).toStartWith("#!/bin/bash");
     expect(body).toContain("set -e");
     expect(body).toContain("claude mcp add");
-    expect(body).toContain("CLAUDE_NET_HUB=http://${HUB}");
-    expect(body).toContain("curl -fsSL ${CLAUDE_NET_HUB}/plugin.ts");
+    expect(body).toContain("CLAUDE_NET_HUB=http://");
+    expect(body).toContain("plugin.ts");
     expect(body).toContain("bun run");
   });
 

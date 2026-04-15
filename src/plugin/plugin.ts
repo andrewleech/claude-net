@@ -67,14 +67,24 @@ const RECONNECT_MAX_MS = 30_000;
 const INSTRUCTIONS = `claude-net agent messaging plugin.
 
 Inbound messages from other agents arrive as <channel> tags:
-  <channel source="claude-net" from="name@host" type="message|reply" message_id="..." reply_to="..." team="...">
+  <channel source="claude-net" from="session:user@host" type="message|reply" message_id="..." reply_to="..." team="...">
     message content
   </channel>
 
+Agent name format: session:user@host
+  - session = project folder name (basename of cwd)
+  - user = OS username
+  - host = hostname
+  - Example: "claude-net:andrew@laptop"
+
 Available tools:
 - whoami() — return your current registered name, or an error if not registered
-- register(name) — claim a name (required on first use if default name is taken)
-- send_message(to, content, reply_to?) — send to an agent by name (full "name@host" or short "name")
+- register(name) — claim a name. Provide just a session name (e.g. "reviewer") and it auto-expands to "reviewer:user@host", or provide the full "session:user@host" format.
+- send_message(to, content, reply_to?) — send to an agent. Addressing modes:
+    - Full name: "claude-net:andrew@laptop" (exact match)
+    - session:user: "claude-net:andrew" (matches across hosts)
+    - user@host: "andrew@laptop" (matches across sessions)
+    - Plain string: tries session name, then user, then host
 - broadcast(content) — send to all online agents
 - send_team(team, content, reply_to?) — send to all online members of a team
 - join_team(team) — join a team (creates it if new)
@@ -83,7 +93,7 @@ Available tools:
 - list_teams() — list all teams with members
 
 IDENTITY AND REGISTRATION:
-On startup the plugin tries to auto-register as basename(cwd)@hostname.
+On startup the plugin tries to auto-register as session:user@host.
 This can silently fail if another session in the same folder on this host
 already claimed that name.
 
@@ -96,16 +106,20 @@ AskUserQuestion tool available, use it:
     options: [{ label: "<session_name>", description: "Use the session name" }] }] })
 (Users can always choose "Other" for free-text input.)
 If AskUserQuestion is not available, ask in plain text instead.
-After the user picks, call register(name@hostname) and proceed.
+After the user picks, call register(name) and proceed. Just a session name
+like "reviewer" gets auto-expanded to "reviewer:user@host".
 
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.
-The from field on all messages is your full name@host identity, set by the hub.`;
+The from field on all messages is your full session:user@host identity, set by the hub.`;
 
 // ── Exported helpers (testable) ───────────────────────────────────────────
 
 export function buildDefaultName(): string {
-  return `${path.basename(process.cwd())}@${os.hostname()}`;
+  const session = path.basename(process.cwd());
+  const user = process.env.USER || os.userInfo().username;
+  const host = os.hostname();
+  return `${session}:${user}@${host}`;
 }
 
 export function createChannelNotification(message: InboundMessageFrame): {
@@ -395,11 +409,16 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "register",
-    description: "Override your default identity with a custom name",
+    description:
+      "Override your default identity with a custom name. Provide just a session name (e.g. 'reviewer') to auto-expand to session:user@host, or provide the full format.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        name: { type: "string", description: "The name to register as" },
+        name: {
+          type: "string",
+          description:
+            "The name to register as. A plain name like 'reviewer' auto-expands to 'reviewer:user@host'.",
+        },
       },
       required: ["name"],
     },
@@ -407,11 +426,15 @@ const TOOL_DEFINITIONS = [
   {
     name: "send_message",
     description:
-      'Send a message to an agent by name (full "name@host" or short "name")',
+      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name.',
     inputSchema: {
       type: "object" as const,
       properties: {
-        to: { type: "string", description: "Recipient agent name" },
+        to: {
+          type: "string",
+          description:
+            "Recipient agent name (full, partial, or plain session/user/host)",
+        },
         content: { type: "string", description: "Message content" },
         reply_to: {
           type: "string",
@@ -541,7 +564,18 @@ async function handleToolCall(
     );
   }
 
-  const frame = mapToolToFrame(name, args);
+  // Auto-expand plain register names to session:user@host format
+  const effectiveArgs = { ...args };
+  if (name === "register" && effectiveArgs.name) {
+    const n = effectiveArgs.name;
+    if (!n.includes(":") && !n.includes("@")) {
+      const user = process.env.USER || os.userInfo().username;
+      const host = os.hostname();
+      effectiveArgs.name = `${n}:${user}@${host}`;
+    }
+  }
+
+  const frame = mapToolToFrame(name, effectiveArgs);
   if (!frame) {
     return notConnectedError(`Unknown tool: ${name}`);
   }
@@ -550,11 +584,11 @@ async function handleToolCall(
     const data = await request(frame);
 
     // Update stored+registered name on successful register
-    if (name === "register" && args.name) {
-      storedName = args.name;
-      registeredName = args.name;
+    if (name === "register" && effectiveArgs.name) {
+      storedName = effectiveArgs.name;
+      registeredName = effectiveArgs.name;
       writeSessionState({
-        name: args.name,
+        name: effectiveArgs.name,
         status: "online",
         hub: hubWsUrl,
         cwd: process.cwd(),

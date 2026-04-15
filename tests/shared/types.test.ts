@@ -229,9 +229,10 @@ describe("shared types", () => {
   describe("Data model types", () => {
     test("AgentInfo", () => {
       const agent: AgentInfo = {
-        name: "test@host",
-        fullName: "test@host",
+        name: "test:alice@host",
+        fullName: "test:alice@host",
         shortName: "test",
+        user: "alice",
         host: "host",
         status: "online",
         teams: ["backend"],

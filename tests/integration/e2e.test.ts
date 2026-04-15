@@ -210,8 +210,10 @@ describe("e2e integration", () => {
 
   describe("agent registration", () => {
     test("two agents register and appear in list", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      trackConnection(await connectAgent(hub.port, "proj:bob@test"));
 
       send(alice.ws, { action: "list_agents", requestId: "list1" });
       const resp = await alice.waitForMessage(
@@ -221,17 +223,17 @@ describe("e2e integration", () => {
       expect(resp.ok).toBe(true);
       const agents = resp.data as Msg[];
       const names = agents.map((a) => a.name);
-      expect(names).toContain("alice@test");
-      expect(names).toContain("bob@test");
+      expect(names).toContain("proj:alice@test");
+      expect(names).toContain("proj:bob@test");
     });
 
     test("duplicate name is rejected", async () => {
-      trackConnection(await connectAgent(hub.port, "alice@test"));
+      trackConnection(await connectAgent(hub.port, "proj:alice@test"));
       const dup = trackConnection(await connectWs(hub.port, "/ws"));
 
       send(dup.ws, {
         action: "register",
-        name: "alice@test",
+        name: "proj:alice@test",
         requestId: "dup1",
       });
       const resp = await dup.waitForMessage(
@@ -247,12 +249,16 @@ describe("e2e integration", () => {
 
   describe("direct messaging", () => {
     test("message delivered with hub-stamped fields", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
 
       send(alice.ws, {
         action: "send",
-        to: "bob@test",
+        to: "proj:bob@test",
         content: "hello bob",
         type: "message",
         requestId: "send1",
@@ -262,10 +268,10 @@ describe("e2e integration", () => {
         (m) => m.event === "message" && m.content === "hello bob",
       );
 
-      expect(msg.from).toBe("alice@test");
+      expect(msg.from).toBe("proj:alice@test");
       expect(msg.message_id).toBeDefined();
       expect(msg.timestamp).toBeDefined();
-      expect(msg.to).toBe("bob@test");
+      expect(msg.to).toBe("proj:bob@test");
 
       // Sender gets success response
       const resp = await alice.waitForMessage(
@@ -277,11 +283,13 @@ describe("e2e integration", () => {
     });
 
     test("sending to offline agent returns error", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
 
       send(alice.ws, {
         action: "send",
-        to: "charlie@test",
+        to: "proj:charlie@test",
         content: "hello",
         type: "message",
         requestId: "send2",
@@ -299,12 +307,12 @@ describe("e2e integration", () => {
   // ── Short name addressing ──────────────────────────────────────────────
 
   describe("short name addressing", () => {
-    test("unique short name resolves correctly", async () => {
+    test("unique session name resolves correctly", async () => {
       const proj = trackConnection(
-        await connectAgent(hub.port, "myproject@laptop"),
+        await connectAgent(hub.port, "myproject:alice@laptop"),
       );
       const other = trackConnection(
-        await connectAgent(hub.port, "other@desktop"),
+        await connectAgent(hub.port, "other:bob@desktop"),
       );
 
       send(other.ws, {
@@ -319,15 +327,15 @@ describe("e2e integration", () => {
         (m) => m.event === "message" && m.content === "short name test",
       );
 
-      expect(msg.from).toBe("other@desktop");
-      expect(msg.to).toBe("myproject@laptop");
+      expect(msg.from).toBe("other:bob@desktop");
+      expect(msg.to).toBe("myproject:alice@laptop");
     });
 
-    test("ambiguous short name returns error", async () => {
-      trackConnection(await connectAgent(hub.port, "myproject@laptop"));
-      trackConnection(await connectAgent(hub.port, "myproject@desktop"));
+    test("ambiguous session name returns error", async () => {
+      trackConnection(await connectAgent(hub.port, "myproject:alice@laptop"));
+      trackConnection(await connectAgent(hub.port, "myproject:bob@desktop"));
       const sender = trackConnection(
-        await connectAgent(hub.port, "sender@test"),
+        await connectAgent(hub.port, "sender:carol@test"),
       );
 
       send(sender.ws, {
@@ -344,8 +352,56 @@ describe("e2e integration", () => {
 
       expect(resp.ok).toBe(false);
       expect(resp.error).toContain("Multiple agents match");
-      expect(resp.error).toContain("myproject@laptop");
-      expect(resp.error).toContain("myproject@desktop");
+      expect(resp.error).toContain("myproject:alice@laptop");
+      expect(resp.error).toContain("myproject:bob@desktop");
+    });
+
+    test("resolve by user@host across sessions", async () => {
+      const proj = trackConnection(
+        await connectAgent(hub.port, "myproject:alice@laptop"),
+      );
+      const sender = trackConnection(
+        await connectAgent(hub.port, "other:bob@desktop"),
+      );
+
+      send(sender.ws, {
+        action: "send",
+        to: "alice@laptop",
+        content: "user@host test",
+        type: "message",
+        requestId: "uh1",
+      });
+
+      const msg = await proj.waitForMessage(
+        (m) => m.event === "message" && m.content === "user@host test",
+      );
+
+      expect(msg.from).toBe("other:bob@desktop");
+      expect(msg.to).toBe("myproject:alice@laptop");
+    });
+
+    test("resolve by session:user across hosts", async () => {
+      const proj = trackConnection(
+        await connectAgent(hub.port, "myproject:alice@laptop"),
+      );
+      const sender = trackConnection(
+        await connectAgent(hub.port, "other:bob@desktop"),
+      );
+
+      send(sender.ws, {
+        action: "send",
+        to: "myproject:alice",
+        content: "session:user test",
+        type: "message",
+        requestId: "su1",
+      });
+
+      const msg = await proj.waitForMessage(
+        (m) => m.event === "message" && m.content === "session:user test",
+      );
+
+      expect(msg.from).toBe("other:bob@desktop");
+      expect(msg.to).toBe("myproject:alice@laptop");
     });
   });
 
@@ -353,10 +409,14 @@ describe("e2e integration", () => {
 
   describe("broadcast", () => {
     test("delivered to all except sender", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
       const charlie = trackConnection(
-        await connectAgent(hub.port, "charlie@test"),
+        await connectAgent(hub.port, "proj:charlie@test"),
       );
 
       // Clear any prior messages
@@ -373,12 +433,12 @@ describe("e2e integration", () => {
       const bobMsg = await bob.waitForMessage(
         (m) => m.event === "message" && m.content === "hello everyone",
       );
-      expect(bobMsg.from).toBe("alice@test");
+      expect(bobMsg.from).toBe("proj:alice@test");
 
       const charlieMsg = await charlie.waitForMessage(
         (m) => m.event === "message" && m.content === "hello everyone",
       );
-      expect(charlieMsg.from).toBe("alice@test");
+      expect(charlieMsg.from).toBe("proj:alice@test");
 
       // Sender gets response with delivered_to count
       const resp = await alice.waitForMessage(
@@ -401,8 +461,12 @@ describe("e2e integration", () => {
 
   describe("team operations", () => {
     test("join, send to team, leave, team deleted", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
 
       // Alice joins backend
       send(alice.ws, {
@@ -415,7 +479,7 @@ describe("e2e integration", () => {
       );
       expect(joinResp1.ok).toBe(true);
       const joinData1 = joinResp1.data as Msg;
-      expect(joinData1.members).toContain("alice@test");
+      expect(joinData1.members).toContain("proj:alice@test");
 
       // Bob joins backend
       send(bob.ws, {
@@ -428,7 +492,7 @@ describe("e2e integration", () => {
       );
       expect(joinResp2.ok).toBe(true);
       const joinData2 = joinResp2.data as Msg;
-      expect(joinData2.members).toContain("bob@test");
+      expect(joinData2.members).toContain("proj:bob@test");
 
       // Alice sends to team
       bob.messages.length = 0;
@@ -445,7 +509,7 @@ describe("e2e integration", () => {
         (m) => m.event === "message" && m.content === "team msg",
       );
       expect(bobTeamMsg.team).toBe("backend");
-      expect(bobTeamMsg.from).toBe("alice@test");
+      expect(bobTeamMsg.from).toBe("proj:alice@test");
 
       // Alice should NOT receive her own team message
       await tick();
@@ -489,7 +553,9 @@ describe("e2e integration", () => {
 
   describe("team edge cases", () => {
     test("send to nonexistent team returns error", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
 
       send(alice.ws, {
         action: "send_team",
@@ -507,7 +573,9 @@ describe("e2e integration", () => {
     });
 
     test("send to team with only sender as member returns error", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
 
       send(alice.ws, {
         action: "join_team",
@@ -538,8 +606,12 @@ describe("e2e integration", () => {
 
   describe("disconnect and reconnect", () => {
     test("team membership preserved within timeout", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
 
       // Alice joins backend
       send(alice.ws, {
@@ -561,7 +633,7 @@ describe("e2e integration", () => {
         (m) => m.event === "response" && m.requestId === "la1",
       );
       const agents = listResp.data as Msg[];
-      const aliceEntry = agents.find((a) => a.name === "alice@test");
+      const aliceEntry = agents.find((a) => a.name === "proj:alice@test");
       expect(aliceEntry).toBeDefined();
       expect(aliceEntry?.status).toBe("offline");
 
@@ -574,9 +646,9 @@ describe("e2e integration", () => {
       const backendTeam = teamList.find((t) => t.name === "backend");
       expect(backendTeam).toBeDefined();
 
-      // Reconnect as alice@test
+      // Reconnect as proj:alice@test
       const alice2 = trackConnection(
-        await connectAgent(hub.port, "alice@test"),
+        await connectAgent(hub.port, "proj:alice@test"),
       );
 
       // Verify alice is online again
@@ -585,7 +657,7 @@ describe("e2e integration", () => {
         (m) => m.event === "response" && m.requestId === "la2",
       );
       const agents2 = listResp2.data as Msg[];
-      const aliceEntry2 = agents2.find((a) => a.name === "alice@test");
+      const aliceEntry2 = agents2.find((a) => a.name === "proj:alice@test");
       expect(aliceEntry2).toBeDefined();
       expect(aliceEntry2?.status).toBe("online");
       expect(aliceEntry2?.teams).toContain("backend");
@@ -596,8 +668,12 @@ describe("e2e integration", () => {
 
   describe("disconnect timeout", () => {
     test("agent fully removed after timeout expires", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
 
       // Alice joins backend
       send(alice.ws, {
@@ -621,7 +697,7 @@ describe("e2e integration", () => {
         (m) => m.event === "response" && m.requestId === "la-to1",
       );
       const agents = listResp.data as Msg[];
-      const aliceEntry = agents.find((a) => a.name === "alice@test");
+      const aliceEntry = agents.find((a) => a.name === "proj:alice@test");
       expect(aliceEntry).toBeUndefined();
 
       // Team should be deleted
@@ -649,24 +725,25 @@ describe("e2e integration", () => {
 
       // Register an agent
       const agent = trackConnection(
-        await connectAgent(hub.port, "dash-agent@test"),
+        await connectAgent(hub.port, "dash-agent:tester@test"),
       );
 
       const connectedEvt = await dashboard.waitForMessage(
         (m) =>
-          m.event === "agent:connected" && m.full_name === "dash-agent@test",
+          m.event === "agent:connected" &&
+          m.full_name === "dash-agent:tester@test",
       );
       expect(connectedEvt.name).toBe("dash-agent");
 
       // Send a message (need a second agent to receive it)
-      trackConnection(await connectAgent(hub.port, "dash-recv@test"));
+      trackConnection(await connectAgent(hub.port, "dash-recv:tester@test"));
       // Clear dashboard messages after receiver connects
       await tick();
       dashboard.messages.length = 0;
 
       send(agent.ws, {
         action: "send",
-        to: "dash-recv@test",
+        to: "dash-recv:tester@test",
         content: "dashboard test",
         type: "message",
         requestId: "ds1",
@@ -675,7 +752,7 @@ describe("e2e integration", () => {
       const routedEvt = await dashboard.waitForMessage(
         (m) => m.event === "message:routed",
       );
-      expect(routedEvt.from).toBe("dash-agent@test");
+      expect(routedEvt.from).toBe("dash-agent:tester@test");
       expect(routedEvt.content).toBe("dashboard test");
 
       // Join a team
@@ -693,7 +770,7 @@ describe("e2e integration", () => {
           m.team === "dashteam" &&
           m.action === "created",
       );
-      expect(teamCreatedEvt.members).toContain("dash-agent@test");
+      expect(teamCreatedEvt.members).toContain("dash-agent:tester@test");
 
       // Disconnect agent
       dashboard.messages.length = 0;
@@ -701,7 +778,8 @@ describe("e2e integration", () => {
 
       const disconnectedEvt = await dashboard.waitForMessage(
         (m) =>
-          m.event === "agent:disconnected" && m.full_name === "dash-agent@test",
+          m.event === "agent:disconnected" &&
+          m.full_name === "dash-agent:tester@test",
       );
       expect(disconnectedEvt.name).toBe("dash-agent");
     });
@@ -711,14 +789,16 @@ describe("e2e integration", () => {
 
   describe("REST API", () => {
     test("POST /api/send delivers to agent", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
       alice.messages.length = 0;
 
       const resp = await fetch(`http://localhost:${hub.port}/api/send`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          to: "alice@test",
+          to: "proj:alice@test",
           content: "hello from dashboard",
         }),
       });
@@ -733,8 +813,12 @@ describe("e2e integration", () => {
     });
 
     test("POST /api/broadcast delivers to all agents", async () => {
-      const alice = trackConnection(await connectAgent(hub.port, "alice@test"));
-      const bob = trackConnection(await connectAgent(hub.port, "bob@test"));
+      const alice = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
+      const bob = trackConnection(
+        await connectAgent(hub.port, "proj:bob@test"),
+      );
       alice.messages.length = 0;
       bob.messages.length = 0;
 
@@ -756,18 +840,20 @@ describe("e2e integration", () => {
     });
 
     test("GET /api/agents returns correct list", async () => {
-      trackConnection(await connectAgent(hub.port, "alice@test"));
+      trackConnection(await connectAgent(hub.port, "proj:alice@test"));
 
       const resp = await fetch(`http://localhost:${hub.port}/api/agents`);
       expect(resp.status).toBe(200);
       const body = (await resp.json()) as Msg[];
-      const alice = body.find((a) => a.name === "alice@test");
+      const alice = body.find((a) => a.name === "proj:alice@test");
       expect(alice).toBeDefined();
       expect(alice?.status).toBe("online");
     });
 
     test("GET /api/teams returns correct list", async () => {
-      const agent = trackConnection(await connectAgent(hub.port, "alice@test"));
+      const agent = trackConnection(
+        await connectAgent(hub.port, "proj:alice@test"),
+      );
       send(agent.ws, {
         action: "join_team",
         team: "apiteam",
@@ -787,7 +873,7 @@ describe("e2e integration", () => {
     });
 
     test("GET /api/status returns uptime and counts", async () => {
-      trackConnection(await connectAgent(hub.port, "alice@test"));
+      trackConnection(await connectAgent(hub.port, "proj:alice@test"));
 
       const resp = await fetch(`http://localhost:${hub.port}/api/status`);
       expect(resp.status).toBe(200);

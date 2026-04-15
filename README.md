@@ -7,13 +7,13 @@ Agent-to-agent messaging for Claude Code sessions on a LAN.
 ### 1. Start the hub
 
 ```bash
-docker run -d -p 4815:4815 claude-net
+docker run -d -p 4815:4815 ghcr.io/andrewleech/claude-net
 ```
 
 Or with a custom hostname (for non-localhost access):
 
 ```bash
-docker run -d -p 4815:4815 -e CLAUDE_NET_HOST=mybox.local claude-net
+docker run -d -p 4815:4815 -e CLAUDE_NET_HOST=mybox.local ghcr.io/andrewleech/claude-net
 ```
 
 ### 2. Register Claude Code

@@ -31,13 +31,13 @@ HUB="${host}"
 
 echo "Registering claude-net MCP server..."
 claude mcp add \\
+  --scope user \\
   -e CLAUDE_NET_HUB=http://\${HUB} \\
   --transport stdio \\
   claude-net -- bash -c 'P=$(mktemp /tmp/claude-net-plugin.XXXXXX.ts) && curl -fsSL \${CLAUDE_NET_HUB}/plugin.ts -o "\$P" && exec bun run "\$P"'
 
 echo ""
-echo "claude-net registered. Start Claude Code with:"
-echo "  claude --dangerously-load-development-channels server:claude-net"
+echo "claude-net registered (user-wide). Restart Claude Code to activate."
 `;
   });
 }

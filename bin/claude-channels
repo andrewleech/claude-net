@@ -51,13 +51,22 @@ find_channel_servers() {
 
     python3 -c "
 import json
+seen = set()
 try:
     with open('$config') as f:
         d = json.load(f)
+    # User-wide MCP servers
+    for name in d.get('mcpServers', {}).keys():
+        if name not in seen:
+            seen.add(name)
+            print(f'server:{name}')
+    # Project-scoped MCP servers for current directory
     for proj_path, proj in d.get('projects', {}).items():
         if proj_path == '$cwd':
             for name in proj.get('mcpServers', {}).keys():
-                print(f'server:{name}')
+                if name not in seen:
+                    seen.add(name)
+                    print(f'server:{name}')
 except Exception:
     pass
 " 2>/dev/null || true

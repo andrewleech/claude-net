@@ -1,0 +1,56 @@
+#!/bin/bash
+set -euo pipefail
+# Install the claude-net statusline script into Claude Code.
+#
+# Copies statusline.py to ~/.claude/ and configures settings.json
+# to use it (with optional refreshInterval for live updates).
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-statusline | bash
+#   # or from a local clone:
+#   ./bin/install-statusline
+
+DEST="$HOME/.claude/statusline.py"
+SETTINGS="$HOME/.claude/settings.json"
+
+# Determine source
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || echo "")"
+
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/statusline.py" ]; then
+    cp "$SCRIPT_DIR/statusline.py" "$DEST"
+else
+    curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/statusline.py -o "$DEST"
+fi
+
+chmod +x "$DEST"
+
+# Configure settings.json
+python3 -c "
+import json, os
+
+path = '$SETTINGS'
+try:
+    with open(path) as f:
+        d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+
+current = d.get('statusLine', {})
+command = 'python3 \"$DEST\"'
+
+if current.get('command') == command:
+    print('Statusline already configured.')
+else:
+    d['statusLine'] = {
+        'type': 'command',
+        'command': command,
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(d, f, indent=2)
+        f.write('\n')
+    print('Statusline configured in settings.json')
+
+print(f'Script: {\"$DEST\"}')
+print('Restart Claude Code to activate.')
+"

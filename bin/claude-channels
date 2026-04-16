@@ -14,7 +14,7 @@ set -euo pipefail
 # Usage: claude-channels [claude args...]
 
 CACHE_DIR="$HOME/.local/share/claude-channels"
-PATCHED_CLI="$CACHE_DIR/claude-patched"
+PATCHED_LINK="$CACHE_DIR/claude-patched"
 SOURCE_MARKER="$CACHE_DIR/source_path"
 PATCHER="$(cd "$(dirname "$0")" && pwd)/patch-binary.py"
 
@@ -75,20 +75,21 @@ except Exception:
 CLI_PATH=$(find_claude_binary)
 mkdir -p "$CACHE_DIR"
 
-# Patch binary if needed
-needs_regen=false
-if [ ! -f "$PATCHED_CLI" ]; then
-    needs_regen=true
-elif [ "$CLI_PATH" -nt "$PATCHED_CLI" ]; then
-    needs_regen=true
-elif [ -f "$SOURCE_MARKER" ] && [ "$(cat "$SOURCE_MARKER")" != "$CLI_PATH" ]; then
-    needs_regen=true
+# Determine version and versioned patch path
+VERSION=$("$CLI_PATH" --version 2>/dev/null | head -1 | awk '{print $1}')
+if [ -z "$VERSION" ]; then
+    VERSION="unknown"
 fi
+PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${VERSION}"
 
-if $needs_regen; then
-    python3 "$PATCHER" "$CLI_PATH" "$PATCHED_CLI"
+# Patch if this version hasn't been patched yet
+if [ ! -f "$PATCHED_VERSIONED" ]; then
+    python3 "$PATCHER" "$CLI_PATH" "$PATCHED_VERSIONED"
     echo "$CLI_PATH" > "$SOURCE_MARKER"
 fi
+
+# Symlink to the common name (atomic update, safe even if old version is running)
+ln -snf "$PATCHED_VERSIONED" "$PATCHED_LINK"
 
 # Build extra flags
 EXTRA_ARGS=()
@@ -106,4 +107,4 @@ if ! $already_has_channels; then
     [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
 fi
 
-exec "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"
+exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"

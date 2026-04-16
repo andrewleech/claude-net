@@ -43,10 +43,12 @@ PATCHES = [
     {
         "name": "Channel allowlist bypass",
         # Variable name before .dev changes per build (f in 2.1.108, z in 2.1.87)
+        # Replace !VAR.dev (6 bytes) with !1     (6 bytes) — always false.
+        # Can't just remove the ! (inverting to VAR.dev) because dev entries would then skip.
         "pattern": rb'if\(![a-zA-Z0-9_$]+\.dev\)return\{action:"skip",kind:"allowlist"',
         "type": "regex_replace",
-        "find": b"if(!", # 4 bytes
-        "replace": b"if( ", # 4 bytes (space replaces !, makes condition always falsy)
+        "find_regex": rb"!\w+\.dev",
+        "replace_fn": "always_false",
         "diag_anchor": b'kind:"allowlist"',
     },
     {
@@ -60,14 +62,11 @@ PATCHES = [
     },
     {
         "name": "Channel notification suppression",
-        # The TJ1 function generates UI notifications about channel problems.
-        # For server-type entries, it pushes a "server: entries need
-        # --dangerously-load-development-channels" message when !Y.dev.
-        # Same technique as patch 3: replace if(!VAR.dev) with if( VAR.dev)
+        # Same as patch 3: replace !VAR.dev with always-false.
         "pattern": rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"server: entries need',
         "type": "regex_replace",
-        "find": b"if(!",
-        "replace": b"if( ",
+        "find_regex": rb"!\w+\.dev",
+        "replace_fn": "always_false",
         "diag_anchor": b'why:"server: entries need',
     },
 ]
@@ -139,7 +138,18 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str], int, int]:
                 log.append(f"  Patch {i}: {name} -- {len(matches)} match(es)")
                 for m in reversed(matches):
                     orig = m.group(0)
-                    repl = orig.replace(patch["find"], patch["replace"], 1)
+                    if "find_regex" in patch:
+                        # Regex-based sub-replacement within the match
+                        fn = patch["replace_fn"]
+                        if fn == "always_false":
+                            # Replace matched sub-expression with !1 + spaces (same length)
+                            def _sub(sub_m: re.Match[bytes]) -> bytes:
+                                return b"!1" + b" " * (len(sub_m.group(0)) - 2)
+                            repl = re.sub(patch["find_regex"], _sub, orig, count=1)
+                        else:
+                            repl = orig  # unknown fn, no change
+                    else:
+                        repl = orig.replace(patch["find"], patch["replace"], 1)
                     data = data[: m.start()] + repl + data[m.end() :]
                 applied += 1
             else:

@@ -104,10 +104,39 @@ PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${HASH}"
 
 # Patch if this hash hasn't been patched yet
 if [ ! -f "$PATCHED_VERSIONED" ]; then
-    python3 "$PATCHER" "$CLI_PATH" "$PATCHED_VERSIONED"
+    patch_exit=0
+    python3 "$PATCHER" "$CLI_PATH" "$PATCHED_VERSIONED" || patch_exit=$?
 
-    # Clean up old versioned files (keep only the new one)
-    find "$CACHE_DIR" -name 'claude-patched-*' ! -name "claude-patched-${HASH}" -delete 2>/dev/null || true
+    if [ "$patch_exit" -eq 1 ]; then
+        # Fatal error — patched binary is unusable
+        rm -f "$PATCHED_VERSIONED"
+        echo "Fatal patching error. Falling back to unpatched binary." >&2
+        PATCHED_VERSIONED="$CLI_PATH"
+    elif [ "$patch_exit" -eq 2 ]; then
+        # Partial success — some patches failed
+        # Check if there's a previous working version to fall back to
+        PREV_PATCHED="$(readlink -f "$PATCHED_LINK" 2>/dev/null || true)"
+        if [ -n "$PREV_PATCHED" ] && [ -f "$PREV_PATCHED" ] && [ "$PREV_PATCHED" != "$PATCHED_VERSIONED" ]; then
+            echo "" >&2
+            echo "  A previous working patched binary exists: $(basename "$PREV_PATCHED")" >&2
+            echo "  Press Enter to use it, or Ctrl-C to abort." >&2
+            read -r < /dev/tty 2>/dev/null || true
+            rm -f "$PATCHED_VERSIONED"
+            PATCHED_VERSIONED="$PREV_PATCHED"
+        else
+            echo "" >&2
+            echo "  No previous version available. Continuing with partial patches." >&2
+            echo "  Press Enter to continue, or Ctrl-C to abort." >&2
+            read -r < /dev/tty 2>/dev/null || true
+        fi
+    fi
+
+    # Clean up old versioned files (keep current + any fallback target)
+    if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ]; then
+        find "$CACHE_DIR" -name 'claude-patched-*' \
+            ! -name "$(basename "$PATCHED_VERSIONED")" \
+            -delete 2>/dev/null || true
+    fi
 fi
 
 # Symlink to the common name (atomic update, safe even if old version is running)

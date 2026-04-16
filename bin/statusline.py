@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, shutil, sys, io, os, socket, re, glob, time
+import json, sys, io, os, socket, re, glob, time
 
 if os.environ.get("VSCODE_PID"):
     sys.exit(0)
@@ -222,12 +222,24 @@ if cn_state:
         fields.append(f"{YELLOW}{short_name}○{RESET}")
 
 # ── Layout: wrap fields to fit terminal width ───────────────────────────
-# Terminal width from COLUMNS env (set by some terminals), or fallback.
-# shutil.get_terminal_size checks COLUMNS env, then ioctl, then fallback.
-term_cols = shutil.get_terminal_size(fallback=(0, 0)).columns
+# stdin/stdout/stderr are all pipes so os.get_terminal_size() fails.
+# /dev/tty connects to the controlling terminal regardless of redirections.
+
+
+def get_terminal_cols():
+    """Get terminal width via /dev/tty (works even when stdio is piped)."""
+    try:
+        import fcntl, termios, struct
+        with open("/dev/tty") as tty:
+            result = fcntl.ioctl(tty.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
+            return struct.unpack("HHHH", result)[1]
+    except Exception:
+        return 0
+
+
+term_cols = get_terminal_cols()
 
 if term_cols <= 0:
-    # No width info — output single line, no wrapping
     print(" ".join(fields))
 else:
     lines = []

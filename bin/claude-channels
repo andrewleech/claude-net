@@ -35,30 +35,31 @@ find_claude_binary() {
         echo "$CLAUDE_CLI_PATH"; return 0
     fi
 
-    # Check PATH (may miss ~/.local/bin in non-interactive shells)
+    # Prefer the native binary at known locations (avoids picking up
+    # npm/bun global installs which resolve to cli.js instead)
+    local candidate resolved
+    for candidate in \
+        "$HOME/.local/bin/claude" \
+        "$HOME/.claude/local/claude" \
+        "$HOME/.local/share/claude/versions/"*; do
+        if [ -f "$candidate" ]; then
+            resolved=$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")
+            if [ -f "$resolved" ] && file "$resolved" 2>/dev/null | grep -q "ELF"; then
+                echo "$resolved"; return 0
+            fi
+        fi
+    done
+
+    # Fallback: PATH resolution (may find npm/bun cli.js — still works
+    # but the patcher won't apply binary patches to a JS file)
     local claude_bin
     claude_bin=$(which claude 2>/dev/null || true)
     if [ -n "$claude_bin" ]; then
-        local resolved
         resolved=$(readlink -f "$claude_bin" 2>/dev/null || echo "$claude_bin")
         if [ -f "$resolved" ]; then
             echo "$resolved"; return 0
         fi
     fi
-
-    # Common install locations
-    local candidate
-    for candidate in \
-        "$HOME/.local/bin/claude" \
-        "$HOME/.local/share/claude/versions/"*; do
-        if [ -f "$candidate" ]; then
-            local resolved
-            resolved=$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")
-            if [ -f "$resolved" ]; then
-                echo "$resolved"; return 0
-            fi
-        fi
-    done
 
     echo "ERROR: Could not find Claude Code binary." >&2
     return 1

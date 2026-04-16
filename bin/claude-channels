@@ -1,16 +1,14 @@
 #!/bin/bash
 set -euo pipefail
-# claude-channels: Run Claude Code with all restrictions bypassed.
+# claude-channels: Run Claude Code with channel restrictions bypassed.
 #
 # Binary patches (same-length, native binary safe):
-# 1. Channels feature gate (tengu_harbor Statsig flag → true)
+# 1. Channels feature gate (tengu_harbor Statsig flag -> true)
 # 2. Org policy channelsEnabled check (inverted so it never blocks)
-# 3. Bypass permissions gate (tengu_disable_bypass_permissions_mode → false)
-# 4. Channel allowlist bypass (non-dev entries skip allowlist check)
-# 5. Dev channels dialog auto-accept (no approval prompt on startup)
+# 3. Channel allowlist bypass (non-dev entries skip allowlist check)
+# 4. Dev channels dialog auto-accept (no approval prompt on startup)
 #
 # CLI flags auto-injected:
-# - --dangerously-skip-permissions
 # - --dangerously-load-development-channels server:X (for each configured MCP server)
 #
 # Usage: claude-channels [claude args...]
@@ -94,12 +92,6 @@ fi
 
 # Build extra flags
 EXTRA_ARGS=()
-
-has_skip_perms=false
-for arg in "$@"; do
-    [[ "$arg" == "--dangerously-skip-permissions" ]] && has_skip_perms=true && break
-done
-$has_skip_perms || EXTRA_ARGS+=(--dangerously-skip-permissions)
 
 already_has_channels=false
 for arg in "$@"; do

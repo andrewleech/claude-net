@@ -124,25 +124,7 @@ channelsEnabled!==!0  →  channelsEnabled===!0
 
 **Expected matches:** 4 (the string appears in the gate function, error messages, and schema)
 
-### Patch 3: Bypass permissions gate
-
-**What it bypasses:** The `tengu_disable_bypass_permissions_mode` Statsig flag that prevents `--dangerously-skip-permissions` from working on some accounts.
-
-**Original code pattern:**
-```javascript
-function FUNC(){return GATE("tengu_disable_bypass_permissions_mode")}
-```
-
-**Regex to find it:**
-```python
-rb'\{return [a-zA-Z0-9_$]+\("tengu_disable_bypass_permissions_mode"\)\}'
-```
-
-**Replacement:** `{return!1` + spaces + `}` (same length — function always returns `false`, meaning "not disabled")
-
-**Expected matches:** 2
-
-### Patch 4: Channel allowlist bypass
+### Patch 3: Channel allowlist bypass
 
 **What it bypasses:** Non-dev channel entries (from `--channels` flag) are checked against an allowlist. Servers not on the list are rejected.
 
@@ -162,7 +144,7 @@ if(false )return{action:"skip",kind:"allowlist"
 
 **Expected matches:** 2
 
-### Patch 5: Dev channels dialog auto-accept
+### Patch 4: Dev channels dialog auto-accept
 
 **What it bypasses:** When `--dangerously-load-development-channels` is used, a prompt asks the user to confirm "I am using this for local development" before proceeding.
 

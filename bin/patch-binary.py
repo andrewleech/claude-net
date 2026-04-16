@@ -41,9 +41,11 @@ PATCHES = [
     },
     {
         "name": "Channel allowlist bypass",
-        "pattern": b'if(!f.dev)return{action:"skip",kind:"allowlist"',
-        "type": "literal",
-        "replacement": b'if(false )return{action:"skip",kind:"allowlist"',
+        # Variable name before .dev changes per build (f in 2.1.108, z in 2.1.87)
+        "pattern": rb'if\(![a-zA-Z0-9_$]+\.dev\)return\{action:"skip",kind:"allowlist"',
+        "type": "regex_replace",
+        "find": b"if(!", # 4 bytes
+        "replace": b"if( ", # 4 bytes (space replaces !, makes condition always falsy)
         "diag_anchor": b'kind:"allowlist"',
     },
     {

@@ -1,0 +1,8 @@
+services:
+  hub:
+    image: ghcr.io/andrewleech/claude-net:latest
+    ports:
+      - "4815:4815"
+    environment:
+      - CLAUDE_NET_PORT=4815
+    restart: unless-stopped

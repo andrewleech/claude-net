@@ -1,0 +1,50 @@
+#!/bin/bash
+set -euo pipefail
+# Install claude-channels launcher to ~/.local/bin/
+#
+# Downloads the two patcher files from the repo (or copies from local clone)
+# and creates a symlink at ~/.local/bin/claude-channels.
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+#   # or from a local clone:
+#   ./bin/install-channels
+
+INSTALL_DIR="$HOME/.local/share/claude-channels/bin"
+BIN_DIR="$HOME/.local/bin"
+REPO_RAW="https://raw.githubusercontent.com/andrewleech/claude-net/main/bin"
+
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+
+# Determine source: local clone or remote
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null || echo ".")" && pwd)"
+
+if [ -f "$SCRIPT_DIR/claude-channels" ] && [ -f "$SCRIPT_DIR/patch-binary.py" ]; then
+    echo "Installing from local clone..."
+    cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
+    cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"
+else
+    echo "Downloading from GitHub..."
+    curl -fsSL "$REPO_RAW/claude-channels" -o "$INSTALL_DIR/claude-channels"
+    curl -fsSL "$REPO_RAW/patch-binary.py" -o "$INSTALL_DIR/patch-binary.py"
+fi
+
+chmod +x "$INSTALL_DIR/claude-channels"
+
+# Symlink to PATH
+ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
+
+echo ""
+echo "Installed claude-channels to $BIN_DIR/claude-channels"
+echo ""
+echo "Usage: claude-channels [claude args...]"
+echo ""
+
+# Check if ~/.local/bin is in PATH
+if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
+    echo "NOTE: $BIN_DIR is not in your PATH. Add it:"
+    echo "  export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+fi
+
+echo "Run 'claude-channels' instead of 'claude' to enable channels."

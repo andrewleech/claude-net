@@ -56,6 +56,11 @@ export interface ListTeamsFrame {
   requestId?: string;
 }
 
+export interface PingFrame {
+  action: "ping";
+  requestId?: string;
+}
+
 export type PluginFrame =
   | RegisterFrame
   | SendFrame
@@ -64,7 +69,8 @@ export type PluginFrame =
   | JoinTeamFrame
   | LeaveTeamFrame
   | ListAgentsFrame
-  | ListTeamsFrame;
+  | ListTeamsFrame
+  | PingFrame;
 
 // ── Hub → Plugin frames (discriminated union on `event`) ──────────────────
 

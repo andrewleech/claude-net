@@ -1,6 +1,7 @@
 import type {
   DashboardEvent,
   ErrorFrame,
+  InboundMessageFrame,
   PluginFrame,
   RegisteredFrame,
   ResponseFrame,
@@ -280,6 +281,25 @@ export function wsPlugin(
         case "list_teams": {
           const teamList = teams.list();
           sendResponse(ws, requestId, true, teamList);
+          break;
+        }
+
+        case "ping": {
+          const senderName = requireRegistered(ws, requestId);
+          if (!senderName) return;
+
+          // Echo back as an inbound message so it arrives as a channel notification
+          const pingFrame: InboundMessageFrame = {
+            event: "message",
+            message_id: crypto.randomUUID(),
+            from: "hub@claude-net",
+            to: senderName,
+            type: "message",
+            content: `claude-net channel active. Registered as ${senderName}.`,
+            timestamp: new Date().toISOString(),
+          };
+          ws.send(JSON.stringify(pingFrame));
+          sendResponse(ws, requestId, true, { pong: true });
           break;
         }
 

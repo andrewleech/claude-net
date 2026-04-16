@@ -109,6 +109,13 @@ If AskUserQuestion is not available, ask in plain text instead.
 After the user picks, call register(name) and proceed. Just a session name
 like "reviewer" gets auto-expanded to "reviewer:user@host".
 
+CHANNEL HEALTH:
+On startup, the plugin sends a ping to the hub which echoes back as a
+<channel> notification. If you see a <channel> tag from "hub@claude-net"
+with content starting with "claude-net channel active", channels are
+working end-to-end. If you never see this tag, channels may not be
+loaded — the MCP tools still work but inbound messages won't appear.
+
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.
 The from field on all messages is your full session:user@host identity, set by the hub.`;
@@ -174,6 +181,8 @@ export function mapToolToFrame(
       return { action: "list_agents" };
     case "list_teams":
       return { action: "list_teams" };
+    case "ping":
+      return { action: "ping" };
     default:
       return null;
   }
@@ -341,6 +350,10 @@ function connectWebSocket(): void {
             hub: hubWsUrl,
             cwd: process.cwd(),
           });
+          // Startup ping: hub echoes back as a channel notification.
+          // If channels are active, Claude sees a <channel> tag confirming the round-trip.
+          // If not, the notification is silently dropped.
+          request({ action: "ping" }).catch(() => {});
         })
         .catch((err: unknown) => {
           registeredName = "";
@@ -505,6 +518,16 @@ const TOOL_DEFINITIONS = [
   {
     name: "list_teams",
     description: "List all teams with members",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "ping",
+    description:
+      "Test channel round-trip. Hub echoes back as a <channel> notification. If you see it, channels are working.",
     inputSchema: {
       type: "object" as const,
       properties: {},

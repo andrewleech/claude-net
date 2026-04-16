@@ -4,11 +4,12 @@ set -euo pipefail
 # MCP channel support without manual CLI flags or approval prompts.
 #
 # Patches the Claude Code binary (same-length replacements, original untouched)
-# to bypass four channel-related restrictions:
+# to bypass five channel-related restrictions:
 #   1. Feature gate    -- tengu_harbor Statsig flag forced true
 #   2. Org policy      -- channelsEnabled check inverted (never blocks)
-#   3. Allowlist       -- non-dev channel entries skip allowlist check
+#   3. Allowlist gate  -- non-dev channel entries skip allowlist check
 #   4. Dialog          -- dev channels approval prompt auto-accepted
+#   5. Notification    -- suppress stale allowlist warning toast
 #
 # Auto-detects MCP servers from ~/.claude.json and injects
 # --dangerously-load-development-channels for each.

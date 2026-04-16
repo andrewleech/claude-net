@@ -8,8 +8,9 @@ preserving the binary's embedded payload offsets and checksums.
 Patches applied (all channel-related):
 1. Channels feature gate (tengu_harbor -> true)
 2. Org policy channelsEnabled inversion
-3. Channel allowlist bypass (!f.dev -> false)
+3. Channel allowlist gate bypass
 4. Dev channels dialog auto-accept
+5. Channel notification suppression (stale allowlist toast)
 
 Exit codes:
   0 = all patches applied
@@ -56,6 +57,18 @@ PATCHES = [
         "replace": b"|| ",
         "diag_anchor": b"accessToken)Ai(\x5b",  # Ai may change; anchor is just for diag search
         "diag_fallback_anchor": b".accessToken)",
+    },
+    {
+        "name": "Channel notification suppression",
+        # The TJ1 function generates UI notifications about channel problems.
+        # For server-type entries, it pushes a "server: entries need
+        # --dangerously-load-development-channels" message when !Y.dev.
+        # Same technique as patch 3: replace if(!VAR.dev) with if( VAR.dev)
+        "pattern": rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"server: entries need',
+        "type": "regex_replace",
+        "find": b"if(!",
+        "replace": b"if( ",
+        "diag_anchor": b'why:"server: entries need',
     },
 ]
 

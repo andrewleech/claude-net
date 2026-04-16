@@ -1,17 +1,27 @@
 #!/bin/bash
 set -euo pipefail
-# claude-channels: Run Claude Code with channel restrictions bypassed.
+# claude-channels: Drop-in replacement for the `claude` command that enables
+# MCP channel support without manual CLI flags or approval prompts.
 #
-# Binary patches (same-length, native binary safe):
-# 1. Channels feature gate (tengu_harbor Statsig flag -> true)
-# 2. Org policy channelsEnabled check (inverted so it never blocks)
-# 3. Channel allowlist bypass (non-dev entries skip allowlist check)
-# 4. Dev channels dialog auto-accept (no approval prompt on startup)
+# Patches the Claude Code binary (same-length replacements, original untouched)
+# to bypass four channel-related restrictions:
+#   1. Feature gate    -- tengu_harbor Statsig flag forced true
+#   2. Org policy      -- channelsEnabled check inverted (never blocks)
+#   3. Allowlist       -- non-dev channel entries skip allowlist check
+#   4. Dialog          -- dev channels approval prompt auto-accepted
 #
-# CLI flags auto-injected:
-# - --dangerously-load-development-channels server:X (for each configured MCP server)
+# Auto-detects MCP servers from ~/.claude.json and injects
+# --dangerously-load-development-channels for each.
 #
-# Usage: claude-channels [claude args...]
+# Patched binaries are cached by hash at ~/.local/share/claude-channels/
+# and re-patched automatically when Claude Code updates.
+#
+# Install:
+#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+#
+# Usage:
+#   claude-channels              # channels enabled, no prompts
+#   claude-channels [any claude args...]
 
 CACHE_DIR="$HOME/.local/share/claude-channels"
 PATCHED_LINK="$CACHE_DIR/claude-patched"

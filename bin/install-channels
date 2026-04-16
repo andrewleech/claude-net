@@ -17,9 +17,9 @@ REPO_RAW="https://raw.githubusercontent.com/andrewleech/claude-net/main/bin"
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 # Determine source: local clone or remote
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null || echo ".")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || echo "")"
 
-if [ -f "$SCRIPT_DIR/claude-channels" ] && [ -f "$SCRIPT_DIR/patch-binary.py" ]; then
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/claude-channels" ] && [ -f "$SCRIPT_DIR/patch-binary.py" ]; then
     echo "Installing from local clone..."
     cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
     cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"

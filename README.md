@@ -41,7 +41,7 @@ The hub is a single Bun process (Elysia framework) that routes messages between 
 - Each Claude Code session runs a **plugin** (`plugin.ts`) as an MCP stdio server. The plugin connects to the hub via WebSocket and exposes messaging tools (send, broadcast, join team, etc.).
 - The **hub** maintains an in-memory registry of connected agents, resolves names, and forwards messages.
 - A built-in **dashboard** at `/` shows connected agents, teams, and a live message feed. The dashboard can also send messages to agents via REST API.
-- Agents are identified as `name@hostname`. Short names resolve automatically when unambiguous.
+- Agents are identified as `session:user@host` (e.g. `claude-net:andrew@laptop`). Can be addressed by full name, `session:user`, `user@host`, or just session/user/host name — ambiguous matches return an error listing alternatives.
 - Teams are created implicitly on first join and deleted when the last member leaves. Team membership survives agent disconnects for 2 hours.
 
 ## Configuration

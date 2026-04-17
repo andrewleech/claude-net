@@ -81,7 +81,7 @@ When reverse-engineering a new gate or check:
 | `?.accessToken` (property access pattern) | Exact function signatures |
 | `{action:"skip",kind:"allowlist"` (return value shape) | Line numbers or byte offsets |
 
-## Current patches (verified on v2.1.108, v2.1.109, v2.1.110)
+## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112)
 
 Implementation: `bin/patch-binary.py`
 
@@ -126,21 +126,21 @@ channelsEnabled!==!0  →  channelsEnabled===!0
 
 ### Patch 3: Channel allowlist bypass
 
-**What it bypasses:** Non-dev channel entries (from `--channels` flag) are checked against an allowlist. Servers not on the list are rejected.
+**What it bypasses:** Channel entries not on the approved allowlist are rejected. The variable name before `.dev` changes per build (`f` in 2.1.108+, `z` in 2.1.87).
 
 **Original code pattern:**
 ```javascript
-if(!f.dev)return{action:"skip",kind:"allowlist",...}
+else if(!f.dev)return{action:"skip",kind:"allowlist",...}
 ```
 
-**Literal find/replace:**
-```
-if(!f.dev)return{action:"skip",kind:"allowlist"
-→
-if(false )return{action:"skip",kind:"allowlist"
+**Regex to find it:**
+```python
+rb'if\(![a-zA-Z0-9_$]+\.dev\)return\{action:"skip",kind:"allowlist"'
 ```
 
-**Why it works:** `!f.dev` (6 bytes) → `false ` (6 bytes, with trailing space). The `if(false)` condition never fires, so the allowlist check is skipped. The `return{action:"skip",...}` becomes dead code.
+**Replacement:** The `!VAR.dev` sub-expression (variable length) is replaced with `!1` + spaces to match the original length. `!1` is always `false`, so the condition never fires.
+
+**Why `!1` instead of removing the `!`:** Simply removing `!` to get `if( f.dev)` inverts the check — dev entries would be skipped instead of non-dev entries. `!1` is unconditionally false regardless of the dev flag.
 
 **Expected matches:** 2
 
@@ -169,15 +169,28 @@ rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)Ai\(\["
 
 **Expected matches:** 2
 
+### Patch 5: Channel notification suppression
+
+**What it bypasses:** A separate notification function (`TJ1`) generates UI toast messages about channel problems. For server-type entries, it shows "server: entries need --dangerously-load-development-channels" when `!Y.dev`.
+
+**Regex to find it:**
+```python
+rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"server: entries need'
+```
+
+**Replacement:** Same as Patch 3 — `!VAR.dev` → `!1` + spaces. The toast notification is suppressed.
+
+**Expected matches:** 2
+
 ## The launcher script
 
 `bin/claude-channels` wraps the patched binary:
 
-1. Finds the Claude Code binary via PATH resolution
-2. Caches a patched copy at `~/.local/share/claude-channels/claude-patched`
-3. Re-patches when the source binary updates (mtime check)
-4. Auto-injects `--dangerously-skip-permissions`
-5. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each
+1. Finds the Claude Code binary (prefers native ELF at known locations over npm/bun installs)
+2. Caches a patched copy at `~/.local/share/claude-channels/claude-patched-{hash}` (hash-based, version-safe)
+3. Re-patches automatically when the binary changes (hash mismatch)
+4. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each
+5. On partial patch failure, prints diagnostics and offers fallback to previous version
 6. Execs the patched binary with all injected + user-provided args
 
 ## Adapting for a new Claude Code version
@@ -210,9 +223,10 @@ python3 bin/patch-binary.py "$BINARY" /tmp/test-patched
 # Expected: "2.1.109 (Claude Code)"
 # If you see "1.3.13" or Bun help text, a patch changed the file size
 
-# Verify specific patches applied
-grep -cP 'return!0.*tengu_harbor' /tmp/test-patched      # Patch 1
-grep -cP 'channelsEnabled===!0' /tmp/test-patched         # Patch 2
-grep -cP 'return!1.*disable_bypass' /tmp/test-patched     # Patch 3
-grep -cP 'if\(false \)return\{action:"skip"' /tmp/test-patched  # Patch 4
+# Verify specific patches applied (each should return 2)
+grep -cP 'return!0.*tengu_harbor' /tmp/test-patched          # Patch 1
+grep -cP 'channelsEnabled===!0' /tmp/test-patched             # Patch 2
+grep -cP 'if\(!1\s+\)return\{action:"skip"' /tmp/test-patched  # Patch 3
+grep -cP '\|\| [a-zA-Z0-9_$]+\(\)\?\.accessToken' /tmp/test-patched  # Patch 4
+grep -cP 'if\(!1\s+\)[a-zA-Z0-9_$]+\.push' /tmp/test-patched  # Patch 5
 ```

@@ -24,18 +24,20 @@ Developers running multiple Claude Code sessions concurrently who want those ses
 ### FR-1: Agent Identity
 
 **FR-1.1: Default identity**
-On startup, the plugin auto-generates an identity in the format `basename(cwd)@hostname`. For example, a session in `/home/user/myproject` on a machine named `laptop` becomes `myproject@laptop`.
+On startup, the plugin auto-generates an identity in the format `session:user@host` where session is `basename(cwd)`, user is the OS username, and host is the hostname. For example, a session in `/home/andrew/myproject` on a machine named `laptop` becomes `myproject:andrew@laptop`.
 
 **FR-1.2: Custom identity**
-The `register` MCP tool allows an agent to override the default name. Custom names follow the same `name@hostname` format but with a user-chosen name component (e.g. `reviewer@laptop`).
+The `register` MCP tool allows an agent to override the default name. A bare name like `reviewer` is auto-expanded to `reviewer:user@host`.
 
 **FR-1.3: Name uniqueness**
 Names are globally unique. The first registration claims a name. The same agent (same WebSocket connection context) can re-register with the same name (reconnect semantics). A different agent attempting the same name receives an error with the message: "Name 'X' is already registered. Choose a different name."
 
 **FR-1.4: Addressing**
 Agents can be addressed by:
-- Full name: `myproject@laptop` — exact match
-- Short name: `myproject` — resolves to the agent with that name prefix. If ambiguous (multiple agents with the same short name on different hosts), the hub returns an error listing the full names.
+- Full name: `myproject:andrew@laptop` — exact match
+- Session + user: `myproject:andrew` — matches across hosts
+- User + host: `andrew@laptop` — matches across sessions
+- Plain string: tries session name, then user name, then host name. If ambiguous, the hub returns an error listing the full names.
 
 **FR-1.5: No persistence**
 Agent names are ephemeral. No settings file is written. On session end, the name is released (subject to team membership timeout per FR-4.4).
@@ -85,21 +87,21 @@ Inbound messages are delivered to Claude Code as `notifications/claude/channel` 
 
 Direct message:
 ```xml
-<channel source="claude-net" from="reviewer@laptop" type="message" message_id="abc123">
+<channel source="claude-net" from="review:andrew@laptop" type="message" message_id="abc123">
   Here's the code review you asked for...
 </channel>
 ```
 
 Reply:
 ```xml
-<channel source="claude-net" from="architect@desktop" type="reply" message_id="def456" reply_to="abc123">
+<channel source="claude-net" from="project:bob@desktop" type="reply" message_id="def456" reply_to="abc123">
   Fixed the issues you found.
 </channel>
 ```
 
 Team message:
 ```xml
-<channel source="claude-net" from="architect@desktop" type="message" message_id="ghi789" team="backend">
+<channel source="claude-net" from="project:bob@desktop" type="message" message_id="ghi789" team="backend">
   Everyone on backend team: avoid modifying src/auth/ for the next hour.
 </channel>
 ```
@@ -141,14 +143,16 @@ The plugin exposes these MCP tools:
 
 | Tool | Parameters | Returns | Description |
 |------|-----------|---------|-------------|
-| `register` | `name: string` | `{name, full_name}` or error | Override default identity |
-| `send_message` | `to: string, content: string, reply_to?: string` | `{message_id, delivered: true}` or error | Send to agent by name |
+| `whoami` | _(none)_ | `{name}` or error | Return current registered name |
+| `register` | `name: string` | `{name, full_name}` or error | Override default identity (bare name auto-expands to session:user@host) |
+| `send_message` | `to: string, content: string, reply_to?: string` | `{message_id, delivered: true}` or error | Send to agent by name (supports all addressing modes) |
 | `broadcast` | `content: string` | `{message_id, delivered_to: number}` | Send to all online agents |
 | `send_team` | `team: string, content: string, reply_to?: string` | `{message_id, delivered_to: number}` or error | Send to team members |
 | `join_team` | `team: string` | `{team, members: string[]}` | Join a team (creates if new) |
 | `leave_team` | `team: string` | `{team, remaining_members: number}` | Leave a team |
 | `list_agents` | _(none)_ | `Agent[]` | List all agents |
 | `list_teams` | _(none)_ | `Team[]` | List all teams with members |
+| `ping` | _(none)_ | `{pong: true}` | Test channel round-trip (hub echoes back as channel notification) |
 
 ### FR-7: MCP Server Instructions
 
@@ -178,8 +182,8 @@ Single TypeScript file (`plugin.ts`) served by the hub. Claude Code spawns it as
 1. Creates an MCP Server with `claude/channel` capability and `tools` capability
 2. Connects to Claude Code over stdio
 3. Opens a WebSocket to the hub using `CLAUDE_NET_HUB` env var
-4. Auto-registers with default name `basename(cwd)@hostname`
-5. Exposes 8 MCP tools
+4. Auto-registers with default name `session:user@host`
+5. Exposes 10 MCP tools
 6. Forwards inbound hub messages as `notifications/claude/channel` notifications
 
 ### WebSocket Protocol
@@ -253,8 +257,9 @@ All in-memory, no persistence:
 ```typescript
 // Agent registry
 Map<string, {
-  fullName: string,          // "myproject@laptop"
+  fullName: string,          // "myproject:andrew@laptop"
   shortName: string,         // "myproject"
+  user: string,              // "andrew"
   host: string,              // "laptop"
   ws: WebSocket,             // live connection
   teams: Set<string>,        // team memberships
@@ -321,7 +326,7 @@ Hub address resolution:
 | Not connected to hub | `"Error: Not connected to hub. Claude Code will auto-connect on next restart, or use register tool."` |
 | Name already taken | `"Error: Name 'X' is already registered by another agent. Choose a different name."` |
 | Recipient not online | `"Error: Agent 'X' is not online."` |
-| Ambiguous short name | `"Error: Multiple agents match 'X': reviewer@laptop, reviewer@desktop. Use the full name."` |
+| Ambiguous short name | `"Error: Multiple agents match 'X': review:andrew@laptop, review:bob@desktop. Use the full name."` |
 | Team doesn't exist (send_team) | `"Error: Team 'X' does not exist."` |
 | No online team members | `"Error: No online members in team 'X'."` |
 | Hub connection lost | Plugin logs to stderr, MCP tools return connection errors. Plugin attempts reconnect with exponential backoff (1s, 2s, 4s, ... 30s max). |
@@ -397,10 +402,11 @@ Default port: **4815**
 FROM oven/bun:1
 WORKDIR /app
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile --production
 COPY src/ ./src/
+ENV CLAUDE_NET_PORT=4815
 EXPOSE 4815
-CMD ["bun", "run", "src/index.ts"]
+CMD ["bun", "run", "src/hub/index.ts"]
 ```
 
 **Production (built-in):**

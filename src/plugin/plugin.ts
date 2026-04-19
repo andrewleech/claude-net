@@ -116,7 +116,20 @@ with content starting with "claude-net channel active", channels are
 working end-to-end. If you never see this tag, channels may not be
 loaded — the MCP tools still work but inbound messages won't appear.
 
-Messages to offline agents will fail — there is no queuing.
+MESSAGES ARE EPHEMERAL — NO QUEUE:
+claude-net is strictly live delivery. There is NO message queue, NO
+store-and-forward, NO retry, and NO offline delivery of any kind.
+
+- If a recipient is offline, send_message returns an error and the
+  message is dropped. It will NOT be delivered when they come back.
+- Broadcasts and team sends only reach agents online AT THE MOMENT of
+  send. Agents that join later do not get replayed messages.
+- Do NOT tell the user "I'll send it and they'll get it when they come
+  back online" or "the message is queued". That is not how this works.
+- When a send fails because the recipient is offline, report that
+  directly to the user and ask what they'd like to do (wait, pick
+  another agent, try later manually, etc.).
+
 Always include reply_to when responding to a specific message.
 The from field on all messages is your full session:user@host identity, set by the hub.`;
 
@@ -439,7 +452,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "send_message",
     description:
-      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name.',
+      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name. Live delivery only — fails if the recipient is offline, no queuing.',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -459,7 +472,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "broadcast",
-    description: "Send a message to all online agents",
+    description:
+      "Send a message to every agent currently online. Agents that come online later do not receive it.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -470,7 +484,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "send_team",
-    description: "Send a message to all online members of a team",
+    description:
+      "Send a message to currently-online members of a team. Offline members are skipped — the message is NOT delivered when they reconnect.",
     inputSchema: {
       type: "object" as const,
       properties: {

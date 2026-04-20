@@ -930,8 +930,17 @@
 
   function renderMirrorSessions() {
     if (!mirrorListEl) return;
+    // Sort by created_at (stable) — sorting by last_event_at made rows
+    // re-order every time either session received an event, so forks
+    // in the same folder appeared to "switch around" while you were
+    // watching them. Creation time never changes, so the order is
+    // fixed for as long as the sessions live.
     var entries = Array.from(mirrorSessions.values())
-      .sort(function(a, b) { return b.last_event_at.localeCompare(a.last_event_at); });
+      .sort(function(a, b) {
+        var ac = a.created_at || '', bc = b.created_at || '';
+        if (ac !== bc) return ac.localeCompare(bc);
+        return (a.sid || '').localeCompare(b.sid || '');
+      });
     if (entries.length === 0) {
       mirrorListEl.innerHTML = '<div class="mirror-list-empty">no active mirrors</div>';
       return;

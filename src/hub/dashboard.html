@@ -19,6 +19,7 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
+    /* Dark (default) — broadcast monitor. */
     --bg: #0b0c10;
     --bg-panel: #101218;
     --bg-surface: #14171f;
@@ -51,6 +52,47 @@
 
     --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+
+    /* Scanline texture colour — swaps to a dark version on light
+       theme. Keeps the broadcast-monitor feel on both modes. */
+    --scanline: rgba(255, 255, 255, 0.012);
+
+    /* Code-block ground (terminal-style panels — slightly darker
+       than --bg on dark theme, slightly lighter than --bg on light). */
+    --bg-code: #07080b;
+
+    /* Text colour to use on top of the accent fill — keeps contrast
+       readable on either theme. */
+    --on-accent: #0b0c10;
+  }
+
+  /* Light theme overrides. */
+  body.theme-light {
+    --bg: #f3efe5;
+    --bg-panel: #ebe6d7;
+    --bg-surface: #e3ddcb;
+    --bg-hover: #ddd5bf;
+    --bg-elevate: #d5ccb2;
+    --border: #bfb59a;
+    --border-dim: #d0c7ae;
+    --text: #1c1a16;
+    --text-dim: #55534d;
+    --text-muted: #8a8679;
+    --accent: #c53518;
+    --accent-dim: #9a2810;
+    --accent-glow: rgba(197, 53, 24, 0.18);
+    --accent-ink: rgba(197, 53, 24, 0.09);
+    --gold: #8a6a28;
+    --green: #3f8f52;
+    --red: #c53518;
+    --blue: #3a7594;
+    --cyan: #3a7594;
+    --orange: #c55a18;
+    --purple: #7b4da3;
+    --yellow: #8a6a28;
+    --scanline: rgba(0, 0, 0, 0.022);
+    --bg-code: #e8e0cc;
+    --on-accent: #fff9ee;
   }
 
   body {
@@ -67,7 +109,7 @@
     background-image: repeating-linear-gradient(
       0deg,
       transparent 0px, transparent 2px,
-      rgba(255, 255, 255, 0.012) 2px, rgba(255, 255, 255, 0.012) 3px
+      var(--scanline) 2px, var(--scanline) 3px
     );
     font-feature-settings: 'ss01', 'cv11';
   }
@@ -377,7 +419,7 @@
 
   #send-btn {
     background: var(--accent);
-    color: #0b0c10;
+    color: var(--on-accent);
     border: none;
     padding: 7px 18px;
     font-family: var(--font-mono);
@@ -818,7 +860,7 @@
     font-size: 12px; line-height: 1.55; white-space: pre-wrap;
     color: var(--text); margin: 6px 0 0;
     padding: 8px 10px;
-    background: #07080b;
+    background: var(--bg-code);
     border: 1px solid var(--border-dim);
     max-height: 320px; overflow: auto;
   }
@@ -843,7 +885,7 @@
     font-family: var(--font-mono);
     font-size: 12px; line-height: 1.55; margin-top: 6px;
     max-height: 420px; overflow: auto;
-    background: #07080b;
+    background: var(--bg-code);
     border: 1px solid var(--border-dim);
     padding: 8px 10px;
   }
@@ -874,7 +916,7 @@
   .m-diff-v2 {
     font-family: var(--font-mono);
     font-size: 12px; line-height: 1.55;
-    background: #07080b; border: 1px solid var(--border-dim);
+    background: var(--bg-code); border: 1px solid var(--border-dim);
     padding: 6px 0; margin: 6px 0 0;
     overflow-x: auto;
   }
@@ -887,10 +929,10 @@
   .m-diff-content { flex: 1; white-space: pre-wrap; word-break: break-word; }
   .m-diff-del { background: rgba(255, 77, 46, 0.06); }
   .m-diff-del .m-diff-gutter { color: var(--accent); }
-  .m-diff-del .m-diff-content { color: #ff8a70; }
+  .m-diff-del .m-diff-content { color: var(--accent); }
   .m-diff-add { background: rgba(85, 194, 122, 0.05); }
   .m-diff-add .m-diff-gutter { color: var(--green); }
-  .m-diff-add .m-diff-content { color: #87dba0; }
+  .m-diff-add .m-diff-content { color: var(--green); }
   .m-diff-ctx .m-diff-content { color: var(--text-muted); }
   .m-diff-word-del {
     background: rgba(255, 77, 46, 0.35);
@@ -973,7 +1015,7 @@
     border-color: var(--accent);
     color: var(--accent);
   }
-  .m-q-action.primary:hover { background: var(--accent); color: #0b0c10; }
+  .m-q-action.primary:hover { background: var(--accent); color: var(--on-accent); }
   .m-q-action .m-q-action-desc {
     display: block;
     font-size: 10px;
@@ -1267,7 +1309,7 @@
     font-weight: 400;
     line-height: 1;
   }
-  .mirror-compose button:hover { background: var(--accent); color: #0b0c10; }
+  .mirror-compose button:hover { background: var(--accent); color: var(--on-accent); }
   .mirror-compose button:active { background: var(--accent-dim); }
   .mirror-compose button:disabled {
     color: var(--text-muted);
@@ -1289,7 +1331,8 @@
   .mirror-compose-err.is-notice { color: var(--green); }
   .mirror-compose-err:empty { display: none; }
 
-  .mirror-share-btn {
+  .mirror-share-btn,
+  .theme-toggle {
     background: transparent;
     color: var(--text-dim);
     border: 1px solid var(--border);
@@ -1300,8 +1343,10 @@
     text-transform: uppercase;
     cursor: pointer;
     transition: color 0.1s, border-color 0.1s;
+    white-space: nowrap;
   }
-  .mirror-share-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .mirror-share-btn:hover,
+  .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
 
   .mirror-status {
     font-family: var(--font-mono);
@@ -1414,7 +1459,7 @@
   .md-body li { margin: 3px 0; }
   .md-body li > p { margin: 0; }
   .md-body code {
-    background: #07080b;
+    background: var(--bg-code);
     border: 1px solid var(--border-dim);
     padding: 1px 6px;
     font-family: var(--font-mono);
@@ -1422,7 +1467,7 @@
     color: var(--accent);
   }
   .md-body pre {
-    background: #07080b;
+    background: var(--bg-code);
     padding: 12px 14px;
     margin: 10px 0;
     border-left: 2px solid var(--accent);
@@ -1523,7 +1568,7 @@
   .m-todo .m-checkbox.checked {
     background: var(--accent);
     border-color: var(--accent);
-    color: #0b0c10;
+    color: var(--on-accent);
   }
   .m-todo .m-checkbox.in-progress {
     border-color: var(--gold);
@@ -1610,7 +1655,7 @@
   .panel-body { padding: 0; }
 
   /* Text selection — use the accent so selection feels 'on brand'. */
-  ::selection { background: var(--accent); color: #0b0c10; }
+  ::selection { background: var(--accent); color: var(--on-accent); }
 
   /* Prefers-reduced-motion: disable the two animations above. */
   @media (prefers-reduced-motion: reduce) {
@@ -1624,6 +1669,20 @@
 </head>
 <body>
 
+<!-- Apply saved theme before the rest of body paints. Falls back to
+     OS preference, then dark. -->
+<script>
+  (function() {
+    try {
+      var t = localStorage.getItem('claude-net.mirror.theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      if (t === 'light') document.body.classList.add('theme-light');
+    } catch (e) { /* ignore */ }
+  })();
+</script>
+
 <div id="dashboard-root">
 <header>
   <h1>claude-net</h1>
@@ -1631,6 +1690,7 @@
     <span id="agent-count">0 agents</span>
     <span id="team-count">0 teams</span>
     <span><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
+    <button type="button" class="theme-toggle" data-theme-toggle title="Switch theme">◐ DARK</button>
   </div>
 </header>
 
@@ -1674,6 +1734,7 @@
       <span id="mirror-owner"></span>
       <span id="mirror-conn">connecting…</span>
       <button id="mirror-share-btn" class="mirror-share-btn" type="button" style="display:none" title="Create a read-only share link">share</button>
+      <button type="button" class="theme-toggle" data-theme-toggle title="Switch theme">◐ DARK</button>
     </div>
   </header>
   <div class="mirror-status" id="mirror-status"></div>
@@ -1698,6 +1759,26 @@
 <script>
 (function() {
   'use strict';
+
+  // --- Theme toggle (wires every [data-theme-toggle] on the page).
+  // The initial class is applied by the inline script in <body>, so
+  // this just handles clicks + label sync. ---
+  var THEME_KEY = 'claude-net.mirror.theme';
+  function syncThemeLabel() {
+    var light = document.body.classList.contains('theme-light');
+    var label = light ? '◑ LIGHT' : '◐ DARK';
+    var btns = document.querySelectorAll('[data-theme-toggle]');
+    for (var i = 0; i < btns.length; i++) btns[i].textContent = label;
+  }
+  function toggleTheme() {
+    var light = document.body.classList.toggle('theme-light');
+    try { localStorage.setItem(THEME_KEY, light ? 'light' : 'dark'); } catch (e) {}
+    syncThemeLabel();
+  }
+  document.addEventListener('click', function(e) {
+    if (e.target.closest && e.target.closest('[data-theme-toggle]')) toggleTheme();
+  });
+  syncThemeLabel();
 
   // --- Router: dashboard (default) vs mirror view (/mirror/:sid) ---
   var mirrorMatch = location.pathname.match(/^\/mirror\/([^/]+)\/?$/);

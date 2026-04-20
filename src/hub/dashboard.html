@@ -323,8 +323,27 @@
   .m-evt pre { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
   .m-evt-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
 
-  .m-evt-user { align-self: stretch; padding: 10px 12px; background: rgba(122,162,247,0.10); border-left: 3px solid var(--blue); border-radius: 4px; }
+  /* User bubbles right-align on wide screens (desktop) so it's visually
+     clear who's speaking. On narrow screens (< 700 px) they stretch full
+     width — chat-bubble styling wastes screen space on a phone. */
+  .m-evt-user {
+    align-self: flex-end;
+    max-width: min(72ch, 100%);
+    padding: 10px 12px;
+    background: rgba(122,162,247,0.10);
+    border-right: 3px solid var(--blue);
+    border-radius: 4px;
+    text-align: left;
+  }
   .m-evt-user .m-label { color: var(--blue); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  @media (max-width: 700px) {
+    .m-evt-user {
+      align-self: stretch;
+      max-width: none;
+      border-right: none;
+      border-left: 3px solid var(--blue);
+    }
+  }
 
   .m-evt-assistant { align-self: stretch; padding: 10px 12px; background: rgba(158,206,106,0.08); border-left: 3px solid var(--green); border-radius: 4px; }
   .m-evt-assistant .m-label { color: var(--green); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }

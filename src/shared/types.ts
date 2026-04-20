@@ -92,6 +92,22 @@ export interface MirrorPasteDoneFrame {
   error?: string;
 }
 
+/**
+ * Agent → hub reply to a MirrorListCommandsFrame request. Carries the
+ * slash-command catalog for the session's Claude Code environment.
+ */
+export interface MirrorCommandsDoneFrame {
+  action: "mirror_commands_done";
+  sid: string;
+  requestId: string;
+  commands?: Array<{
+    name: string;
+    description?: string;
+    source: string;
+  }>;
+  error?: string;
+}
+
 export type PluginFrame =
   | RegisterFrame
   | SendFrame
@@ -103,7 +119,8 @@ export type PluginFrame =
   | ListTeamsFrame
   | PingFrame
   | MirrorEventFrame
-  | MirrorPasteDoneFrame;
+  | MirrorPasteDoneFrame
+  | MirrorCommandsDoneFrame;
 
 // ── Hub → Plugin frames (discriminated union on `event`) ──────────────────
 
@@ -159,6 +176,17 @@ export interface MirrorPasteFrame {
   origin: { watcher: string; ts: number };
 }
 
+/**
+ * Hub → agent request to list the slash commands available to this
+ * session's Claude Code. Agent walks the .claude/ directory trees and
+ * replies with MirrorCommandsDoneFrame.
+ */
+export interface MirrorListCommandsFrame {
+  event: "mirror_list_commands";
+  sid: string;
+  requestId: string;
+}
+
 export interface MirrorControlFrame {
   event: "mirror_control";
   sid: string;
@@ -172,6 +200,7 @@ export type HubFrame =
   | ErrorFrame
   | MirrorInjectFrame
   | MirrorPasteFrame
+  | MirrorListCommandsFrame
   | MirrorControlFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────

@@ -5,10 +5,17 @@ import type {
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
   MirrorInjectFrame,
+  MirrorListCommandsFrame,
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorTokenType,
 } from "@/shared/types";
+
+interface SlashCommand {
+  name: string;
+  description?: string;
+  source: string;
+}
 import { Elysia } from "elysia";
 import { resolveCanonicalHubUrl } from "./hub-url";
 import { type MirrorStore, NullStore } from "./mirror-store";
@@ -78,6 +85,12 @@ interface PendingPaste {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingCommandsList {
+  resolve: (commands: SlashCommand[]) => void;
+  reject: (error: { status: number; message: string }) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class MirrorRegistry {
   readonly sessions = new Map<string, MirrorSessionEntry>();
   private transcriptRing: number;
@@ -86,6 +99,8 @@ export class MirrorRegistry {
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
+  /** Key: `${sid}:${requestId}` — awaiting MirrorCommandsDoneFrame. */
+  private pendingCommandsLists = new Map<string, PendingCommandsList>();
 
   constructor(options?: MirrorRegistryOptions) {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
@@ -633,6 +648,106 @@ export class MirrorRegistry {
       });
     }
   }
+
+  /**
+   * Ask the session's mirror-agent for the slash commands available to
+   * its Claude Code. Same request/response WS pattern as relayPaste.
+   */
+  relayListCommands(
+    sid: string,
+    timeoutMs: number,
+  ): Promise<
+    | { ok: true; commands: SlashCommand[] }
+    | { ok: false; error: string; status: number }
+  > {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return Promise.resolve({
+        ok: false,
+        error: `Session '${sid}' not found.`,
+        status: 404,
+      });
+    if (!entry.agent)
+      return Promise.resolve({
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      });
+
+    const requestId = crypto.randomUUID();
+    const key = `${sid}:${requestId}`;
+    const frame: MirrorListCommandsFrame = {
+      event: "mirror_list_commands",
+      sid,
+      requestId,
+    };
+
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        this.pendingCommandsLists.delete(key);
+        resolvePromise({
+          ok: false,
+          error: `Mirror-agent did not respond within ${timeoutMs}ms.`,
+          status: 504,
+        });
+      }, timeoutMs);
+      if (typeof timer === "object" && "unref" in timer) timer.unref();
+
+      this.pendingCommandsLists.set(key, {
+        resolve: (commands) => {
+          clearTimeout(timer);
+          this.pendingCommandsLists.delete(key);
+          resolvePromise({ ok: true, commands });
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.pendingCommandsLists.delete(key);
+          resolvePromise({
+            ok: false,
+            error: err.message,
+            status: err.status,
+          });
+        },
+        timer,
+      });
+
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: null-checked above
+        entry.agent!.ws.send(JSON.stringify(frame));
+      } catch (err) {
+        const pending = this.pendingCommandsLists.get(key);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingCommandsLists.delete(key);
+        }
+        resolvePromise({
+          ok: false,
+          error: `Failed to relay to mirror-agent: ${String(err)}`,
+          status: 502,
+        });
+      }
+    });
+  }
+
+  /** Called from ws-mirror-plugin when the agent sends back a
+   *  MirrorCommandsDoneFrame. */
+  resolveListCommands(
+    sid: string,
+    requestId: string,
+    result: { commands?: SlashCommand[]; error?: string },
+  ): void {
+    const key = `${sid}:${requestId}`;
+    const pending = this.pendingCommandsLists.get(key);
+    if (!pending) return;
+    if (result.commands) {
+      pending.resolve(result.commands);
+    } else {
+      pending.reject({
+        status: 502,
+        message: result.error ?? "mirror-agent reported an unknown error",
+      });
+    }
+  }
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────
@@ -1006,6 +1121,34 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         paste_max_mb: Math.floor(MAX_PASTE_BYTES / (1024 * 1024)),
         inject_rpm: INJECT_RPM,
       }))
+
+      /**
+       * GET /:sid/commands — list slash commands available to this
+       * session's Claude Code (built-ins + user/project/plugin commands
+       * on the agent's host). Owner-only; the response is agent-scoped
+       * and can leak plugin names from the user's install.
+       */
+      .get("/:sid/commands", async ({ params, query, set }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Reader tokens cannot list commands." };
+        }
+        const result = await mirrorRegistry.relayListCommands(
+          params.sid,
+          COMMANDS_TIMEOUT_MS,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { commands: result.commands };
+      })
   );
 }
 
@@ -1031,6 +1174,9 @@ const MAX_PASTE_BYTES = (() => {
 
 /** Timeout for the agent to ack a paste write. */
 const PASTE_TIMEOUT_MS = 10_000;
+
+/** Timeout for the agent to return its slash-command catalog. */
+const COMMANDS_TIMEOUT_MS = 5_000;
 
 // One inject per 250ms (burst control) AND at most INJECT_RPM per minute.
 const injectBurstLimiter = new RateLimiter({ max: 1, windowMs: 250 });
@@ -1201,6 +1347,17 @@ export function wsMirrorPlugin(
       ) {
         mirrorRegistry.resolvePaste(meta.sid, frame.requestId, {
           path: typeof frame.path === "string" ? frame.path : undefined,
+          error: typeof frame.error === "string" ? frame.error : undefined,
+        });
+      } else if (
+        frame.action === "mirror_commands_done" &&
+        frame.sid === meta.sid &&
+        typeof frame.requestId === "string"
+      ) {
+        mirrorRegistry.resolveListCommands(meta.sid, frame.requestId, {
+          commands: Array.isArray(frame.commands)
+            ? (frame.commands as SlashCommand[])
+            : undefined,
           error: typeof frame.error === "string" ? frame.error : undefined,
         });
       }

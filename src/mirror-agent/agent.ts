@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { MirrorEventFrame } from "@/shared/types";
+import { scanCommands } from "./command-scanner";
 import { ConsentManager, type ConsentMode } from "./consent";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { HubClient } from "./hub-client";
@@ -681,6 +682,11 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           sendPasteResponse(session, requestId, { error: String(err) });
         },
       );
+    } else if (data.event === "mirror_list_commands") {
+      const requestId =
+        typeof data.requestId === "string" ? data.requestId : "";
+      if (!requestId) return;
+      handleListCommands(session, requestId);
     }
   }
 
@@ -729,6 +735,33 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     };
     if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
       log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
+    }
+  }
+
+  /** Respond to a hub-initiated slash-command catalog query. Scans the
+   *  .claude/ trees for this session's cwd and replies with the list. */
+  function handleListCommands(session: SessionState, requestId: string): void {
+    let commands: ReturnType<typeof scanCommands>;
+    try {
+      commands = scanCommands(session.cwd);
+    } catch (err) {
+      const errFrame = {
+        action: "mirror_commands_done" as const,
+        sid: session.sid,
+        requestId,
+        error: `scan failed: ${String(err)}`,
+      };
+      if (session.ws) session.ws.send(JSON.stringify(errFrame));
+      return;
+    }
+    const frame = {
+      action: "mirror_commands_done" as const,
+      sid: session.sid,
+      requestId,
+      commands,
+    };
+    if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
+      log(`[${session.sid}] failed to send commands ack (hub disconnected)`);
     }
   }
 

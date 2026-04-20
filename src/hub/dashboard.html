@@ -1122,6 +1122,82 @@
     border-color: var(--accent);
   }
 
+  /* ── Slash-command autocomplete popover ─────────────────────────
+     Floats above the compose textarea whenever the current
+     first-line starts with '/'. Keyboard (arrows + tab/enter) on
+     desktop; tap-to-select on touch devices. Respects the overall
+     broadcast aesthetic: sharp corners, mono, accent-on-select. */
+  .mirror-slash-popover {
+    position: absolute;
+    left: 20px;
+    right: 20px;
+    bottom: calc(100% + 6px);
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    box-shadow: 0 0 24px var(--accent-glow);
+    z-index: 20;
+    display: none;
+  }
+  .mirror-slash-popover.is-open { display: block; }
+  .mirror-slash-item {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: background 0.06s, border-color 0.06s;
+  }
+  .mirror-slash-item:hover,
+  .mirror-slash-item.is-active {
+    background: var(--accent-ink);
+    border-left-color: var(--accent);
+  }
+  .mirror-slash-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .mirror-slash-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.4;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mirror-slash-source {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+  }
+  .mirror-slash-empty {
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  @media (max-width: 700px) {
+    /* Bigger tap targets + more room on mobile. */
+    .mirror-slash-popover { left: 10px; right: 10px; max-height: 50vh; }
+    .mirror-slash-item { padding: 12px 14px; }
+    .mirror-slash-name { font-size: 13px; }
+    .mirror-slash-desc { font-size: 12.5px; }
+    .mirror-slash-source { display: none; }
+  }
+
   .mirror-compose button {
     background: transparent;
     color: var(--accent);
@@ -1559,6 +1635,7 @@
   <div class="mirror-status" id="mirror-status"></div>
   <div class="mirror-transcript" id="mirror-transcript"></div>
   <div class="mirror-compose compose-hidden" id="mirror-compose">
+    <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
     <div class="mirror-compose-frame">
       <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
       <div class="mirror-compose-actions">
@@ -3317,8 +3394,154 @@
     }
     applyEnterMode();
 
+    // ── Slash-command autocomplete ────────────────────────────
+    // Fetched once per session load. If the textarea's first line
+    // starts with '/', a popover above it shows matching commands.
+    // Enter/Tab inserts; Up/Down navigate; Esc dismisses; click or
+    // tap also works for touch.
+    var slashPopover = document.getElementById('mirror-slash-popover');
+    var slashCommands = [];        // full catalog
+    var slashFiltered = [];        // current filtered view
+    var slashActiveIdx = 0;
+    var slashOpen = false;
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/commands?t=' + encodeURIComponent(token))
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(j) {
+        if (j && Array.isArray(j.commands)) slashCommands = j.commands;
+      })
+      .catch(function() { /* endpoint optional; popover just won't suggest */ });
+
+    function slashPrefix() {
+      // Extract the slash-prefix on the current first line, if any.
+      if (!composeText) return null;
+      var val = composeText.value || '';
+      var lineEnd = val.indexOf('\n');
+      var firstLine = lineEnd < 0 ? val : val.slice(0, lineEnd);
+      // Cursor must be on the first line (no newline before it).
+      var caret = typeof composeText.selectionStart === 'number' ? composeText.selectionStart : val.length;
+      if (lineEnd >= 0 && caret > lineEnd) return null;
+      var trimmed = firstLine.trimStart();
+      if (!trimmed.startsWith('/')) return null;
+      // Prefix ends at the first whitespace (so '/command arg' filters on 'command').
+      var after = trimmed.slice(1);
+      var space = after.search(/\s/);
+      return space < 0 ? after : after.slice(0, space);
+    }
+
+    function renderSlash() {
+      if (!slashPopover) return;
+      var q = slashPrefix();
+      if (q === null || slashCommands.length === 0) {
+        slashPopover.classList.remove('is-open');
+        slashPopover.innerHTML = '';
+        slashOpen = false;
+        return;
+      }
+      var qLower = q.toLowerCase();
+      slashFiltered = slashCommands.filter(function(c) {
+        return !q || c.name.toLowerCase().indexOf(qLower) !== -1;
+      }).slice(0, 24);
+      // Prefix matches rank above substring matches.
+      slashFiltered.sort(function(a, b) {
+        var aPrefix = a.name.toLowerCase().startsWith(qLower) ? 0 : 1;
+        var bPrefix = b.name.toLowerCase().startsWith(qLower) ? 0 : 1;
+        if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+        return a.name.localeCompare(b.name);
+      });
+      if (slashActiveIdx >= slashFiltered.length) slashActiveIdx = 0;
+      if (slashFiltered.length === 0) {
+        slashPopover.innerHTML = '<div class="mirror-slash-empty">no matches for /' + escapeHtml(q) + '</div>';
+      } else {
+        var html = '';
+        for (var i = 0; i < slashFiltered.length; i++) {
+          var c = slashFiltered[i];
+          var active = i === slashActiveIdx ? ' is-active' : '';
+          html += '<div class="mirror-slash-item' + active + '" data-idx="' + i + '">' +
+            '<span class="mirror-slash-name">/' + escapeHtml(c.name) + '</span>' +
+            '<span class="mirror-slash-desc">' + escapeHtml(c.description || '') + '</span>' +
+            '<span class="mirror-slash-source">' + escapeHtml(c.source) + '</span>' +
+            '</div>';
+        }
+        slashPopover.innerHTML = html;
+      }
+      slashPopover.classList.add('is-open');
+      slashOpen = true;
+    }
+
+    function slashInsertActive() {
+      if (!slashOpen || !composeText) return false;
+      if (slashActiveIdx < 0 || slashActiveIdx >= slashFiltered.length) return false;
+      var pick = slashFiltered[slashActiveIdx];
+      var val = composeText.value || '';
+      var lineEnd = val.indexOf('\n');
+      var firstLine = lineEnd < 0 ? val : val.slice(0, lineEnd);
+      var rest = lineEnd < 0 ? '' : val.slice(lineEnd);
+      // Replace the partial '/foo' with the full '/name ' (trailing space).
+      var replaced = firstLine.replace(/\/\S*/, '/' + pick.name + ' ');
+      composeText.value = replaced + rest;
+      // Put the caret at the end of the inserted command.
+      var pos = replaced.length;
+      try { composeText.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+      slashPopover.classList.remove('is-open');
+      slashOpen = false;
+      composeText.focus();
+      return true;
+    }
+
+    if (slashPopover) {
+      // Rebuild on input and on caret moves.
+      composeText.addEventListener('input', function() {
+        slashActiveIdx = 0;
+        renderSlash();
+      });
+      composeText.addEventListener('click', renderSlash);
+      composeText.addEventListener('keyup', function(e) {
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+          renderSlash();
+        }
+      });
+      composeText.addEventListener('blur', function() {
+        // Delay-close so click handlers fire first.
+        setTimeout(function() { slashPopover.classList.remove('is-open'); slashOpen = false; }, 120);
+      });
+      // Click / tap to insert.
+      slashPopover.addEventListener('mousedown', function(e) {
+        var row = e.target.closest && e.target.closest('.mirror-slash-item');
+        if (!row) return;
+        e.preventDefault(); // keep focus on the textarea
+        slashActiveIdx = parseInt(row.getAttribute('data-idx'), 10) || 0;
+        slashInsertActive();
+      });
+    }
+
     if (composeText) {
       composeText.addEventListener('keydown', function(e) {
+        // Intercept popover navigation first — only when the popover is open.
+        if (slashOpen) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            slashActiveIdx = (slashActiveIdx + 1) % Math.max(1, slashFiltered.length);
+            renderSlash();
+            return;
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            slashActiveIdx = (slashActiveIdx - 1 + slashFiltered.length) % Math.max(1, slashFiltered.length);
+            renderSlash();
+            return;
+          }
+          if (e.key === 'Tab' || (e.key === 'Enter' && slashFiltered.length > 0)) {
+            // Tab always inserts. Enter inserts when popover is open (overriding
+            // the normal send behaviour).
+            if (slashInsertActive()) { e.preventDefault(); return; }
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            slashPopover.classList.remove('is-open');
+            slashOpen = false;
+            return;
+          }
+        }
         if (e.key !== 'Enter') return;
         if (enterMode === 'newline') {
           // Shift+Enter still sends in newline mode — inverse of desktop.

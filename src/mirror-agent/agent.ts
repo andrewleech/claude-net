@@ -65,6 +65,13 @@ const DEFAULT_SESSION_IDLE_MS = 10 * 60 * 1000;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 
+/** Recovery retry schedule. Hub redeploys typically take 10–30 s so the
+ *  worst-case ~8 min window here covers nearly anything short of total
+ *  hub failure. */
+const RECOVERY_INITIAL_DELAY_MS = 1_000;
+const RECOVERY_MAX_DELAY_MS = 30_000;
+const RECOVERY_MAX_ATTEMPTS = 20;
+
 /** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
 const PASTE_DIR = "/tmp/claude-net/pastes";
 /** Delete paste files older than this on agent startup. */
@@ -464,6 +471,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
    * sid with the hub to get a fresh token, then reconnect the WS with it.
    * The owner URL the user held becomes stale — they need to grab the new
    * one from the dashboard or `mirror_url` tool.
+   *
+   * Retries with exponential backoff (1s → 30s cap, 20 attempts, ~8 min
+   * worst case) because the POST can legitimately fail while the hub is
+   * still booting after a redeploy. Without retry, one failed attempt left
+   * `session.ws = null` with no reconnect timer, and every subsequent hook
+   * event queued silently into a never-draining outbox — the session was
+   * permanently wedged until the whole daemon restarted.
    */
   async function recoverSession(session: SessionState): Promise<void> {
     session.recovering = true;
@@ -477,33 +491,56 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         }
         session.ws = null;
       }
-      const res = await fetch(`${hubUrl}/api/mirror/session`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          owner_agent: session.ownerAgent,
-          cwd: session.cwd,
-          sid: session.sid,
-        }),
-      });
-      if (!res.ok) {
-        log(
-          `[${session.sid}] recovery: session create failed HTTP ${res.status}; will retry on next hook`,
-        );
-        return;
+
+      let delayMs = RECOVERY_INITIAL_DELAY_MS;
+      for (let attempt = 1; attempt <= RECOVERY_MAX_ATTEMPTS; attempt++) {
+        if (session.closed) return;
+        try {
+          const res = await fetch(`${hubUrl}/api/mirror/session`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              owner_agent: session.ownerAgent,
+              cwd: session.cwd,
+              sid: session.sid,
+            }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              sid: string;
+              owner_token: string;
+              mirror_url: string;
+            };
+            session.token = data.owner_token;
+            session.mirrorUrl = data.mirror_url;
+            log(
+              `[${session.sid}] recovered on hub (attempt ${attempt}); new url=${data.mirror_url}`,
+            );
+            attachHubClient(session);
+            return;
+          }
+          log(
+            `[${session.sid}] recovery: HTTP ${res.status} on attempt ${attempt}/${RECOVERY_MAX_ATTEMPTS}; retry in ${delayMs}ms`,
+          );
+        } catch (err) {
+          log(
+            `[${session.sid}] recovery: fetch threw on attempt ${attempt}/${RECOVERY_MAX_ATTEMPTS}: ${String(err)}; retry in ${delayMs}ms`,
+          );
+        }
+        if (attempt === RECOVERY_MAX_ATTEMPTS) break;
+        await sleep(delayMs);
+        delayMs = Math.min(delayMs * 2, RECOVERY_MAX_DELAY_MS);
       }
-      const data = (await res.json()) as {
-        sid: string;
-        owner_token: string;
-        mirror_url: string;
-      };
-      session.token = data.owner_token;
-      session.mirrorUrl = data.mirror_url;
-      log(`[${session.sid}] recovered on hub; new url=${data.mirror_url}`);
-      attachHubClient(session);
+      log(
+        `[${session.sid}] recovery exhausted after ${RECOVERY_MAX_ATTEMPTS} attempts — session wedged, restart claude-channels to retry`,
+      );
     } finally {
       session.recovering = false;
     }
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   function startTailIfNeeded(session: SessionState): void {

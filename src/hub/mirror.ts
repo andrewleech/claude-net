@@ -596,6 +596,9 @@ export class MirrorRegistry {
       try {
         // biome-ignore lint/style/noNonNullAssertion: null-checked above
         entry.agent!.ws.send(JSON.stringify(frame));
+        process.stderr.write(
+          `[hub/mirror] relayPaste sent frame sid=${sid} requestId=${requestId} bytes=${Buffer.byteLength(text, "utf8")}\n`,
+        );
       } catch (err) {
         const pending = this.pendingPastes.get(key);
         if (pending) {
@@ -622,6 +625,9 @@ export class MirrorRegistry {
   ): void {
     const key = `${sid}:${requestId}`;
     const pending = this.pendingPastes.get(key);
+    process.stderr.write(
+      `[hub/mirror] resolvePaste sid=${sid} requestId=${requestId} pending=${Boolean(pending)} hasPath=${Boolean(result.path)} hasErr=${Boolean(result.error)}\n`,
+    );
     if (!pending) return;
     if (result.path) {
       pending.resolve(result.path);

@@ -411,6 +411,30 @@
     margin-top: 6px;
   }
 
+  .m-grep {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; margin-top: 4px;
+    max-height: 420px; overflow: auto;
+  }
+  .m-grep-file {
+    color: var(--blue); margin-top: 6px; padding: 2px 0;
+    font-weight: 600; word-break: break-all;
+  }
+  .m-grep-file:first-child { margin-top: 0; }
+  .m-grep-row {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 1px 0;
+  }
+  .m-grep-ln {
+    color: var(--text-dim); text-align: right;
+    min-width: 4ch; user-select: none; flex-shrink: 0;
+  }
+  .m-grep-text {
+    white-space: pre-wrap; word-break: break-word;
+    color: var(--text); background: none; padding: 0;
+  }
+  .m-grep-more { color: var(--text-dim); margin-top: 6px; font-style: italic; }
+
   /* TodoWrite list — styles live in the later block with .m-checkbox */
 
   /* Rich diff rendering (Edit / Write / MultiEdit tool cards) */
@@ -1636,7 +1660,7 @@
         call: function(p, el) {
           var pat = p.input && p.input.pattern;
           var where = (p.input && (p.input.glob || p.input.path)) || '.';
-          el.innerHTML = makeHeadline('Grep',
+          el.innerHTML = makeHeadline('Search',
             '🔍 <code>' + escapeHtml(pat || '') + '</code>',
             'in ' + escapeHtml(where));
         },
@@ -1644,9 +1668,62 @@
           if (p.is_error) setStatusError(el);
           else setStatusOk(el, 'done');
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
-          var lines = (resp || '').split('\n').filter(function(l) { return l.length > 0; });
-          appendDetails(el, lines.length + ' result(s)',
-            '<pre>' + escapeHtml(truncateLines(resp || '', 25)) + '</pre>');
+          var rawLines = (resp || '').split('\n').filter(function(l) { return l.length > 0; });
+          // Grep output comes as either "N:content" (single-file path) or
+          // "file:N:content" (multi-file). Detect mode so single-file results
+          // can strip the repeated filename the way the TUI does.
+          var contentRx = /^(\d+):(.*)$/;
+          var multiRx = /^(.+?):(\d+):(.*)$/;
+          var files = Object.create(null);
+          var fileOrder = [];
+          var singleFileMode = rawLines.length > 0 && rawLines.every(function(l) { return contentRx.test(l); });
+          var matchCount = 0;
+          if (singleFileMode) {
+            for (var i = 0; i < rawLines.length; i++) {
+              var m = rawLines[i].match(contentRx);
+              if (!m) continue;
+              matchCount++;
+              if (!files['__single__']) { files['__single__'] = []; fileOrder.push('__single__'); }
+              files['__single__'].push({ line: m[1], text: m[2] });
+            }
+          } else {
+            for (var j = 0; j < rawLines.length; j++) {
+              var mm = rawLines[j].match(multiRx);
+              if (!mm) continue;
+              matchCount++;
+              var f = mm[1];
+              if (!files[f]) { files[f] = []; fileOrder.push(f); }
+              files[f].push({ line: mm[2], text: mm[3] });
+            }
+          }
+          var fileCount = singleFileMode ? 1 : fileOrder.length;
+          var summary = matchCount === 0
+            ? 'No matches'
+            : 'Found ' + matchCount + ' ' + (matchCount === 1 ? 'line' : 'lines') +
+              (fileCount > 1 ? ' across ' + fileCount + ' files' : '');
+          var body = '<div class="m-grep">';
+          var MAX_LINES = 40;
+          var shown = 0, clipped = false;
+          for (var k = 0; k < fileOrder.length && !clipped; k++) {
+            var key = fileOrder[k];
+            var hits = files[key];
+            if (!singleFileMode) {
+              body += '<div class="m-grep-file">' + escapeHtml(key) + '</div>';
+            }
+            for (var h = 0; h < hits.length; h++) {
+              if (shown >= MAX_LINES) { clipped = true; break; }
+              body += '<div class="m-grep-row">' +
+                '<span class="m-grep-ln">' + escapeHtml(hits[h].line) + '</span>' +
+                '<code class="m-grep-text">' + escapeHtml(hits[h].text) + '</code>' +
+                '</div>';
+              shown++;
+            }
+          }
+          if (clipped) {
+            body += '<div class="m-grep-more">… ' + (matchCount - shown) + ' more</div>';
+          }
+          body += '</div>';
+          appendDetails(el, summary, body, { open: true });
         },
       },
       Glob: {

@@ -62,7 +62,15 @@ export interface AgentHandle {
 // ── Entry point ───────────────────────────────────────────────────────────
 
 const DEFAULT_IDLE_SHUTDOWN_MS = 30 * 60 * 1000;
-const DEFAULT_SESSION_IDLE_MS = 10 * 60 * 1000;
+/**
+ * Per-session idle-close window. 0 (default) disables idle closure —
+ * sessions live as long as the Claude Code that owns them is running,
+ * and are closed either by an explicit session_end hook or by the
+ * daemon's own idle-shutdown. The old 10-minute default was a trap:
+ * users could come back to the web view after lunch and find every
+ * session marked "ended".
+ */
+const DEFAULT_SESSION_IDLE_MS = 0;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 
@@ -158,10 +166,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   // Idle-shutdown watchdog.
   const idleTimer = setInterval(() => {
     const now = Date.now();
-    // Clean up idle sessions.
-    for (const s of sessions.values()) {
-      if (!s.closed && now - s.lastEventAt > sessionIdleMs) {
-        closeSession(s, "idle");
+    // Clean up idle sessions — only when sessionIdleMs > 0. Default is
+    // 0 (disabled) since the old 10-min timeout was too aggressive:
+    // users would come back to the web after a break and find every
+    // session marked "ended".
+    if (sessionIdleMs > 0) {
+      for (const s of sessions.values()) {
+        if (!s.closed && now - s.lastEventAt > sessionIdleMs) {
+          closeSession(s, "idle");
+        }
       }
     }
     // Process-level idle shutdown.

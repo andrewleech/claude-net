@@ -20,7 +20,8 @@
       "dist",
       "bin/mirror-agent.bundle.js",
       "bin/marked.umd.min.js",
-      "bin/purify.min.js"
+      "bin/purify.min.js",
+      "bin/diff.min.js"
     ]
   }
 }

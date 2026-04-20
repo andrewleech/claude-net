@@ -51,6 +51,10 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
     rel: "bin/purify.min.js",
     contentType: "application/javascript",
   },
+  "diff.min.js": {
+    rel: "bin/diff.min.js",
+    contentType: "application/javascript",
+  },
 };
 
 const BUNDLE_SOURCE_REL = "src/mirror-agent/agent.ts";

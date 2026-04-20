@@ -393,12 +393,48 @@
 
   /* TodoWrite list — styles live in the later block with .m-checkbox */
 
-  /* Diff for Edit/Write */
-  .m-diff { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; margin-top: 6px; }
-  .m-diff .m-diff-old { background: rgba(247,118,142,0.10); color: var(--red); padding: 0 4px; display: block; }
-  .m-diff .m-diff-new { background: rgba(158,206,106,0.10); color: var(--green); padding: 0 4px; display: block; }
-  .m-diff .m-diff-old::before { content: "- "; }
-  .m-diff .m-diff-new::before { content: "+ "; }
+  /* Rich diff rendering (Edit / Write / MultiEdit tool cards) */
+  .m-diff-v2 {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5;
+    background: var(--bg); border-radius: 4px;
+    padding: 4px 0; margin: 4px 0 0;
+    overflow-x: auto;
+  }
+  .m-diff-line {
+    display: flex; align-items: flex-start; padding: 0 6px;
+  }
+  .m-diff-gutter {
+    display: inline-block; width: 16px; flex-shrink: 0;
+    text-align: center; user-select: none; color: var(--text-dim);
+    font-weight: 600;
+  }
+  .m-diff-content { flex: 1; white-space: pre-wrap; word-break: break-word; }
+  .m-diff-del { background: rgba(247,118,142,0.07); }
+  .m-diff-del .m-diff-gutter { color: var(--red); }
+  .m-diff-del .m-diff-content { color: var(--red); }
+  .m-diff-add { background: rgba(158,206,106,0.07); }
+  .m-diff-add .m-diff-gutter { color: var(--green); }
+  .m-diff-add .m-diff-content { color: var(--green); }
+  .m-diff-ctx .m-diff-content { color: var(--text-muted); }
+  /* Word-level highlights inside a changed line — stronger background
+     so the delta stands out against the line-level tint. */
+  .m-diff-word-del {
+    background: rgba(247,118,142,0.32);
+    color: var(--text); border-radius: 2px;
+  }
+  .m-diff-word-add {
+    background: rgba(158,206,106,0.32);
+    color: var(--text); border-radius: 2px;
+  }
+  /* MultiEdit hunk separation */
+  .m-multiedit-hunk { margin-bottom: 10px; }
+  .m-multiedit-hunk:last-child { margin-bottom: 0; }
+  .m-multiedit-hunk-label {
+    font-size: 10px; font-weight: 600; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin: 4px 6px 2px;
+  }
 
   /* Question cards (ExitPlanMode / AskUserQuestion) */
   .m-evt-question {
@@ -602,6 +638,7 @@
 </style>
 <script src="/bin/marked.umd.min.js"></script>
 <script src="/bin/purify.min.js"></script>
+<script src="/bin/diff.min.js"></script>
 </head>
 <body>
 
@@ -1291,6 +1328,121 @@
       return null;
     }
 
+    // ── Rich diff renderer (Edit / Write / MultiEdit) ──────────────
+    //
+    // Uses `jsdiff` (loaded via /bin/diff.min.js) to compute a line-level
+    // unified diff; within each (removed, added) pair of equal length,
+    // runs a word-level diff so the precise delta highlights inside the
+    // line instead of the whole line turning red/green. Falls back to a
+    // naive two-block render if jsdiff didn't load for some reason.
+
+    function splitDiffLines(s) {
+      var lines = String(s).split('\n');
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+      return lines;
+    }
+
+    function renderDiffLine(type, innerHtml) {
+      var prefix = type === 'del' ? '−' : type === 'add' ? '+' : ' ';
+      return '<div class="m-diff-line m-diff-' + type + '">' +
+        '<span class="m-diff-gutter">' + prefix + '</span>' +
+        '<span class="m-diff-content">' + (innerHtml || '&nbsp;') + '</span>' +
+        '</div>';
+    }
+
+    function wordDiffLine(oldLine, newLine) {
+      if (!window.Diff || typeof window.Diff.diffWordsWithSpace !== 'function') {
+        return {
+          oldHtml: escapeHtml(oldLine),
+          newHtml: escapeHtml(newLine),
+        };
+      }
+      var parts = window.Diff.diffWordsWithSpace(oldLine, newLine);
+      var oldHtml = '', newHtml = '';
+      for (var i = 0; i < parts.length; i++) {
+        var p = parts[i];
+        var safe = escapeHtml(p.value);
+        if (p.added) {
+          newHtml += '<span class="m-diff-word-add">' + safe + '</span>';
+        } else if (p.removed) {
+          oldHtml += '<span class="m-diff-word-del">' + safe + '</span>';
+        } else {
+          oldHtml += safe;
+          newHtml += safe;
+        }
+      }
+      return { oldHtml: oldHtml, newHtml: newHtml };
+    }
+
+    function renderRichDiff(oldStr, newStr) {
+      oldStr = String(oldStr || '');
+      newStr = String(newStr || '');
+      var added = 0, removed = 0;
+      var out = '';
+
+      if (!window.Diff || typeof window.Diff.diffLines !== 'function') {
+        // Fallback: naive two-block render (old path). Keeps rendering
+        // correct when the lib didn't load.
+        var oldLines = splitDiffLines(oldStr);
+        var newLines = splitDiffLines(newStr);
+        for (var i = 0; i < oldLines.length; i++)
+          out += renderDiffLine('del', escapeHtml(oldLines[i]));
+        for (var j = 0; j < newLines.length; j++)
+          out += renderDiffLine('add', escapeHtml(newLines[j]));
+        return {
+          html: out,
+          added: newLines.length,
+          removed: oldLines.length,
+        };
+      }
+
+      var parts = window.Diff.diffLines(oldStr, newStr);
+      for (var k = 0; k < parts.length; k++) {
+        var cur = parts[k];
+        var next = parts[k + 1];
+        if (cur.removed && next && next.added) {
+          // Paired removal + addition. Word-diff per line when counts match;
+          // otherwise just render each side as raw lines.
+          var olds = splitDiffLines(cur.value);
+          var news = splitDiffLines(next.value);
+          if (olds.length === news.length) {
+            for (var m = 0; m < olds.length; m++) {
+              var pair = wordDiffLine(olds[m], news[m]);
+              out += renderDiffLine('del', pair.oldHtml);
+              out += renderDiffLine('add', pair.newHtml);
+            }
+          } else {
+            for (var a = 0; a < olds.length; a++)
+              out += renderDiffLine('del', escapeHtml(olds[a]));
+            for (var b = 0; b < news.length; b++)
+              out += renderDiffLine('add', escapeHtml(news[b]));
+          }
+          removed += olds.length;
+          added += news.length;
+          k++;  // consumed the 'next' added block
+        } else if (cur.removed) {
+          var delLines = splitDiffLines(cur.value);
+          for (var dd = 0; dd < delLines.length; dd++)
+            out += renderDiffLine('del', escapeHtml(delLines[dd]));
+          removed += delLines.length;
+        } else if (cur.added) {
+          var addLines = splitDiffLines(cur.value);
+          for (var aa = 0; aa < addLines.length; aa++)
+            out += renderDiffLine('add', escapeHtml(addLines[aa]));
+          added += addLines.length;
+        } else {
+          var ctxLines = splitDiffLines(cur.value);
+          for (var cc = 0; cc < ctxLines.length; cc++)
+            out += renderDiffLine('ctx', escapeHtml(ctxLines[cc]));
+        }
+      }
+      return { html: out, added: added, removed: removed };
+    }
+
+    function diffSummary(diff) {
+      return '−' + diff.removed + ' / +' + diff.added;
+    }
+
     var TOOL_RENDERERS = {
       Read: {
         call: function(p, el) {
@@ -1392,17 +1544,14 @@
       Edit: {
         call: function(p, el) {
           var fp = p.input && p.input.file_path;
+          var oldS = (p.input && p.input.old_string) || '';
+          var newS = (p.input && p.input.new_string) || '';
           el.innerHTML = makeHeadline('Edit',
             '<span title="' + escapeAttr(fp || '') + '">✎ ' + escapeHtml(shortPath(fp || '')) + '</span>');
-          var oldS = p.input && p.input.old_string;
-          var newS = p.input && p.input.new_string;
           if (oldS || newS) {
-            var diff = document.createElement('div');
-            diff.className = 'm-diff';
-            diff.innerHTML =
-              (oldS ? '<span class="m-diff-old">' + escapeHtml(truncateLines(oldS, 5)) + '</span>' : '') +
-              (newS ? '<span class="m-diff-new">' + escapeHtml(truncateLines(newS, 5)) + '</span>' : '');
-            el.appendChild(diff);
+            var diff = renderRichDiff(oldS, newS);
+            appendDetails(el, diffSummary(diff),
+              '<div class="m-diff-v2">' + diff.html + '</div>');
           }
         },
         result: function(p, el) {
@@ -1413,13 +1562,50 @@
         call: function(p, el) {
           var fp = p.input && p.input.file_path;
           var content = (p.input && p.input.content) || '';
+          var lines = splitDiffLines(content);
           el.innerHTML = makeHeadline('Write',
             '<span title="' + escapeAttr(fp || '') + '">+ ' + escapeHtml(shortPath(fp || '')) + '</span>',
-            content.split('\n').length + ' lines');
-          appendDetails(el, 'preview', '<pre>' + escapeHtml(truncateLines(content, 15)) + '</pre>');
+            '+' + lines.length + ' line' + (lines.length === 1 ? '' : 's'));
+          // Render whole file as a pure-addition diff (every line prefixed +).
+          var body = '';
+          for (var i = 0; i < lines.length; i++) {
+            body += renderDiffLine('add', escapeHtml(lines[i]));
+          }
+          appendDetails(el, '+' + lines.length + ' / −0',
+            '<div class="m-diff-v2">' + body + '</div>');
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'written');
+        },
+      },
+      MultiEdit: {
+        call: function(p, el) {
+          var fp = p.input && p.input.file_path;
+          var edits = (p.input && p.input.edits) || [];
+          el.innerHTML = makeHeadline('MultiEdit',
+            '<span title="' + escapeAttr(fp || '') + '">✎ ' + escapeHtml(shortPath(fp || '')) + '</span>',
+            edits.length + ' edit' + (edits.length === 1 ? '' : 's'));
+          if (edits.length === 0) return;
+          var body = '';
+          var totalAdded = 0, totalRemoved = 0;
+          for (var i = 0; i < edits.length; i++) {
+            var e = edits[i];
+            var diff = renderRichDiff(e.old_string || '', e.new_string || '');
+            totalAdded += diff.added;
+            totalRemoved += diff.removed;
+            body +=
+              '<div class="m-multiedit-hunk">' +
+                '<div class="m-multiedit-hunk-label">edit ' + (i + 1) + ' / ' + edits.length +
+                  ' &nbsp; (−' + diff.removed + ' / +' + diff.added + ')</div>' +
+                '<div class="m-diff-v2">' + diff.html + '</div>' +
+              '</div>';
+          }
+          var summary = '−' + totalRemoved + ' / +' + totalAdded +
+            ' across ' + edits.length + ' edit' + (edits.length === 1 ? '' : 's');
+          appendDetails(el, summary, body);
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'saved');
         },
       },
       Grep: {

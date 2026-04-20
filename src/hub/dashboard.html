@@ -4,34 +4,84 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>claude-net</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+  /* ───────────────────────────────────────────────────────────────
+     BROADCAST CONSOLE
+     Aesthetic: op-room / live broadcast monitor. Sharp corners,
+     monospace everywhere structural, one saturated accent (amber-
+     red "on air"), subtle scanlines for atmosphere. The feed is a
+     continuous ticker, not a stack of cards.
+     ─────────────────────────────────────────────────────────────── */
+
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: #1a1b26;
-    --bg-surface: #24283b;
-    --bg-hover: #2f3349;
-    --border: #3b3f54;
-    --text: #c0caf5;
-    --text-muted: #565f89;
-    --text-dim: #737aa2;
-    --green: #9ece6a;
-    --red: #f7768e;
-    --blue: #7aa2f7;
-    --cyan: #7dcfff;
+    --bg: #0b0c10;
+    --bg-panel: #101218;
+    --bg-surface: #14171f;
+    --bg-hover: #1a1e27;
+    --bg-elevate: #1c2029;
+    --border: #262a33;
+    --border-dim: #1a1d24;
+    --text: #e8ebef;
+    --text-dim: #8b92a0;
+    --text-muted: #545a66;
+
+    /* ── One saturated accent: broadcast red-orange. Everything hot
+         (live pulses, active selections, new-event flashes, user
+         prompts, focus rings) uses this. Resist the urge to add
+         more. ── */
+    --accent: #ff4d2e;
+    --accent-dim: #c53c22;
+    --accent-glow: rgba(255, 77, 46, 0.18);
+    --accent-ink: rgba(255, 77, 46, 0.08);
+
+    /* Supporting hues, desaturated — used sparingly as type tags. */
+    --gold: #d4a04d;
+    --green: #55c27a;
+    --red: #ff4d2e;       /* alias of --accent so existing error styles keep working */
+    --blue: #6fb0d4;      /* desaturated, not the 'main' colour any more */
+    --cyan: #6fc3d9;
     --orange: #ff9e64;
-    --purple: #bb9af7;
-    --yellow: #e0af68;
+    --purple: #b48ceb;
+    --yellow: #d4a04d;    /* aliases --gold */
+
+    --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
   }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--font-sans);
     background: var(--bg);
     color: var(--text);
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Very faint vertical scanline overlay — the 'broadcast monitor'
+       texture. Tuned low enough to stay invisible on casual glance
+       but enough to kill the flatness of pure-black backgrounds. */
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent 0px, transparent 2px,
+      rgba(255, 255, 255, 0.012) 2px, rgba(255, 255, 255, 0.012) 3px
+    );
+    font-feature-settings: 'ss01', 'cv11';
+  }
+
+  /* Uniform chrome label: the building block of the whole interface.
+     Reused for panel headers, tool tags, meta rows, anything that
+     labels something else. */
+  .chrome-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
 
   /* Header */
@@ -45,59 +95,104 @@
     flex-shrink: 0;
   }
 
+  header {
+    height: 44px;
+    padding: 0 16px 0 18px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    /* Unify the font profile across the whole header so every inline
+       element shares a baseline — avoids the 'wordmark higher than
+       stats' drift from mixed font-sizes. */
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 500;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  /* Wordmark: stylised as a broadcast callsign. The leading dot is
+     the accent — small touch but it's what makes this feel like a
+     station identity rather than a generic app title. */
   header h1 {
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: -0.5px;
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: 2.2px;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+  }
+  header h1::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: live-pulse 2.2s ease-in-out infinite;
   }
 
   .header-stats {
     display: flex;
     align-items: center;
-    gap: 16px;
-    font-size: 13px;
-    color: var(--text-dim);
+    gap: 22px;
+  }
+  .header-stats > * {
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    line-height: 1;
   }
 
   .status-dot {
     display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 4px;
-    vertical-align: middle;
+    width: 6px; height: 6px;
+    margin-right: 6px;
+    vertical-align: 1px;
+    background: var(--text-muted);
   }
+  .status-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
+  .status-dot.offline { background: var(--text-muted); }
 
-  .status-dot.online { background: var(--green); }
-  .status-dot.offline { background: var(--red); }
-
-  /* Main layout */
+  /* ── Main layout ─────────────────────────────────────────────── */
   main {
     display: flex;
     flex: 1;
     overflow: hidden;
   }
 
-  /* Panels */
   .panel {
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border);
     overflow: hidden;
+    background: var(--bg);
   }
-
   .panel:last-child { border-right: none; }
 
   .panel-header {
-    padding: 8px 12px;
-    font-size: 11px;
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 1.2px;
     color: var(--text-muted);
     border-bottom: 1px solid var(--border);
-    background: var(--bg-surface);
+    background: var(--bg-panel);
     flex-shrink: 0;
+    /* Tiny accent tick next to every panel header — signals that
+       this is a named "channel" in the broadcast metaphor. */
+    position: relative;
+  }
+  .panel-header::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 50%;
+    width: 3px; height: 11px;
+    background: var(--accent);
+    transform: translateY(-50%);
   }
 
   .panel-body {
@@ -115,71 +210,78 @@
     padding: 4px 0;
   }
 
+  /* Agent rows: teletype-style. No rounded pill. Left accent
+     tick appears only when online. */
   .agent-item {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    font-size: 13px;
+    gap: 10px;
+    padding: 6px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
     cursor: pointer;
-    transition: background 0.1s;
+    border-left: 2px solid transparent;
+    transition: background 0.08s, border-color 0.08s;
   }
-
-  .agent-item:hover { background: var(--bg-hover); }
+  .agent-item:hover {
+    background: var(--bg-hover);
+    border-left-color: var(--accent-dim);
+  }
 
   .agent-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+    width: 5px; height: 5px;
     flex-shrink: 0;
+    background: var(--text-muted);
   }
-
-  .agent-dot.online { background: var(--green); }
-  .agent-dot.offline { background: var(--text-muted); }
+  .agent-dot.online { background: var(--accent); box-shadow: 0 0 4px var(--accent-glow); }
+  .agent-dot.offline { background: var(--text-muted); opacity: 0.5; }
 
   .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Message feed */
   .feed { flex: 1; min-width: 0; }
-
-  .feed .panel-body { padding: 4px 8px; }
+  .feed .panel-body { padding: 6px 0; }
 
   .msg-entry {
-    padding: 4px 8px;
-    border-radius: 4px;
-    margin-bottom: 2px;
+    padding: 6px 14px;
+    margin-bottom: 1px;
     font-size: 13px;
-    line-height: 1.4;
+    line-height: 1.5;
+    border-left: 2px solid transparent;
   }
-
-  .msg-entry:hover { background: var(--bg-hover); }
+  .msg-entry:hover {
+    background: var(--bg-hover);
+    border-left-color: var(--border);
+  }
 
   .msg-meta {
     display: flex;
     align-items: baseline;
-    gap: 6px;
-    margin-bottom: 1px;
+    gap: 10px;
+    margin-bottom: 2px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
 
-  .msg-route {
-    font-weight: 600;
-    font-size: 12px;
-  }
-
-  .msg-route.direct { color: var(--blue); }
-  .msg-route.broadcast { color: var(--orange); }
+  .msg-route { font-weight: 600; }
+  .msg-route.direct { color: var(--accent); }
+  .msg-route.broadcast { color: var(--gold); }
   .msg-route.team { color: var(--purple); }
 
   .msg-time {
-    font-size: 11px;
     color: var(--text-muted);
+    margin-left: auto;
     flex-shrink: 0;
   }
 
   .msg-content {
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--text-dim);
+    color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 80px;
@@ -190,8 +292,9 @@
   .teams-panel { width: 220px; flex-shrink: 0; }
 
   .team-item {
-    padding: 6px 12px;
+    padding: 8px 14px;
     font-size: 13px;
+    border-bottom: 1px solid var(--border-dim);
   }
 
   .team-header {
@@ -200,43 +303,52 @@
     justify-content: space-between;
     cursor: pointer;
     padding: 2px 0;
-    font-weight: 500;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    color: var(--text);
   }
-
-  .team-header:hover { color: var(--cyan); }
+  .team-header:hover { color: var(--accent); }
 
   .team-count {
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: 10px;
     color: var(--text-muted);
+    letter-spacing: 0.8px;
   }
 
   .team-members {
     padding-left: 14px;
-    margin-top: 2px;
+    margin-top: 4px;
   }
 
   .team-member {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     padding: 1px 0;
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
     color: var(--text-dim);
   }
 
-  /* Send bar */
+  /* ── Send bar — dashboard's DM composer. Terminal prompt look. ── */
   .send-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: var(--bg-surface);
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-panel);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
 
   .send-bar label {
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
     color: var(--text-muted);
     font-weight: 600;
   }
@@ -245,44 +357,52 @@
     background: var(--bg);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 6px 10px;
-    border-radius: 4px;
-    font-size: 13px;
+    padding: 7px 10px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
     outline: none;
+    transition: border-color 0.1s, box-shadow 0.1s;
   }
-
+  .send-bar input::placeholder, .send-bar select::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+  }
   .send-bar input:focus, .send-bar select:focus {
-    border-color: var(--blue);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 12px var(--accent-glow);
   }
 
-  #to-field { width: 160px; }
+  #to-field { width: 180px; }
   #msg-field { flex: 1; }
 
   #send-btn {
-    background: var(--blue);
-    color: var(--bg);
+    background: var(--accent);
+    color: #0b0c10;
     border: none;
-    padding: 6px 16px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-weight: 600;
+    padding: 7px 18px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
     cursor: pointer;
-    transition: opacity 0.1s;
+    transition: background 0.1s, transform 0.05s;
   }
-
-  #send-btn:hover { opacity: 0.85; }
-  #send-btn:disabled { opacity: 0.4; cursor: default; }
+  #send-btn:hover { background: #ff6344; }
+  #send-btn:active { transform: translateY(1px); }
+  #send-btn:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
 
   .send-error {
-    font-size: 12px;
-    color: var(--red);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
     margin-left: 4px;
   }
 
   /* Scrollbar */
-  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
   /* Dashboard / mirror root wrappers — each behaves like the original body
@@ -298,398 +418,984 @@
   body.mirror-mode #dashboard-root { display: none; }
   body.mirror-mode #mirror-root { display: flex; }
 
-  /* "Back to dashboard" breadcrumb in the mirror header */
+  /* ── Mirror header = the 'station bug' strip. ── */
   .mirror-nav-back {
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
     color: var(--text-muted);
     text-decoration: none;
-    padding: 3px 8px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
-    border-radius: 3px;
-    margin-right: 12px;
+    margin-right: 14px;
+    transition: color 0.1s, border-color 0.1s;
   }
-  .mirror-nav-back:hover { background: var(--bg-hover); color: var(--text); }
+  .mirror-nav-back:hover { color: var(--accent); border-color: var(--accent); }
 
   .mirror-header {
-    display: flex; align-items: center; gap: 16px;
-    padding: 12px 24px; border-bottom: 1px solid var(--border);
-    background: var(--bg-surface);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 0 20px;
+    height: 48px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+    position: relative;
+    /* All direct chrome elements share one font-size / line-height so
+       the baseline is consistent end-to-end. Per-element overrides
+       (the cwd, the LIVE indicator) must opt in. */
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
-  .mirror-title { font-size: 14px; font-weight: 600; color: var(--text); }
-  .mirror-title .sid { color: var(--text-muted); font-family: monospace; margin-left: 8px; }
-  .mirror-meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-muted); margin-left: auto; }
-  .mirror-meta span { white-space: nowrap; }
-  .mirror-meta .cwd { font-family: monospace; }
+  /* Thin accent rule under the header — gives the 'on-air' feel
+     without a gaudy red bar across the top. */
+  .mirror-header::after {
+    content: "";
+    position: absolute;
+    bottom: -1px; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      var(--accent) 0%, var(--accent) 60px,
+      transparent 60px, transparent 100%
+    );
+  }
+  .mirror-title {
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .mirror-title .sid {
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-left: 10px;
+    letter-spacing: 1px;
+  }
+  .mirror-meta {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    margin-left: auto;
+    /* Inherit font-family/size/letter-spacing/text-transform from
+       .mirror-header, so every meta element sits on the same
+       baseline. */
+  }
+  .mirror-meta > * {
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: var(--text-muted);
+    white-space: nowrap;
+    line-height: 1;
+  }
+  .mirror-meta .cwd {
+    color: var(--text-dim);
+    /* path is not a label — drop the uppercase + wide tracking so it
+       stays readable, but keep the same font-size so the baseline
+       still agrees with the rest of the row. */
+    text-transform: none;
+    letter-spacing: 0.2px;
+  }
 
+  /* LIVE / OFFLINE / CONNECTING / ERROR indicator. Sizing matches
+     the rest of the meta row; state is driven by classes on the
+     element itself. */
+  #mirror-conn {
+    color: var(--text);
+    font-weight: 700;
+    letter-spacing: 1.8px;
+  }
+  #mirror-conn::before {
+    content: "●";
+    display: inline-block;
+    margin-right: 7px;
+    color: var(--text-muted);
+    vertical-align: 0;
+  }
+  #mirror-conn.is-live::before {
+    color: var(--accent);
+    animation: live-pulse 2.2s ease-in-out infinite;
+  }
+  #mirror-conn.is-error { color: var(--accent); }
+  #mirror-conn.is-error::before { color: var(--accent); }
+
+  /* ── TRANSCRIPT: the broadcast feed.
+     Every event is a row hanging off a 72px left-gutter timeline
+     that carries the `[HH:MM:SS]` timestamp and a type tag. The
+     visual grammar is 'terminal log', not 'chat bubbles'. ── */
   .mirror-transcript {
-    flex: 1; overflow-y: auto;
-    padding: 16px 24px; display: flex; flex-direction: column; gap: 12px;
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0 16px 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    position: relative;
   }
-  .m-evt { max-width: 78ch; word-wrap: break-word; font-size: 13px; line-height: 1.45; }
-  .m-evt pre { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
-  .m-evt-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+  /* Vertical tick rail down the left — the 'broadcast timeline'.
+     X coordinate matches the tick marks on each event row. */
+  .mirror-transcript::before {
+    content: "";
+    position: absolute;
+    left: 104px; top: 0; bottom: 0;
+    width: 1px;
+    background: var(--border-dim);
+    pointer-events: none;
+  }
 
-  /* User bubbles right-align on wide screens (desktop) so it's visually
-     clear who's speaking. On narrow screens (< 700 px) they stretch full
-     width — chat-bubble styling wastes screen space on a phone. */
+  .m-evt {
+    position: relative;
+    padding: 8px 24px 8px 128px;
+    word-wrap: break-word;
+    font-size: 13px;
+    line-height: 1.55;
+    animation: event-flash 900ms ease-out;
+  }
+  /* Timestamp lives in the left gutter. Populated by JS via data-ts
+     (see renderEvent). Gutter is 98px wide so `HH:MM:SS am` fits on
+     one line at 10px IBM Plex Mono. */
+  .m-evt::before {
+    content: attr(data-ts);
+    position: absolute;
+    left: 10px; top: 10px;
+    width: 88px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    text-align: right;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  /* Tick mark on the rail, centred on the row's first visual line. */
+  .m-evt::after {
+    content: "";
+    position: absolute;
+    left: 101px; top: 15px;
+    width: 7px; height: 1px;
+    background: var(--border);
+  }
+  .m-evt pre {
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  /* The meta row originally held '<label> <timestamp>'. The timestamp
+     moves to the left gutter via the ::before, so the meta row gets
+     slimmed down to just its label. The text-node timestamp the JS
+     inserts is hidden via font-size:0. */
+  .m-evt-meta {
+    font-size: 0;
+    margin-bottom: 4px;
+  }
+  .m-evt-meta .m-label { font-size: 10px; }
+
+  /* Every event surfaces a short type tag in the top-right of the
+     row — 'USER', 'CLAUDE', tool name, etc. — so you can scan a
+     200-event stream by type alone. */
+  .m-label {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  /* ── USER prompts: the 'in' signal. Right-aligned with a thick
+     accent right-edge. Red = 'you are pushing from the web'. ── */
   .m-evt-user {
-    align-self: flex-end;
+    padding-left: 128px;
+    padding-right: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .m-evt-user > pre {
+    display: block;
     max-width: min(72ch, 100%);
-    padding: 10px 12px;
-    background: rgba(122,162,247,0.10);
-    border-right: 3px solid var(--blue);
-    border-radius: 4px;
+    padding: 10px 14px;
+    background: var(--accent-ink);
+    border-right: 3px solid var(--accent);
+    color: var(--text);
     text-align: left;
   }
-  .m-evt-user .m-label { color: var(--blue); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .m-evt-user .m-label { color: var(--accent); }
+
+  /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
+     just a thin left rule anchoring the row to the timeline. The
+     row does NOT shift right via margin-left (that would break the
+     absolute-positioned gutter timestamp); it keeps the same
+     padding-left as every other event row, and the rule is drawn at
+     x=122 via a background-gradient so content visually indents. ── */
+  .m-evt-assistant {
+    padding-left: 140px;
+    padding-right: 24px;
+    background-image: linear-gradient(
+      to right,
+      transparent 0, transparent 121px,
+      var(--border) 121px, var(--border) 122px,
+      transparent 122px
+    );
+  }
+  .m-evt-assistant::after { background: var(--accent); width: 9px; }
+  .m-evt-assistant .m-label { color: var(--accent); }
+
   @media (max-width: 700px) {
-    /* On narrow screens the bubble stretches full width (no wasted
-       space) but keeps the right border so 'user' is still visually
-       distinct from assistant messages at a glance. */
-    .m-evt-user {
-      align-self: stretch;
-      max-width: none;
+    .mirror-transcript::before { left: 74px; }
+    .m-evt { padding-left: 96px; padding-right: 14px; }
+    .m-evt::before { left: 4px; width: 66px; font-size: 9px; }
+    .m-evt::after { left: 71px; }
+    .m-evt-user { padding-left: 96px; align-items: stretch; }
+    .m-evt-user > pre { max-width: none; }
+    .m-evt-assistant {
+      padding-left: 108px;
+      background-image: linear-gradient(
+        to right,
+        transparent 0, transparent 89px,
+        var(--border) 89px, var(--border) 90px,
+        transparent 90px
+      );
     }
+    .m-evt-notif { padding-left: 96px; }
   }
 
-  .m-evt-assistant { align-self: stretch; padding: 10px 12px; background: rgba(158,206,106,0.08); border-left: 3px solid var(--green); border-radius: 4px; }
-  .m-evt-assistant .m-label { color: var(--green); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-
-  .m-evt-tool { align-self: stretch; padding: 8px 12px; background: var(--bg-surface); border-left: 3px solid var(--cyan); border-radius: 4px; }
-  .m-evt-tool .m-label { color: var(--cyan); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  /* ── TOOL CALLS: each one is a rectangular status row. No
+     rounded corners, no coloured fill — just a hairline top border
+     on the card body and a 2px accent bar when the call is
+     pending or errored. ── */
+  .m-evt-tool {
+    padding-right: 24px;
+  }
+  .m-evt-tool .m-label { color: var(--gold); }
   .m-evt-tool details { margin-top: 4px; }
-  .m-evt-tool summary { cursor: pointer; color: var(--text-muted); font-size: 12px; user-select: none; }
-  .m-evt-tool .m-tool-result { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
-  .m-evt-tool.is-error { border-left-color: var(--red); }
+  .m-evt-tool summary {
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    user-select: none;
+    padding: 3px 0;
+  }
+  .m-evt-tool summary:hover { color: var(--text); }
+  .m-evt-tool .m-tool-result {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-dim);
+  }
+  .m-evt-tool.is-error {
+    background: rgba(255, 77, 46, 0.03);
+  }
+  .m-evt-tool.is-error::after { background: var(--accent); }
 
-  /* Tool-card headline shared styles */
+  /* Shared tool-card grammar. Every tool renders the same way:
+     `[TAG]  target-string          STATUS` with optional sub-line. */
   .m-tool-headline {
-    display: flex; align-items: baseline; gap: 10px; font-size: 13px;
-    color: var(--text); line-height: 1.4;
+    display: flex; align-items: baseline; gap: 12px;
+    font-size: 13px; color: var(--text); line-height: 1.4;
   }
   .m-tool-headline .m-tool-name {
-    font-size: 10px; font-weight: 600; color: var(--cyan);
-    text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--gold);
+    flex-shrink: 0;
+    min-width: 70px;
   }
   .m-tool-headline .m-tool-target {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12.5px; color: var(--text);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
   }
   .m-tool-sub {
-    font-size: 11px; color: var(--text-muted); margin-top: 3px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    letter-spacing: 0.3px;
   }
   .m-tool-badge {
-    display: inline-block; font-size: 10px; padding: 1px 6px;
-    border-radius: 3px; background: var(--border); color: var(--text-muted);
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    padding: 2px 7px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
     margin-left: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
   }
   .m-tool-badge.pending { background: rgba(224,175,104,0.20); color: var(--yellow); }
   .m-tool-badge.ok { background: rgba(158,206,106,0.15); color: var(--green); }
   .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--red); }
-  .m-tool-badge.nosupport { background: rgba(187,154,247,0.15); color: var(--purple); }
+  .m-tool-badge.pending { border-color: var(--gold); color: var(--gold); }
+  .m-tool-badge.ok { border-color: var(--accent); color: var(--accent); }
+  .m-tool-badge.error { border-color: var(--accent); color: var(--accent); background: var(--accent-ink); }
+  .m-tool-badge.nosupport { border-color: var(--border); color: var(--text-muted); }
 
-  /* Bash command + output */
+  /* ── BASH — terminal prompt metaphor. The command is rendered with
+     a leading `$ ` glyph; output lives in a black console block. ── */
   .m-bash-cmd {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .m-bash-cmd::before {
+    content: "$ ";
+    color: var(--accent);
+    font-weight: 600;
+  }
   .m-bash-cmd-full {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12px; white-space: pre-wrap; color: var(--text);
   }
   .m-bash-out {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.45; white-space: pre-wrap;
-    color: var(--text); margin: 4px 0 0 0;
+    font-family: var(--font-mono);
+    font-size: 12px; line-height: 1.55; white-space: pre-wrap;
+    color: var(--text); margin: 6px 0 0;
+    padding: 8px 10px;
+    background: #07080b;
+    border: 1px solid var(--border-dim);
     max-height: 320px; overflow: auto;
   }
   .m-bash-err {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.45; white-space: pre-wrap;
-    color: var(--red); margin: 4px 0 0 0;
+    font-family: var(--font-mono);
+    font-size: 12px; line-height: 1.55; white-space: pre-wrap;
+    color: var(--accent); margin: 6px 0 0;
+    padding: 8px 10px;
+    background: rgba(255, 77, 46, 0.05);
+    border: 1px solid var(--accent-dim);
     max-height: 200px; overflow: auto;
   }
   .m-bash-label {
-    font-size: 10px; font-weight: 600; color: var(--red);
-    text-transform: uppercase; letter-spacing: 0.5px;
-    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 700; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 1.4px;
+    margin-top: 8px;
   }
 
+  /* ── GREP — ripgrep teletype output. ── */
   .m-grep {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.5; margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 12px; line-height: 1.55; margin-top: 6px;
     max-height: 420px; overflow: auto;
+    background: #07080b;
+    border: 1px solid var(--border-dim);
+    padding: 8px 10px;
   }
   .m-grep-file {
-    color: var(--blue); margin-top: 6px; padding: 2px 0;
+    color: var(--gold); margin-top: 10px; padding: 2px 0;
     font-weight: 600; word-break: break-all;
+    letter-spacing: 0.2px;
   }
   .m-grep-file:first-child { margin-top: 0; }
   .m-grep-row {
-    display: flex; gap: 10px; align-items: baseline;
+    display: flex; gap: 12px; align-items: baseline;
     padding: 1px 0;
   }
   .m-grep-ln {
-    color: var(--text-dim); text-align: right;
-    min-width: 4ch; user-select: none; flex-shrink: 0;
+    color: var(--text-muted); text-align: right;
+    min-width: 5ch; user-select: none; flex-shrink: 0;
   }
   .m-grep-text {
     white-space: pre-wrap; word-break: break-word;
     color: var(--text); background: none; padding: 0;
   }
-  .m-grep-more { color: var(--text-dim); margin-top: 6px; font-style: italic; }
+  .m-grep-more { color: var(--text-muted); margin-top: 6px; font-style: italic; }
 
   /* TodoWrite list — styles live in the later block with .m-checkbox */
 
-  /* Rich diff rendering (Edit / Write / MultiEdit tool cards) */
+  /* ── DIFFS — Edit/Write/MultiEdit. High-contrast monospace, no
+     rounding, the 'delta' badges are the only colour. ── */
   .m-diff-v2 {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.5;
-    background: var(--bg); border-radius: 4px;
-    padding: 4px 0; margin: 4px 0 0;
+    font-family: var(--font-mono);
+    font-size: 12px; line-height: 1.55;
+    background: #07080b; border: 1px solid var(--border-dim);
+    padding: 6px 0; margin: 6px 0 0;
     overflow-x: auto;
   }
-  .m-diff-line {
-    display: flex; align-items: flex-start; padding: 0 6px;
-  }
+  .m-diff-line { display: flex; align-items: flex-start; padding: 0 8px; }
   .m-diff-gutter {
-    display: inline-block; width: 16px; flex-shrink: 0;
-    text-align: center; user-select: none; color: var(--text-dim);
-    font-weight: 600;
+    display: inline-block; width: 18px; flex-shrink: 0;
+    text-align: center; user-select: none; color: var(--text-muted);
+    font-weight: 700;
   }
   .m-diff-content { flex: 1; white-space: pre-wrap; word-break: break-word; }
-  .m-diff-del { background: rgba(247,118,142,0.07); }
-  .m-diff-del .m-diff-gutter { color: var(--red); }
-  .m-diff-del .m-diff-content { color: var(--red); }
-  .m-diff-add { background: rgba(158,206,106,0.07); }
+  .m-diff-del { background: rgba(255, 77, 46, 0.06); }
+  .m-diff-del .m-diff-gutter { color: var(--accent); }
+  .m-diff-del .m-diff-content { color: #ff8a70; }
+  .m-diff-add { background: rgba(85, 194, 122, 0.05); }
   .m-diff-add .m-diff-gutter { color: var(--green); }
-  .m-diff-add .m-diff-content { color: var(--green); }
+  .m-diff-add .m-diff-content { color: #87dba0; }
   .m-diff-ctx .m-diff-content { color: var(--text-muted); }
-  /* Word-level highlights inside a changed line — stronger background
-     so the delta stands out against the line-level tint. */
   .m-diff-word-del {
-    background: rgba(247,118,142,0.32);
-    color: var(--text); border-radius: 2px;
+    background: rgba(255, 77, 46, 0.35);
+    color: var(--text);
   }
   .m-diff-word-add {
-    background: rgba(158,206,106,0.32);
-    color: var(--text); border-radius: 2px;
+    background: rgba(85, 194, 122, 0.30);
+    color: var(--text);
   }
-  /* MultiEdit hunk separation */
   .m-multiedit-hunk { margin-bottom: 10px; }
   .m-multiedit-hunk:last-child { margin-bottom: 0; }
   .m-multiedit-hunk-label {
-    font-size: 10px; font-weight: 600; color: var(--text-dim);
-    text-transform: uppercase; letter-spacing: 0.5px;
-    margin: 4px 6px 2px;
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1.2px;
+    margin: 4px 8px 4px;
   }
 
-  /* Question cards (ExitPlanMode / AskUserQuestion) */
+  /* ── QUESTION cards — "INCOMING QUERY" framing. ── */
   .m-evt-question {
-    align-self: stretch; padding: 12px 14px; border-radius: 6px;
-    border: 1px solid var(--yellow); background: rgba(224,175,104,0.06);
+    padding-right: 24px;
   }
-  .m-evt-question.answered { border-color: var(--border); background: var(--bg-surface); }
+  .m-evt-question > * {
+    max-width: 72ch;
+    margin-left: 0;
+  }
+  .m-evt-question .m-q-body-wrap {
+    border: 1px solid var(--gold);
+    background: rgba(212, 160, 77, 0.04);
+    padding: 12px 14px;
+    margin-top: 4px;
+  }
+  .m-evt-question.answered .m-q-body-wrap {
+    border-color: var(--border);
+    background: var(--bg-panel);
+  }
   .m-q-banner {
-    display: inline-block; font-size: 10px; font-weight: 700;
-    color: var(--yellow); text-transform: uppercase; letter-spacing: 0.6px;
-    padding: 2px 8px; border: 1px solid var(--yellow); border-radius: 3px;
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 700;
+    color: var(--gold);
+    text-transform: uppercase; letter-spacing: 1.4px;
+    padding: 3px 8px;
+    border: 1px solid var(--gold);
   }
-  .m-evt-question.answered .m-q-banner { color: var(--text-dim); border-color: var(--border); }
+  .m-evt-question.answered .m-q-banner { color: var(--text-muted); border-color: var(--border); }
   .m-q-body { margin-top: 10px; font-size: 13px; line-height: 1.55; }
   .m-q-body h1, .m-q-body h2, .m-q-body h3 {
     font-weight: 600; color: var(--text); margin-top: 10px; margin-bottom: 4px;
   }
-  .m-q-body h1 { font-size: 16px; }
+  .m-q-body h1 { font-size: 15px; }
   .m-q-body h2 { font-size: 14px; }
-  .m-q-body h3 { font-size: 13px; color: var(--text-muted); }
+  .m-q-body h3 { font-size: 13px; color: var(--text-dim); }
   .m-q-body ul, .m-q-body ol { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }
   .m-q-body li { margin: 2px 0; }
   .m-q-body code {
-    background: var(--bg); padding: 1px 4px; border-radius: 3px;
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    background: var(--bg); padding: 1px 4px;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--accent);
   }
   .m-q-body pre {
-    background: var(--bg); padding: 8px 10px; border-radius: 4px; margin: 6px 0;
-    border-left: 2px solid var(--border); overflow-x: auto;
+    background: var(--bg); padding: 8px 10px; margin: 6px 0;
+    border-left: 2px solid var(--accent); overflow-x: auto;
   }
   .m-q-body strong { font-weight: 600; color: var(--text); }
-  .m-q-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .m-q-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
   .m-q-action {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    padding: 6px 12px; border-radius: 3px; font-size: 12px; cursor: pointer;
-    font-family: inherit; text-align: left;
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.8px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.1s, color 0.1s, background 0.1s;
   }
-  .m-q-action:hover { background: var(--bg-hover); border-color: var(--blue); }
-  .m-q-action.primary { background: rgba(158,206,106,0.10); border-color: var(--green); color: var(--green); }
-  .m-q-action.primary:hover { background: rgba(158,206,106,0.20); }
-  .m-q-action .m-q-action-desc { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; font-weight: normal; }
-  .m-q-answer { margin-top: 10px; font-size: 12px; color: var(--text-muted); font-style: italic; }
+  .m-q-action:hover { border-color: var(--accent); color: var(--accent); }
+  .m-q-action.primary {
+    background: var(--accent-ink);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .m-q-action.primary:hover { background: var(--accent); color: #0b0c10; }
+  .m-q-action .m-q-action-desc {
+    display: block;
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 3px;
+    font-weight: normal;
+    letter-spacing: 0;
+    text-transform: none;
+    font-family: var(--font-sans);
+  }
+  .m-q-answer {
+    margin-top: 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+  }
 
-  .m-evt-notif { align-self: center; color: var(--text-muted); font-style: italic; font-size: 12px; }
-  .m-evt-compact { align-self: center; color: var(--text-dim); font-size: 12px; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); padding: 4px 12px; }
-  .m-evt-end { align-self: center; color: var(--orange); font-size: 12px; font-weight: 600; }
-  .m-truncated { color: var(--orange); font-size: 11px; margin-left: 6px; }
+  /* ── System events — telegraphic lines aligned to the timeline. ── */
+  .m-evt-notif {
+    padding: 4px 24px 4px 128px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+  .m-evt-notif::after { background: var(--text-muted); }
+  .m-evt-compact {
+    text-align: center;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    padding: 10px 24px;
+    margin: 8px 24px;
+    border-top: 1px dashed var(--border);
+    border-bottom: 1px dashed var(--border);
+  }
+  .m-evt-compact::before, .m-evt-compact::after { display: none; }
+  .m-evt-end {
+    text-align: center;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 14px 24px;
+  }
+  .m-evt-end::before, .m-evt-end::after { display: none; }
+  .m-truncated {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--gold);
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    margin-left: 8px;
+    padding: 1px 5px;
+    border: 1px solid var(--gold);
+  }
 
+  /* ── COMPOSE — terminal prompt. The textarea is the 'input line'
+     with a leading `>` indicator and an accent focus glow. ── */
   .mirror-compose {
-    display: flex; align-items: stretch; gap: 8px;
-    padding: 12px 24px; background: var(--bg-surface); border-top: 1px solid var(--border);
+    display: flex; align-items: stretch; gap: 10px;
+    padding: 14px 20px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    position: relative;
+  }
+  .mirror-compose::before {
+    content: ">";
+    position: absolute;
+    left: 22px; top: 22px;
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--accent);
+    pointer-events: none;
   }
   .mirror-compose.compose-hidden { display: none; }
-  .mirror-compose-note { font-size: 12px; color: var(--text-muted); padding: 6px 0; flex: 1; }
+  .mirror-compose-note {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 6px 0;
+    flex: 1;
+    letter-spacing: 0.3px;
+  }
   .mirror-compose textarea {
-    flex: 1; min-height: 44px; max-height: 140px; resize: vertical;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
-    color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 10px;
+    flex: 1; min-height: 46px; max-height: 160px; resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 10px 14px 10px 28px;
+    transition: border-color 0.1s, box-shadow 0.1s;
   }
-  .mirror-compose textarea:focus { outline: none; border-color: var(--blue); }
+  .mirror-compose textarea::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .mirror-compose textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 16px var(--accent-glow);
+  }
   .mirror-compose button {
-    background: var(--blue); color: var(--bg); border: none; padding: 0 18px;
-    border-radius: 4px; font-weight: 600; font-size: 13px; cursor: pointer;
-    align-self: stretch; min-width: 80px;
+    background: var(--accent);
+    color: #0b0c10;
+    border: none;
+    padding: 0 22px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    align-self: stretch;
+    min-width: 100px;
+    transition: background 0.1s, transform 0.05s;
   }
-  .mirror-compose button:hover { opacity: 0.85; }
-  .mirror-compose button:disabled { opacity: 0.4; cursor: default; }
-  .mirror-compose-err { font-size: 12px; color: var(--red); padding: 4px 12px; min-height: 18px; }
+  .mirror-compose button:hover { background: #ff6344; }
+  .mirror-compose button:active { transform: translateY(1px); }
+  .mirror-compose button:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
+
+  .mirror-compose-err {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
+    padding: 6px 20px;
+    min-height: 22px;
+    letter-spacing: 0.3px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
   .mirror-compose-err.is-notice { color: var(--green); }
+  .mirror-compose-err:empty { display: none; }
 
   .mirror-share-btn {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    padding: 2px 10px; border-radius: 3px; font-size: 11px; cursor: pointer;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.1s, border-color 0.1s;
   }
-  .mirror-share-btn:hover { background: var(--bg-hover); }
+  .mirror-share-btn:hover { color: var(--accent); border-color: var(--accent); }
 
-  .mirror-status { font-size: 11px; padding: 4px 12px; color: var(--text-muted); }
-  .mirror-status.error { color: var(--red); }
+  .mirror-status {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    padding: 6px 20px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .mirror-status.error { color: var(--accent); }
+  .mirror-status:empty { padding: 0; }
 
-  /* Mirror sessions list on the main dashboard */
+  /* ── Mirror sessions sidebar list — 'active broadcasts'. ── */
   .mirror-list-heading {
-    font-size: 11px; font-weight: 600; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: 0.5px;
-    padding: 10px 12px 6px; border-top: 1px solid var(--border); margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    padding: 14px 14px 6px;
+    border-top: 1px solid var(--border);
+    margin-top: 6px;
+    position: relative;
   }
-  .mirror-list-empty { padding: 6px 14px 10px; font-size: 12px; color: var(--text-dim); font-style: italic; }
+  .mirror-list-heading::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 16px;
+    width: 3px; height: 10px;
+    background: var(--accent);
+  }
+  .mirror-list-empty {
+    padding: 6px 14px 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
   .mirror-list-item {
-    display: block; padding: 8px 12px; cursor: pointer; text-decoration: none;
-    color: inherit; border-left: 3px solid transparent;
+    display: block;
+    padding: 10px 14px;
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    border-left: 2px solid transparent;
+    border-bottom: 1px solid var(--border-dim);
+    transition: background 0.08s, border-color 0.08s;
   }
-  .mirror-list-item:hover { background: var(--bg-hover); border-left-color: var(--blue); }
-  .mirror-list-item .mli-owner { font-size: 13px; color: var(--text); }
+  .mirror-list-item:hover {
+    background: var(--bg-hover);
+    border-left-color: var(--accent);
+  }
+  .mirror-list-item .mli-owner {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.2px;
+  }
   .mirror-list-item .mli-sid {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 11px; color: var(--text-dim); font-weight: normal;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    font-weight: 400;
+    letter-spacing: 0.5px;
   }
-  .mirror-list-item .mli-cwd { font-size: 11px; color: var(--text-muted); font-family: monospace; margin-top: 2px; }
+  .mirror-list-item .mli-cwd {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .mirror-list-item .mli-meta {
-    display: flex; gap: 10px; font-size: 10px; color: var(--text-dim); margin-top: 3px;
+    display: flex;
+    gap: 12px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 5px;
   }
   .mirror-list-item .mli-watchers {
-    color: var(--green); font-weight: 600;
+    color: var(--accent);
+    font-weight: 700;
   }
 
-  /* Rendered-markdown styling (shared between assistant messages + plan cards) */
-  .md-body { font-size: 13px; line-height: 1.55; color: var(--text); }
+  /* ── Markdown — editorial body text. ── */
+  .md-body { font-size: 13.5px; line-height: 1.6; color: var(--text); }
   .md-body > *:first-child { margin-top: 0; }
   .md-body > *:last-child { margin-bottom: 0; }
   .md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
-    font-weight: 600; color: var(--text); margin: 14px 0 4px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 18px 0 6px;
+    letter-spacing: -0.2px;
   }
-  .md-body h1 { font-size: 17px; }
+  .md-body h1 { font-size: 18px; }
   .md-body h2 { font-size: 15px; }
-  .md-body h3 { font-size: 14px; color: var(--text-muted); }
-  .md-body h4, .md-body h5, .md-body h6 { font-size: 13px; color: var(--text-muted); }
-  .md-body p { margin: 6px 0; }
-  .md-body ul, .md-body ol { margin: 4px 0 4px 22px; padding: 0; }
-  .md-body li { margin: 2px 0; }
+  .md-body h3 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; font-size: 11px; font-weight: 700; }
+  .md-body h4, .md-body h5, .md-body h6 { font-size: 13px; color: var(--text-dim); }
+  .md-body p { margin: 7px 0; }
+  .md-body ul, .md-body ol { margin: 6px 0 6px 22px; padding: 0; }
+  .md-body li { margin: 3px 0; }
   .md-body li > p { margin: 0; }
   .md-body code {
-    background: var(--bg); padding: 1px 5px; border-radius: 3px;
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
-    color: var(--cyan);
+    background: #07080b;
+    border: 1px solid var(--border-dim);
+    padding: 1px 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
   }
   .md-body pre {
-    background: var(--bg); padding: 10px 12px; border-radius: 4px;
-    margin: 8px 0; border-left: 2px solid var(--border);
-    overflow-x: auto; font-size: 12px; line-height: 1.5;
+    background: #07080b;
+    padding: 12px 14px;
+    margin: 10px 0;
+    border-left: 2px solid var(--accent);
+    border-right: 1px solid var(--border-dim);
+    border-top: 1px solid var(--border-dim);
+    border-bottom: 1px solid var(--border-dim);
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.55;
   }
-  .md-body pre code { background: none; padding: 0; color: var(--text); }
+  .md-body pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+    border: none;
+  }
   .md-body blockquote {
-    border-left: 3px solid var(--border); padding: 2px 0 2px 12px;
-    margin: 6px 0; color: var(--text-muted);
+    border-left: 2px solid var(--gold);
+    padding: 4px 0 4px 14px;
+    margin: 8px 0;
+    color: var(--text-dim);
+    font-style: italic;
   }
   .md-body strong { font-weight: 600; color: var(--text); }
   .md-body em { font-style: italic; }
-  .md-body a { color: var(--blue); text-decoration: none; }
-  .md-body a:hover { text-decoration: underline; }
-  .md-body hr { border: 0; border-top: 1px dashed var(--border); margin: 12px 0; }
+  .md-body a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid var(--accent-dim);
+    transition: border-color 0.1s;
+  }
+  .md-body a:hover { border-bottom-color: var(--accent); }
+  .md-body hr {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 16px 0;
+    position: relative;
+  }
+  .md-body hr::before {
+    content: "▪ ▪ ▪";
+    position: absolute;
+    top: -9px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg);
+    padding: 0 10px;
+    color: var(--accent);
+    font-size: 8px;
+    letter-spacing: 4px;
+  }
   .md-body table {
-    border-collapse: collapse; margin: 8px 0; font-size: 12.5px;
+    border-collapse: collapse; margin: 10px 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
   }
   .md-body th, .md-body td {
-    border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    text-align: left;
   }
-  .md-body th { background: var(--bg-surface); font-weight: 600; }
+  .md-body th {
+    background: var(--bg-panel);
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    font-size: 10px;
+    color: var(--accent);
+  }
 
-  /* TodoWrite — proper checkbox list (replaces ::before pseudo icons) */
-  .m-todo { list-style: none; padding: 4px 0 0 0; margin: 0; font-size: 12.5px; }
+  /* ── TodoWrite ── */
+  .m-todo {
+    list-style: none;
+    padding: 6px 0 0 0;
+    margin: 0;
+    font-size: 12.5px;
+  }
   .m-todo li {
-    display: flex; align-items: flex-start; gap: 8px;
-    padding: 3px 0; color: var(--text);
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 0;
+    color: var(--text);
   }
   .m-todo .m-checkbox {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border);
-    background: var(--bg); flex-shrink: 0; margin-top: 2px;
-    font-size: 11px; line-height: 1; font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px; height: 14px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    flex-shrink: 0;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 700;
   }
   .m-todo .m-checkbox.checked {
-    background: var(--green); border-color: var(--green); color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0b0c10;
   }
   .m-todo .m-checkbox.in-progress {
-    border-color: var(--yellow);
+    border-color: var(--gold);
     background: repeating-linear-gradient(
-      45deg, var(--bg), var(--bg) 2px, rgba(224,175,104,0.25) 2px, rgba(224,175,104,0.25) 4px
+      45deg, var(--bg), var(--bg) 2px,
+      rgba(212, 160, 77, 0.35) 2px, rgba(212, 160, 77, 0.35) 4px
     );
   }
-  .m-todo li.completed .m-todo-text { text-decoration: line-through; opacity: 0.6; }
-  .m-todo li.in_progress .m-todo-text { color: var(--yellow); font-weight: 500; }
+  .m-todo li.completed .m-todo-text { text-decoration: line-through; opacity: 0.55; }
+  .m-todo li.in_progress .m-todo-text { color: var(--gold); font-weight: 500; }
   .m-todo .m-todo-text { flex: 1; word-break: break-word; }
 
-  /* Claude Code task list (Task* tool family) — mirrors TaskListV2 in the CLI */
-  .m-task-list-block { margin-top: 6px; }
+  /* ── Task tool family ── */
+  .m-task-list-block { margin-top: 8px; }
   .m-task-line {
-    display: flex; align-items: flex-start; gap: 8px;
-    font-size: 12.5px; line-height: 1.4; padding: 2px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 2px 0;
   }
   .m-task-glyph {
     flex-shrink: 0; width: 16px; text-align: center;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 13px; line-height: 1.2;
   }
   .m-task-subject { flex: 1; word-break: break-word; }
   .m-task-line.m-task-pending .m-task-glyph { color: var(--text-muted); }
   .m-task-line.m-task-pending .m-task-subject { color: var(--text); }
-  .m-task-line.m-task-in_progress .m-task-glyph { color: var(--orange); }
+  .m-task-line.m-task-in_progress .m-task-glyph { color: var(--gold); }
   .m-task-line.m-task-in_progress .m-task-subject { color: var(--text); font-weight: 600; }
-  .m-task-line.m-task-completed .m-task-glyph { color: var(--green); }
+  .m-task-line.m-task-completed .m-task-glyph { color: var(--accent); }
   .m-task-line.m-task-completed .m-task-subject {
     color: var(--text-muted); text-decoration: line-through; opacity: 0.85;
   }
-  .m-task-line.m-task-deleted .m-task-glyph { color: var(--red); }
+  .m-task-line.m-task-deleted .m-task-glyph { color: var(--accent); }
   .m-task-line.m-task-deleted .m-task-subject {
     color: var(--text-dim); text-decoration: line-through;
   }
   .m-task-activity {
-    font-size: 11.5px; color: var(--text-muted); padding-left: 24px;
-    font-style: italic; margin-top: 1px;
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-muted); padding-left: 26px;
+    font-style: italic; margin-top: 2px;
+    letter-spacing: 0.2px;
   }
   .m-task-summary {
-    font-size: 11px; color: var(--text-muted); margin-top: 8px;
-    padding-top: 4px; border-top: 1px dashed var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 10px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border);
   }
-  .m-task-summary strong { color: var(--text); font-weight: 600; }
+  .m-task-summary strong { color: var(--text); font-weight: 700; }
+
+  /* ── ANIMATIONS ─────────────────────────────────────────────── */
+
+  /* New-event flash: each event arrives with a brief accent-red
+     background tint that fades to transparent. Gives the feed a
+     sense of live activity without being gratuitous. */
+  @keyframes event-flash {
+    0% {
+      background-color: var(--accent-ink);
+      border-left-color: var(--accent);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  /* Live "on air" pulse — for the live indicator dot in the header
+     and mirror-header. Two-stage pulse, feels mechanical/broadcast
+     rather than UI-ornamental. */
+  @keyframes live-pulse {
+    0%, 60%, 100% { opacity: 1; }
+    30% { opacity: 0.25; }
+  }
+
+  /* ── Misc ── */
+  /* Panel-body scrollable area inside sidebar/teams panels. */
+  .panel-body { padding: 0; }
+
+  /* Text selection — use the accent so selection feels 'on brand'. */
+  ::selection { background: var(--accent); color: #0b0c10; }
+
+  /* Prefers-reduced-motion: disable the two animations above. */
+  @media (prefers-reduced-motion: reduce) {
+    .m-evt { animation: none; }
+    header h1::before, #mirror-conn::before { animation: none; }
+  }
 </style>
 <script src="/bin/marked.umd.min.js"></script>
 <script src="/bin/purify.min.js"></script>
@@ -1188,6 +1894,9 @@
     if (!iso) return '';
     try {
       var d = new Date(iso);
+      // Respect the user's locale (12-hour with am/pm or 24-hour,
+      // whichever the browser prefers). The gutter is sized to fit
+      // either.
       return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     } catch { return ''; }
   }
@@ -1211,12 +1920,22 @@
     var transcriptEl = document.getElementById('mirror-transcript');
 
     sidEl.textContent = sid;
-    connEl.textContent = 'connecting…';
+    // Broadcast-style states: CONNECTING / LIVE / OFFLINE / ERROR.
+    // The is-live / is-error classes drive the pulsing red dot CSS.
+    function setConnState(state) {
+      connEl.classList.remove('is-live', 'is-error');
+      if (state === 'live') { connEl.textContent = 'LIVE'; connEl.classList.add('is-live'); }
+      else if (state === 'offline') { connEl.textContent = 'OFFLINE'; }
+      else if (state === 'connecting') { connEl.textContent = 'CONNECTING'; }
+      else if (state === 'error') { connEl.textContent = 'ERROR'; connEl.classList.add('is-error'); }
+      else if (state === 'unauth') { connEl.textContent = 'UNAUTHENTICATED'; connEl.classList.add('is-error'); }
+    }
+    setConnState('connecting');
 
     if (!token) {
       statusEl.className = 'mirror-status error';
       statusEl.textContent = 'Missing token in URL fragment. Paste the full mirror URL (including #token=...).';
-      connEl.textContent = 'unauthenticated';
+      setConnState('unauth');
       return;
     }
 
@@ -2263,6 +2982,14 @@
         el.innerHTML = '<pre>' + escapeHtml(JSON.stringify(evt)) + '</pre>';
       }
 
+      // Broadcast-style gutter timestamp: every event row carries its
+      // own HH:MM:SS in the left rail via data-ts, which the CSS
+      // ::before picks up. Skip for inline-centered system events
+      // (notif/compact/end) — they're their own visual treatment.
+      if (el && !el.classList.contains('m-evt-compact') && !el.classList.contains('m-evt-end')) {
+        el.setAttribute('data-ts', ts);
+      }
+
       transcriptEl.appendChild(el);
       scrollToBottom();
     }
@@ -2300,7 +3027,7 @@
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
-      connEl.textContent = 'connected';
+      setConnState('live');
       if (msg.closed_at) {
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
@@ -2329,12 +3056,12 @@
       try {
         mws = new WebSocket(url);
       } catch (e) {
-        connEl.textContent = 'error';
+        setConnState('error');
         statusEl.className = 'mirror-status error';
         statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
         return;
       }
-      mws.onopen = function() { connEl.textContent = 'connected'; statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
+      mws.onopen = function() { setConnState('live'); statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
       mws.onmessage = function(e) {
         var msg;
         try { msg = JSON.parse(e.data); } catch { return; }
@@ -2346,7 +3073,7 @@
         }
       };
       mws.onclose = function() {
-        connEl.textContent = 'disconnected';
+        setConnState('offline');
         if (mReconnectTimer) return;
         mReconnectTimer = setTimeout(function() { mReconnectTimer = null; mConnect(); }, 3000);
       };

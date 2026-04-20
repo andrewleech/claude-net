@@ -577,6 +577,10 @@
   }
   .mirror-list-item:hover { background: var(--bg-hover); border-left-color: var(--blue); }
   .mirror-list-item .mli-owner { font-size: 13px; color: var(--text); }
+  .mirror-list-item .mli-sid {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px; color: var(--text-dim); font-weight: normal;
+  }
   .mirror-list-item .mli-cwd { font-size: 11px; color: var(--text-muted); font-family: monospace; margin-top: 2px; }
   .mirror-list-item .mli-meta {
     display: flex; gap: 10px; font-size: 10px; color: var(--text-dim); margin-top: 3px;
@@ -939,9 +943,16 @@
       var watchers = (e.watcher_count || 0) > 0
         ? '<span class="mli-watchers">' + e.watcher_count + ' watching</span>'
         : '';
+      // Short sid suffix so fork-sessions in the same folder are
+      // visibly distinct in the sidebar without needing name-sync
+      // between plugin and mirror-agent.
+      var sidTail = e.sid ? String(e.sid).slice(-6) : '';
       html +=
         '<a class="mirror-list-item" href="' + escapeAttr(e.mirror_url) + '">' +
-          '<div class="mli-owner">' + escapeHtml(e.owner_agent) + '</div>' +
+          '<div class="mli-owner">' +
+            escapeHtml(e.owner_agent) +
+            (sidTail ? ' <span class="mli-sid">· ' + escapeHtml(sidTail) + '</span>' : '') +
+          '</div>' +
           '<div class="mli-cwd">' + escapeHtml(e.cwd || '') + '</div>' +
           '<div class="mli-meta">' +
             '<span>' + (e.transcript_len || 0) + ' events</span>' +

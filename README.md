@@ -17,6 +17,7 @@ If you run multiple Claude Code sessions at once, across multiple projects or ma
 - **Broadcasts** to every online agent
 - **Teams** — ad-hoc groups that appear on first join and vanish when the last member leaves
 - **A live dashboard** at `http://<hub>:4815/` showing connected agents, teams, and a scrolling message feed. You can send messages from it too.
+- **Mirror sessions** — follow a Claude Code session from any browser on your trust network. Live transcript with tool calls, rich diffs, slash-command autocomplete; type prompts back in, paste arbitrarily large blobs, hit Esc to interrupt the agent. Works well on a phone.
 - **Startup ping** — your agent knows within a second of startup whether the channel round-trip is actually working
 - **One Docker container** — no Redis, no Postgres, nothing else to run
 - **Tailscale / LAN-friendly** — trust is network-level, so there's no login flow to deal with
@@ -133,7 +134,7 @@ Wraps to multiple lines on narrow terminals (reads width via `/dev/tty`).
 
 ## Mirror sessions (follow & continue a chat from another device)
 
-With mirror-session turned on, every Claude Code session launched via `claude-channels` streams its conversation to the hub's web UI. Open the mirror URL in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results). Tmux-based remote injection arrives in the next milestone; M1 ships read-only.
+With mirror-session turned on, every Claude Code session launched via `claude-channels` streams its conversation to the hub's web UI. Open the mirror URL in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results), type prompts back in, and interrupt the agent — all from anywhere on your trust network, including a phone.
 
 Enable once in `~/.claude/settings.json`:
 
@@ -143,24 +144,31 @@ Enable once in `~/.claude/settings.json`:
 }
 ```
 
-On the next `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only) and, if hooks aren't yet installed, prints the hook block you need to paste into the same `settings.json`. Once the hooks are in place, every session auto-appears at `http://<hub>:4815/mirror/<sid>#token=<owner-token>`. Ask Claude `/mirror url` (or `mirror_status`) for the URL of the current session.
+On the next `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only). The `/setup` script installs the hooks for you; if you skipped that, the launcher prints the hook block to paste into the same `settings.json`. Every session auto-appears at `http://<hub>:4815/mirror/<sid>#token=<owner-token>`. Ask Claude `/mirror url` (or `mirror_status`) for the URL of the current session.
 
 - Tokens are 128-bit hex, delivered in the URL fragment — never in `Referer` or hub access logs.
 - The mirror-agent listens on loopback only and sits between claude's hooks and the hub — claude never blocks on the network (hard 50ms hook timeout).
-- In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence + reader tokens + redactor land in Phase M3.
+- In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence via `CLAUDE_NET_MIRROR_STORE` (see below).
 
-**Remote input from the browser (tmux-based, Phase M2).** The `/mirror/<sid>` page has a compose box: type a prompt, hit Enter, and `tmux send-keys` drops it into the live claude REPL. Requires the session to be running inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. Injects are accepted by default; run `mirror_consent never` inside the session to flip it to read-only, or `mirror_consent always` / `mirror_consent reset` to re-enable. Set `CLAUDE_NET_NO_TMUX_WRAP=1` in your environment to opt out of the auto-wrap. An opt-in binary-patch variant that removes the tmux dependency lands in Phase M4.
+**Remote input.** The `/mirror/<sid>` page has a compose box: type a prompt, hit Enter (or tap Transmit), and `tmux send-keys` drops it into the live claude REPL. Requires the session to run inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. Injects are accepted by default; run `mirror_consent never` inside the session to flip to read-only, or `mirror_consent always` / `mirror_consent reset` to re-enable. Set `CLAUDE_NET_NO_TMUX_WRAP=1` to opt out of the auto-wrap.
 
-**Sharing, redacting, persisting (Phase M3).**
+Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: the mirror-agent writes the blob to `/tmp/claude-net/pastes/paste-<uuid>.txt` and the hub auto-injects `@<path>` so Claude reads the file. Caps are tunable with `CLAUDE_NET_MIRROR_INJECT_MAX_KB` (default 512) and `CLAUDE_NET_MIRROR_PASTE_MAX_MB` (default 64).
 
-- **Share** — click the `share` button in the mirror header (visible to owners only), or ask claude `mirror_share`. Copies a new URL to your clipboard with a read-only token. Reader-token viewers see the transcript live but can't inject, share, or revoke.
-- **Revoke** — `mirror_revoke <token>` or `mirror_revoke all` closes holders' WebSockets immediately.
-- **Redactor** — the mirror-agent scrubs a starter list of secret formats (AWS keys, GitHub PATs, Anthropic/OpenAI tokens, PEM headers, JWTs) from every event before it leaves your host. Add project-specific regexes at `~/.claude-net/redact.json` or `<cwd>/.claude-net/redact.json`. Redaction is a convenience, not a compliance control — don't treat it as such.
-- **Persistence** — default is in-memory. Set `CLAUDE_NET_MIRROR_STORE=/path/to/dir` on the hub and transcripts are appended to `<sid>.jsonl` files; reach them after a hub restart at `/api/mirror/archive/<sid>`. Retention defaults to 24h (`CLAUDE_NET_MIRROR_RETENTION_HOURS`).
-- **TLS** — set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
-- **Rate limits** — `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
+**Stop button.** The ■ button in the mirror header sends Escape to the tmux pane — same as pressing Esc in the TUI, interrupts the current response without exiting.
 
-Full design: [`docs/MIRROR_SESSION_PLAN.md`](docs/MIRROR_SESSION_PLAN.md) and the per-phase files next to it.
+**Slash-command autocomplete.** Typing `/` at the start of a prompt opens a popover with every slash command available to this session's Claude Code: built-ins, user commands (`~/.claude/commands/`), project-local commands, and plugin-provided commands. Arrow keys + Enter/Tab on desktop, tap on mobile.
+
+**Theme.** Toggle between dark (broadcast-console) and light (newsprint) via the ◐ button; the choice is remembered per-browser.
+
+**Sharing.** Click the `share` button in the mirror header (owners only) or ask claude `mirror_share`. Copies a new URL with a read-only token. Reader-token viewers see the transcript live but can't inject, share, or revoke. Revoke with `mirror_revoke <token>` or `mirror_revoke all`.
+
+**Redaction.** The mirror-agent scrubs a starter list of secret formats (AWS keys, GitHub PATs, Anthropic/OpenAI tokens, PEM headers, JWTs) from every event before it leaves your host. Add project-specific regexes at `~/.claude-net/redact.json` or `<cwd>/.claude-net/redact.json`. Convenience, not a compliance control.
+
+**Persistence.** Default is in-memory. Set `CLAUDE_NET_MIRROR_STORE=/path/to/dir` on the hub and transcripts append to `<sid>.jsonl` files; reach them after a hub restart at `/api/mirror/archive/<sid>`. Retention defaults to 24h (`CLAUDE_NET_MIRROR_RETENTION_HOURS`).
+
+**TLS.** Set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
+
+**Rate limits.** `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
 
 ## How it works
 

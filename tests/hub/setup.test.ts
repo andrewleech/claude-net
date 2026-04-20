@@ -54,6 +54,53 @@ describe("Setup endpoint", () => {
     process.env.CLAUDE_NET_HOST = undefined;
   });
 
+  test("GET /setup uses full URL verbatim when CLAUDE_NET_HOST is a URL", async () => {
+    process.env.CLAUDE_NET_HOST = "https://cn.tynan.io";
+    const resp = await fetch(`${baseUrl}/setup`);
+    const body = await resp.text();
+
+    expect(body).toContain('HUB="https://cn.tynan.io"');
+    expect(body).not.toContain("https://cn.tynan.io:4815");
+
+    process.env.CLAUDE_NET_HOST = undefined;
+  });
+
+  test("GET /setup strips trailing slash from full CLAUDE_NET_HOST URL", async () => {
+    process.env.CLAUDE_NET_HOST = "https://cn.tynan.io/";
+    const resp = await fetch(`${baseUrl}/setup`);
+    const body = await resp.text();
+
+    expect(body).toContain('HUB="https://cn.tynan.io"');
+
+    process.env.CLAUDE_NET_HOST = undefined;
+  });
+
+  test("GET /setup ignores X-Forwarded-Host (canonical URL wins)", async () => {
+    process.env.CLAUDE_NET_HOST = "http://london:4815";
+    const resp = await fetch(`${baseUrl}/setup`, {
+      headers: {
+        "x-forwarded-host": "public.example",
+        "x-forwarded-proto": "https",
+      },
+    });
+    const body = await resp.text();
+
+    // Canonical model: setup always emits CLAUDE_NET_HOST, not the
+    // entry-point-specific X-Forwarded-* headers.
+    expect(body).toContain('HUB="http://london:4815"');
+    expect(body).not.toContain("public.example");
+
+    process.env.CLAUDE_NET_HOST = undefined;
+  });
+
+  test("response includes bun preflight check", async () => {
+    const resp = await fetch(`${baseUrl}/setup`);
+    const body = await resp.text();
+
+    expect(body).toContain("command -v bun");
+    expect(body).toContain("bun.sh/install");
+  });
+
   test("response is valid bash script", async () => {
     const resp = await fetch(`${baseUrl}/setup`);
     const body = await resp.text();

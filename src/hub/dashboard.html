@@ -947,8 +947,15 @@
       // visibly distinct in the sidebar without needing name-sync
       // between plugin and mirror-agent.
       var sidTail = e.sid ? String(e.sid).slice(-6) : '';
+      // Build a RELATIVE link so the mirror view opens on the same
+      // domain the user is currently browsing from (cn.tynan.io,
+      // london:4815, tailscale hostname, whatever). The absolute
+      // mirror_url on the summary is kept for the plugin / share flow
+      // which needs to embed the canonical URL in shareable text.
+      var href = '/mirror/' + encodeURIComponent(e.sid) +
+        '#token=' + encodeURIComponent(e.owner_token || '');
       html +=
-        '<a class="mirror-list-item" href="' + escapeAttr(e.mirror_url) + '">' +
+        '<a class="mirror-list-item" href="' + escapeAttr(href) + '">' +
           '<div class="mli-owner">' +
             escapeHtml(e.owner_agent) +
             (sidTail ? ' <span class="mli-sid">· ' + escapeHtml(sidTail) + '</span>' : '') +

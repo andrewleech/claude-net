@@ -10,6 +10,7 @@ import type {
   MirrorTokenType,
 } from "@/shared/types";
 import { Elysia } from "elysia";
+import { resolveCanonicalHubUrl } from "./hub-url";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 
@@ -704,8 +705,8 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = 409;
           return { error: result.error };
         }
-        const host = resolveMirrorHost(externalHost, port, request);
-        const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${result.entry.sid}#token=${result.token}`;
+        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
+        const mirrorUrl = `${hubBase}/mirror/${result.entry.sid}#token=${result.token}`;
         return {
           sid: result.entry.sid,
           owner_token: result.token,
@@ -719,11 +720,10 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         // hub's internal dashboard on a trusted network — the same trust
         // posture as the rest of the hub. Do not expose this to a public
         // dashboard without a further auth layer.
-        const host = resolveMirrorHost(externalHost, port, request);
-        const scheme = schemeFor(request);
+        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
         return mirrorRegistry.listAllWithTokens().map((s) => ({
           ...s,
-          mirror_url: `${scheme}://${host}/mirror/${s.sid}#token=${s.owner_token}`,
+          mirror_url: `${hubBase}/mirror/${s.sid}#token=${s.owner_token}`,
         }));
       })
 
@@ -787,8 +787,8 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = issued.status;
           return { error: issued.error };
         }
-        const host = resolveMirrorHost(externalHost, port, request);
-        const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${params.sid}#token=${issued.token}`;
+        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
+        const mirrorUrl = `${hubBase}/mirror/${params.sid}#token=${issued.token}`;
         return {
           sid: params.sid,
           reader_token: issued.token,
@@ -1056,40 +1056,6 @@ function sanitizeWatcher(s: string): string {
     if (out.length >= 120) break;
   }
   return out;
-}
-
-function resolveMirrorHost(
-  externalHost: string | undefined,
-  port: number | undefined,
-  request: Request,
-): string {
-  // Prefer whatever host the client is actually talking to — either an
-  // X-Forwarded-Host set by a reverse proxy, or the direct Host header.
-  // This way the mirror URLs you click in the dashboard point back at
-  // the same hostname you're already viewing the dashboard from (public
-  // DNS name → same name in the URL; LAN hostname → LAN hostname; raw
-  // IP → that IP).
-  //
-  // Only fall back to CLAUDE_NET_HOST when no host info is in the
-  // request (e.g. a curl with no Host header).
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  const directHost = request.headers.get("host");
-  const host = forwardedHost ?? directHost;
-  if (host) return host;
-  if (externalHost) {
-    if (!externalHost.includes(":") && port) {
-      return `${externalHost}:${port}`;
-    }
-    return externalHost;
-  }
-  return `localhost:${port ?? 4815}`;
-}
-
-function schemeFor(request: Request): "http" | "https" {
-  const proto =
-    request.headers.get("x-forwarded-proto") ??
-    (request.url.startsWith("https:") ? "https" : "http");
-  return proto === "https" ? "https" : "http";
 }
 
 function remoteKeyFor(request: Request): string {

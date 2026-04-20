@@ -1,4 +1,5 @@
 import { Elysia } from "elysia";
+import { resolveCanonicalHubUrl } from "./hub-url";
 
 export interface SetupDeps {
   port: number;
@@ -22,22 +23,7 @@ export function setupPlugin(deps: SetupDeps): Elysia {
 
   return new Elysia().get("/setup", ({ request, set }) => {
     const envHost = process.env.CLAUDE_NET_HOST;
-    let host: string;
-
-    if (envHost) {
-      host = envHost;
-    } else {
-      const headerHost = request.headers.get("host");
-      host = headerHost ?? `localhost:${port}`;
-    }
-    if (!host.includes(":")) {
-      host = `${host}:${port}`;
-    }
-
-    const proto =
-      request.headers.get("x-forwarded-proto") ??
-      (request.url.startsWith("https:") ? "https" : "http");
-    const hubUrl = `${proto}://${host}`;
+    const hubUrl = resolveCanonicalHubUrl(request, envHost, port);
 
     set.headers["content-type"] = "text/plain";
 
@@ -45,6 +31,12 @@ export function setupPlugin(deps: SetupDeps): Elysia {
 set -euo pipefail
 # claude-net + mirror-session one-shot installer.
 # Generated dynamically by ${hubUrl}/setup — do not cache.
+
+if ! command -v bun >/dev/null 2>&1; then
+    echo "ERROR: claude-net needs 'bun' on PATH." >&2
+    echo "Install: curl -fsSL https://bun.sh/install | bash" >&2
+    exit 1
+fi
 
 HUB="${hubUrl}"
 INSTALL_DIR="\$HOME/.local/share/claude-channels/bin"

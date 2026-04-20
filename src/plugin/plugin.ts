@@ -262,6 +262,11 @@ function deleteSessionState(): void {
 let ws: WebSocket | null = null;
 let storedName = "";
 let registeredName = "";
+// When auto-register had to fall back to a -N suffix, hold the original
+// (pre-suffix) name here so the first claude-net tool call can nudge the
+// LLM to ask the user for a nicer name. Cleared after one nudge or after
+// a manual register() call.
+let pendingRenameNudgeBase: string | null = null;
 let hubWsUrl = "";
 let reconnectDelay = RECONNECT_INITIAL_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -367,6 +372,8 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
       await request({ action: "register", name: candidate });
       storedName = candidate;
       registeredName = candidate;
+      // Arm a rename nudge if we had to fall back to a suffix.
+      pendingRenameNudgeBase = attempt === 0 ? null : baseName;
       log(
         attempt === 0
           ? `Auto-registered as ${candidate}`
@@ -689,6 +696,22 @@ function toolResult(data: unknown) {
   };
 }
 
+/**
+ * If auto-register had to use a `-N` suffix, attach a one-shot nudge to the
+ * next tool result so the LLM asks the user whether they'd like a custom
+ * name. The nudge fires once per startup; after that `pendingRenameNudgeBase`
+ * is cleared and subsequent calls are untouched.
+ */
+function attachRenameNudgeIfPending<
+  T extends { content: { type: "text"; text: string }[] },
+>(result: T): T {
+  if (!pendingRenameNudgeBase || !registeredName) return result;
+  const note = `Rename suggestion: the default claude-net name "${pendingRenameNudgeBase}" was already taken, so this session was auto-registered as "${registeredName}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`;
+  result.content.push({ type: "text", text: note });
+  pendingRenameNudgeBase = null;
+  return result;
+}
+
 // ── Mirror-agent bridge (loopback HTTP) ───────────────────────────────────
 
 const MIRROR_STATE_DIR = "/tmp/claude-net";
@@ -929,7 +952,7 @@ async function handleToolCall(
         `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
       );
     }
-    return toolResult({ name: registeredName });
+    return attachRenameNudgeIfPending(toolResult({ name: registeredName }));
   }
 
   // Mirror tools talk to the local mirror-agent daemon via loopback.
@@ -976,10 +999,13 @@ async function handleToolCall(
   try {
     const data = await request(frame);
 
-    // Update stored+registered name on successful register
+    // Update stored+registered name on successful register.
+    // A manual register cancels any pending rename nudge — the user has
+    // already chosen a name, so we don't want to prompt them again.
     if (name === "register" && effectiveArgs.name) {
       storedName = effectiveArgs.name;
       registeredName = effectiveArgs.name;
+      pendingRenameNudgeBase = null;
       writeSessionState({
         name: effectiveArgs.name,
         status: "online",
@@ -988,7 +1014,7 @@ async function handleToolCall(
       });
     }
 
-    return toolResult(data);
+    return attachRenameNudgeIfPending(toolResult(data));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return notConnectedError(message);

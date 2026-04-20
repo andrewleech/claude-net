@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>claude-net</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -138,13 +138,13 @@
   }
 
   header {
-    height: 44px;
-    padding: 0 16px 0 18px;
+    min-height: calc(44px + env(safe-area-inset-top));
+    /* Respect iOS Dynamic Island / notch via env() insets. */
+    padding:
+      env(safe-area-inset-top) calc(16px + env(safe-area-inset-right))
+      0 calc(18px + env(safe-area-inset-left));
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
-    /* Unify the font profile across the whole header so every inline
-       element shares a baseline — avoids the 'wordmark higher than
-       stats' drift from mixed font-sizes. */
     font-family: var(--font-mono);
     font-size: 11px;
     line-height: 1;
@@ -577,8 +577,11 @@
   @media (max-width: 700px) {
     .mirror-header {
       height: auto;
-      min-height: 44px;
-      padding: 8px 12px;
+      min-height: calc(44px + env(safe-area-inset-top));
+      /* Respect iOS safe-area insets (Dynamic Island / notch). */
+      padding:
+        calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+        8px calc(12px + env(safe-area-inset-left));
       gap: 10px;
       flex-wrap: wrap;
     }
@@ -1086,7 +1089,10 @@
   .mirror-compose {
     display: flex;
     align-items: stretch;
-    padding: 14px 20px;
+    /* Respect iOS home-indicator / left & right safe-area insets. */
+    padding:
+      14px calc(20px + env(safe-area-inset-right))
+      calc(14px + env(safe-area-inset-bottom)) calc(20px + env(safe-area-inset-left));
     background: var(--bg-panel);
     border-top: 1px solid var(--border);
     position: relative;

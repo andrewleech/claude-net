@@ -844,6 +844,34 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       session,
       `inject from ${watcher}: ${JSON.stringify(preview)}`,
     );
+    // Claude Code prints TUI-level rejections ("Unknown command:", "Args
+    // from unknown skill:") directly to the pane without emitting a hook
+    // event. Capture the pane after it's had time to redraw and forward
+    // any such lines as a notification so the web watcher sees them.
+    void postInjectRejectionCheck(session).catch((err: unknown) => {
+      log(`[${session.sid}] post-inject check threw: ${String(err)}`);
+    });
+  }
+
+  async function postInjectRejectionCheck(
+    session: SessionState,
+  ): Promise<void> {
+    if (!session.tmuxPane) return;
+    // Wait long enough for Claude Code to redraw but short enough that
+    // the rejection line is near the bottom of what we capture.
+    await sleep(800);
+    const cap = await injector.capturePane(session.tmuxPane, 30);
+    if (!cap.ok) return;
+    const lines = cap.output.split("\n").slice(-30);
+    const rejectionRx =
+      /^\s*(?:❯\s+)?(Unknown command:.*|Args from unknown (?:skill|command):.*|Error: .*)$/;
+    const matches: string[] = [];
+    for (const line of lines) {
+      const m = line.match(rejectionRx);
+      if (m?.[1]) matches.push(m[1].trim());
+    }
+    if (matches.length === 0) return;
+    emitAuditEvent(session, `tmux pane reported: ${matches.join(" · ")}`);
   }
 
   function emitAuditEvent(session: SessionState, text: string): void {

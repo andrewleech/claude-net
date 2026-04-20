@@ -6,3 +6,4 @@ bin/__pycache__/
 # Build artifact — the hub builds this lazily on first /bin/mirror-agent.bundle.js
 # request, and the Dockerfile pre-builds it at image time.
 bin/mirror-agent.bundle.js
+.claude/screens/

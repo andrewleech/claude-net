@@ -106,6 +106,7 @@ function scanCommandsDir(
   dir: string,
   source: string,
   out: SlashCommand[],
+  namePrefix = "",
 ): void {
   let entries: fs.Dirent[];
   try {
@@ -116,12 +117,15 @@ function scanCommandsDir(
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isFile() && entry.name.endsWith(".md")) {
-      const cmd = parseCommandFile(fullPath, source);
+      const cmd = parseCommandFile(fullPath, source, namePrefix);
       if (cmd) out.push(cmd);
     } else if (entry.isDirectory()) {
-      // Commands can be nested, e.g.
-      //   commands/idea-plan-execute/00-brainstorm.md
-      scanCommandsDir(fullPath, source, out);
+      // Nested subdirs extend the namespace, e.g.
+      //   commands/idea-plan-execute/00-brainstorm.md → `<plugin>:idea-plan-execute:00-brainstorm`
+      const nextPrefix = namePrefix
+        ? `${namePrefix}:${entry.name}`
+        : entry.name;
+      scanCommandsDir(fullPath, source, out, nextPrefix);
     }
   }
 }
@@ -135,6 +139,7 @@ function scanCacheRoot(cacheRoot: string, out: SlashCommand[]): void {
           path.join(versionDir, "commands"),
           `plugin:${pluginName}`,
           out,
+          pluginName,
         );
       });
     });
@@ -150,6 +155,7 @@ function scanMarketplacesRoot(root: string, out: SlashCommand[]): void {
         path.join(pluginDir, "commands"),
         `plugin:${pluginName}`,
         out,
+        pluginName,
       );
     });
   });
@@ -172,10 +178,13 @@ function forEachSubdir(
 }
 
 /** Parse YAML frontmatter at the top of a command .md file. Tolerant of
- *  missing / malformed frontmatter. */
+ *  missing / malformed frontmatter. `namePrefix` prepends the plugin /
+ *  nested-dir namespace (joined by colons), matching how Claude Code
+ *  dispatches `<plugin>:<subdir>:<file>` slash commands. */
 export function parseCommandFile(
   filePath: string,
   source: string,
+  namePrefix = "",
 ): SlashCommand | null {
   let content: string;
   try {
@@ -185,8 +194,9 @@ export function parseCommandFile(
   }
   const fallbackName = path.basename(filePath, ".md");
   const fm = parseFrontmatter(content);
-  const name = (fm.name ?? fallbackName).trim();
-  if (!name) return null;
+  const bareName = (fm.name ?? fallbackName).trim();
+  if (!bareName) return null;
+  const name = namePrefix ? `${namePrefix}:${bareName}` : bareName;
   return {
     name,
     ...(fm.description ? { description: fm.description.trim() } : {}),

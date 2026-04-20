@@ -117,6 +117,25 @@ export class TmuxInjector {
     return { ok: true };
   }
 
+  /** Capture the visible pane content (most recent `lines` lines). Used
+   *  post-inject to surface TUI-level rejections like "Unknown command:"
+   *  that don't emit a hook event. */
+  async capturePane(
+    pane: string,
+    lines: number,
+  ): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
+    const result = await runTmux(this.tmuxBin, [
+      "capture-pane",
+      "-t",
+      pane,
+      "-p",
+      "-S",
+      `-${lines}`,
+    ]);
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true, output: result.stdout };
+  }
+
   /** Test helper: clear the rate-limit state. */
   resetRateLimit(sid?: string): void {
     if (sid) this.lastInjectAt.delete(sid);

@@ -279,10 +279,30 @@
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-  /* Mirror-session view (path /mirror/:sid) */
-  #mirror-root { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  /* Dashboard / mirror root wrappers — each behaves like the original body
+     flex column so header + main + footer keep their layout. */
+  #dashboard-root,
+  #mirror-root {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #mirror-root { display: none; }
   body.mirror-mode #dashboard-root { display: none; }
   body.mirror-mode #mirror-root { display: flex; }
+
+  /* "Back to dashboard" breadcrumb in the mirror header */
+  .mirror-nav-back {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    margin-right: 12px;
+  }
+  .mirror-nav-back:hover { background: var(--bg-hover); color: var(--text); }
 
   .mirror-header {
     display: flex; align-items: center; gap: 16px;
@@ -315,6 +335,90 @@
   .m-evt-tool summary { cursor: pointer; color: var(--text-muted); font-size: 12px; user-select: none; }
   .m-evt-tool .m-tool-result { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
   .m-evt-tool.is-error { border-left-color: var(--red); }
+
+  /* Tool-card headline shared styles */
+  .m-tool-headline {
+    display: flex; align-items: baseline; gap: 10px; font-size: 13px;
+    color: var(--text); line-height: 1.4;
+  }
+  .m-tool-headline .m-tool-name {
+    font-size: 10px; font-weight: 600; color: var(--cyan);
+    text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+  }
+  .m-tool-headline .m-tool-target {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .m-tool-sub {
+    font-size: 11px; color: var(--text-muted); margin-top: 3px;
+  }
+  .m-tool-badge {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; background: var(--border); color: var(--text-muted);
+    margin-left: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .m-tool-badge.pending { background: rgba(224,175,104,0.20); color: var(--yellow); }
+  .m-tool-badge.ok { background: rgba(158,206,106,0.15); color: var(--green); }
+  .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--red); }
+  .m-tool-badge.nosupport { background: rgba(187,154,247,0.15); color: var(--purple); }
+
+  /* TodoWrite list */
+  .m-todo { list-style: none; padding: 6px 0 0 0; margin: 0; font-size: 12.5px; }
+  .m-todo li { padding: 2px 0; color: var(--text); }
+  .m-todo li.pending::before { content: "○ "; color: var(--text-dim); }
+  .m-todo li.in_progress::before { content: "● "; color: var(--yellow); }
+  .m-todo li.completed::before { content: "✓ "; color: var(--green); text-decoration: line-through; opacity: 0.7; }
+  .m-todo li.completed { text-decoration: line-through; opacity: 0.7; }
+
+  /* Diff for Edit/Write */
+  .m-diff { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; margin-top: 6px; }
+  .m-diff .m-diff-old { background: rgba(247,118,142,0.10); color: var(--red); padding: 0 4px; display: block; }
+  .m-diff .m-diff-new { background: rgba(158,206,106,0.10); color: var(--green); padding: 0 4px; display: block; }
+  .m-diff .m-diff-old::before { content: "- "; }
+  .m-diff .m-diff-new::before { content: "+ "; }
+
+  /* Question cards (ExitPlanMode / AskUserQuestion) */
+  .m-evt-question {
+    align-self: stretch; padding: 12px 14px; border-radius: 6px;
+    border: 1px solid var(--yellow); background: rgba(224,175,104,0.06);
+  }
+  .m-evt-question.answered { border-color: var(--border); background: var(--bg-surface); }
+  .m-q-banner {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    color: var(--yellow); text-transform: uppercase; letter-spacing: 0.6px;
+    padding: 2px 8px; border: 1px solid var(--yellow); border-radius: 3px;
+  }
+  .m-evt-question.answered .m-q-banner { color: var(--text-dim); border-color: var(--border); }
+  .m-q-body { margin-top: 10px; font-size: 13px; line-height: 1.55; }
+  .m-q-body h1, .m-q-body h2, .m-q-body h3 {
+    font-weight: 600; color: var(--text); margin-top: 10px; margin-bottom: 4px;
+  }
+  .m-q-body h1 { font-size: 16px; }
+  .m-q-body h2 { font-size: 14px; }
+  .m-q-body h3 { font-size: 13px; color: var(--text-muted); }
+  .m-q-body ul, .m-q-body ol { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }
+  .m-q-body li { margin: 2px 0; }
+  .m-q-body code {
+    background: var(--bg); padding: 1px 4px; border-radius: 3px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+  }
+  .m-q-body pre {
+    background: var(--bg); padding: 8px 10px; border-radius: 4px; margin: 6px 0;
+    border-left: 2px solid var(--border); overflow-x: auto;
+  }
+  .m-q-body strong { font-weight: 600; color: var(--text); }
+  .m-q-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .m-q-action {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 3px; font-size: 12px; cursor: pointer;
+    font-family: inherit; text-align: left;
+  }
+  .m-q-action:hover { background: var(--bg-hover); border-color: var(--blue); }
+  .m-q-action.primary { background: rgba(158,206,106,0.10); border-color: var(--green); color: var(--green); }
+  .m-q-action.primary:hover { background: rgba(158,206,106,0.20); }
+  .m-q-action .m-q-action-desc { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; font-weight: normal; }
+  .m-q-answer { margin-top: 10px; font-size: 12px; color: var(--text-muted); font-style: italic; }
 
   .m-evt-notif { align-self: center; color: var(--text-muted); font-style: italic; font-size: 12px; }
   .m-evt-compact { align-self: center; color: var(--text-dim); font-size: 12px; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); padding: 4px 12px; }
@@ -416,6 +520,7 @@
 
 <div id="mirror-root">
   <header class="mirror-header">
+    <a class="mirror-nav-back" href="/" title="Back to main dashboard">← dashboard</a>
     <div class="mirror-title">mirror session<span class="sid" id="mirror-sid"></span></div>
     <div class="mirror-meta">
       <span class="cwd" id="mirror-cwd"></span>
@@ -873,14 +978,391 @@
     }
 
     var rendered = Object.create(null); // uuid → true
-    var autoscroll = true;
+    var userScrolledUp = false;
+    var SCROLL_LOCK_THRESHOLD = 80;
 
     transcriptEl.addEventListener('scroll', function() {
-      var nearBottom =
-        transcriptEl.scrollTop + transcriptEl.clientHeight >=
-        transcriptEl.scrollHeight - 24;
-      autoscroll = nearBottom;
+      var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+      userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
     });
+
+    function scrollToBottom() {
+      if (userScrolledUp) return;
+      requestAnimationFrame(function() {
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      });
+    }
+
+    // ── Tool renderers ───────────────────────────────────────────────
+    // Each entry has { call(payload, el), result(payload, el), label? }.
+    // `call` is invoked when the tool_call arrives; `result` when the
+    // matching tool_result arrives on the same card. Fallbacks cover
+    // tools we don't have a custom renderer for yet.
+
+    function toolLabelFromName(name) {
+      if (!name) return '';
+      // Parse MCP tool names: mcp__<server>__<tool> → "<server>: <tool>"
+      var m = name.match(/^mcp__([^_]+)__(.+)$/);
+      if (m) return m[1] + ': ' + m[2];
+      return name;
+    }
+
+    function shortPath(p) {
+      if (!p) return '';
+      var parts = p.split('/');
+      if (parts.length <= 2) return p;
+      return '…/' + parts.slice(-2).join('/');
+    }
+
+    function makeHeadline(toolName, target, sub) {
+      var html =
+        '<div class="m-tool-headline">' +
+          '<span class="m-tool-name">' + escapeHtml(toolLabelFromName(toolName)) + '</span>' +
+          '<span class="m-tool-target">' + (target || '') + '</span>' +
+          '<span class="m-tool-badge pending" data-role="status">pending</span>' +
+        '</div>';
+      if (sub) html += '<div class="m-tool-sub">' + sub + '</div>';
+      return html;
+    }
+
+    function setStatusOk(el, text) {
+      var badge = el.querySelector('[data-role="status"]');
+      if (badge) { badge.className = 'm-tool-badge ok'; badge.textContent = text || 'done'; }
+    }
+    function setStatusError(el) {
+      var badge = el.querySelector('[data-role="status"]');
+      if (badge) { badge.className = 'm-tool-badge error'; badge.textContent = 'error'; }
+      el.classList.add('is-error');
+    }
+
+    function appendDetails(el, summary, body, opts) {
+      var open = opts && opts.open ? ' open' : '';
+      var d = document.createElement('details');
+      d.innerHTML = '<summary>' + escapeHtml(summary) + '</summary>' + body;
+      if (open) d.setAttribute('open', '');
+      el.appendChild(d);
+      return d;
+    }
+
+    function truncateLines(text, maxLines) {
+      if (!text) return '';
+      var lines = String(text).split('\n');
+      if (lines.length <= maxLines) return text;
+      return lines.slice(0, maxLines).join('\n') +
+        '\n… (' + (lines.length - maxLines) + ' more lines)';
+    }
+
+    var TOOL_RENDERERS = {
+      Read: {
+        call: function(p, el) {
+          var fp = p.input && p.input.file_path;
+          el.innerHTML = makeHeadline('Read',
+            '<span title="' + escapeAttr(fp || '') + '">' + escapeHtml(shortPath(fp || '')) + '</span>');
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'read'); }
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          var preview = truncateLines(resp, 20);
+          appendDetails(el, 'content (' + (resp ? resp.split('\n').length : 0) + ' lines)',
+            '<pre>' + escapeHtml(preview) + '</pre>');
+        },
+      },
+      Bash: {
+        call: function(p, el) {
+          var cmd = p.input && p.input.command;
+          var desc = p.input && p.input.description;
+          el.innerHTML = makeHeadline('Bash',
+            '<span class="m-tool-target">$ ' + escapeHtml(truncateLines(cmd || '', 1).slice(0, 200)) + '</span>',
+            desc ? escapeHtml(desc) : null);
+        },
+        result: function(p, el) {
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'exit 0'); }
+          appendDetails(el, 'stdout + stderr', '<pre>' + escapeHtml(truncateLines(resp, 30)) + '</pre>',
+            { open: true });
+        },
+      },
+      Edit: {
+        call: function(p, el) {
+          var fp = p.input && p.input.file_path;
+          el.innerHTML = makeHeadline('Edit',
+            '<span title="' + escapeAttr(fp || '') + '">✎ ' + escapeHtml(shortPath(fp || '')) + '</span>');
+          var oldS = p.input && p.input.old_string;
+          var newS = p.input && p.input.new_string;
+          if (oldS || newS) {
+            var diff = document.createElement('div');
+            diff.className = 'm-diff';
+            diff.innerHTML =
+              (oldS ? '<span class="m-diff-old">' + escapeHtml(truncateLines(oldS, 5)) + '</span>' : '') +
+              (newS ? '<span class="m-diff-new">' + escapeHtml(truncateLines(newS, 5)) + '</span>' : '');
+            el.appendChild(diff);
+          }
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'saved'); }
+        },
+      },
+      Write: {
+        call: function(p, el) {
+          var fp = p.input && p.input.file_path;
+          var content = (p.input && p.input.content) || '';
+          el.innerHTML = makeHeadline('Write',
+            '<span title="' + escapeAttr(fp || '') + '">+ ' + escapeHtml(shortPath(fp || '')) + '</span>',
+            content.split('\n').length + ' lines');
+          appendDetails(el, 'preview', '<pre>' + escapeHtml(truncateLines(content, 15)) + '</pre>');
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'written');
+        },
+      },
+      Grep: {
+        call: function(p, el) {
+          var pat = p.input && p.input.pattern;
+          var where = (p.input && (p.input.glob || p.input.path)) || '.';
+          el.innerHTML = makeHeadline('Grep',
+            '🔍 <code>' + escapeHtml(pat || '') + '</code>',
+            'in ' + escapeHtml(where));
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el);
+          else setStatusOk(el, 'done');
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          var lines = (resp || '').split('\n').filter(function(l) { return l.length > 0; });
+          appendDetails(el, lines.length + ' result(s)',
+            '<pre>' + escapeHtml(truncateLines(resp || '', 25)) + '</pre>');
+        },
+      },
+      Glob: {
+        call: function(p, el) {
+          var pat = p.input && p.input.pattern;
+          el.innerHTML = makeHeadline('Glob', '📁 <code>' + escapeHtml(pat || '') + '</code>');
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el);
+          else setStatusOk(el, 'done');
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          var lines = (resp || '').split('\n').filter(function(l) { return l.length > 0; });
+          appendDetails(el, lines.length + ' match(es)',
+            '<pre>' + escapeHtml(truncateLines(resp || '', 20)) + '</pre>');
+        },
+      },
+      TodoWrite: {
+        call: function(p, el) {
+          var todos = (p.input && p.input.todos) || [];
+          var inProg = todos.filter(function(t) { return t.status === 'in_progress'; }).length;
+          var done = todos.filter(function(t) { return t.status === 'completed'; }).length;
+          el.innerHTML = makeHeadline('TodoWrite',
+            '✓ ' + todos.length + ' task' + (todos.length === 1 ? '' : 's'),
+            done + ' done · ' + inProg + ' in progress');
+          if (todos.length > 0) {
+            var ul = document.createElement('ul');
+            ul.className = 'm-todo';
+            for (var i = 0; i < todos.length; i++) {
+              var t = todos[i];
+              var li = document.createElement('li');
+              li.className = t.status || 'pending';
+              li.textContent = t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content || '';
+              ul.appendChild(li);
+            }
+            el.appendChild(ul);
+          }
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'updated');
+        },
+      },
+      Task: {
+        call: function(p, el) {
+          var desc = p.input && p.input.description;
+          var type = p.input && p.input.subagent_type;
+          var prompt = (p.input && p.input.prompt) || '';
+          el.innerHTML = makeHeadline('Task',
+            '▶ ' + escapeHtml(type || 'agent') + ': ' + escapeHtml(desc || ''));
+          if (prompt) {
+            appendDetails(el, 'prompt', '<pre>' + escapeHtml(truncateLines(prompt, 15)) + '</pre>');
+          }
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'done');
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          appendDetails(el, 'result', '<pre>' + escapeHtml(truncateLines(resp || '', 30)) + '</pre>',
+            { open: true });
+        },
+      },
+      NotebookEdit: {
+        call: function(p, el) {
+          var fp = p.input && p.input.notebook_path;
+          el.innerHTML = makeHeadline('NotebookEdit', '✎ ' + escapeHtml(shortPath(fp || '')));
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'saved');
+        },
+      },
+    };
+
+    // Render an unknown tool with a clear "no custom view yet" note.
+    function renderUnknownToolCall(payload, el) {
+      var name = payload.tool_name || 'tool';
+      el.innerHTML = makeHeadline(name, '');
+      var badge = el.querySelector('[data-role="status"]');
+      if (badge) { badge.className = 'm-tool-badge nosupport'; badge.textContent = 'no view'; }
+      appendDetails(el, 'input (raw)',
+        '<pre>' + escapeHtml(tryJson(payload.input)) + '</pre>');
+    }
+    function renderUnknownToolResult(payload, el) {
+      var resp = typeof payload.response === 'string' ? payload.response : tryJson(payload.response);
+      if (payload.is_error) setStatusError(el);
+      else setStatusOk(el, 'done');
+      appendDetails(el, 'result (raw)', '<pre>' + escapeHtml(truncateLines(resp, 30)) + '</pre>');
+    }
+
+    // ── Question cards (ExitPlanMode, AskUserQuestion) ───────────────
+
+    function renderQuestionExitPlanMode(evt, payload) {
+      var card = document.createElement('div');
+      card.className = 'm-evt m-evt-question';
+      card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+      var planMd = (payload.input && payload.input.plan) || '';
+      card.innerHTML =
+        '<span class="m-q-banner">plan awaiting approval</span>' +
+        '<div class="m-q-body">' + renderMarkdown(planMd) + '</div>' +
+        '<div class="m-q-actions">' +
+          '<button type="button" class="m-q-action primary" data-action="approve">Approve → compose</button>' +
+          '<button type="button" class="m-q-action" data-action="reject">Reject → compose</button>' +
+        '</div>';
+      card.querySelector('[data-action="approve"]').addEventListener('click', function() {
+        prefillCompose('Proceed with this plan.');
+      });
+      card.querySelector('[data-action="reject"]').addEventListener('click', function() {
+        prefillCompose("Don't do that — ");
+      });
+      return card;
+    }
+
+    function renderQuestionAskUserQuestion(evt, payload) {
+      var card = document.createElement('div');
+      card.className = 'm-evt m-evt-question';
+      card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+      var qs = (payload.input && payload.input.questions) || [];
+      var html = '<span class="m-q-banner">awaiting answer</span>';
+      for (var i = 0; i < qs.length; i++) {
+        var q = qs[i];
+        html += '<div class="m-q-body"><strong>' + escapeHtml(q.question || '') + '</strong></div>';
+        html += '<div class="m-q-actions">';
+        var opts = q.options || [];
+        for (var j = 0; j < opts.length; j++) {
+          var o = opts[j];
+          html += '<button type="button" class="m-q-action" data-inject="' + escapeAttr(o.label || '') + '">' +
+            escapeHtml(o.label || '') +
+            (o.description ? '<span class="m-q-action-desc">' + escapeHtml(o.description) + '</span>' : '') +
+          '</button>';
+        }
+        html += '</div>';
+      }
+      card.innerHTML = html;
+      var btns = card.querySelectorAll('.m-q-action[data-inject]');
+      for (var k = 0; k < btns.length; k++) {
+        btns[k].addEventListener('click', function(e) {
+          var text = e.currentTarget.getAttribute('data-inject');
+          sendInject(text);
+        });
+      }
+      return card;
+    }
+
+    function markQuestionAnswered(cardEl, payload) {
+      cardEl.classList.add('answered');
+      var banner = cardEl.querySelector('.m-q-banner');
+      if (banner) banner.textContent = 'answered';
+      var actions = cardEl.querySelector('.m-q-actions');
+      if (actions) actions.remove();
+      var resp = typeof payload.response === 'string' ? payload.response : tryJson(payload.response);
+      if (resp) {
+        var a = document.createElement('div');
+        a.className = 'm-q-answer';
+        a.textContent = '→ ' + truncateLines(resp, 2);
+        cardEl.appendChild(a);
+      }
+    }
+
+    // ── Tiny markdown renderer (headings / lists / code / bold) ─────
+
+    function renderMarkdown(src) {
+      if (!src) return '';
+      // Normalize
+      src = String(src).replace(/\r\n/g, '\n');
+      var out = '';
+      var lines = src.split('\n');
+      var i = 0;
+      while (i < lines.length) {
+        var line = lines[i];
+        // Fenced code
+        var fence = line.match(/^```(.*)$/);
+        if (fence) {
+          var body = '';
+          i++;
+          while (i < lines.length && !/^```/.test(lines[i])) {
+            body += lines[i] + '\n';
+            i++;
+          }
+          i++;
+          out += '<pre><code>' + escapeHtml(body) + '</code></pre>';
+          continue;
+        }
+        // Heading
+        var h = line.match(/^(#{1,3}) +(.*)$/);
+        if (h) {
+          out += '<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>';
+          i++; continue;
+        }
+        // List (unordered)
+        if (/^\s*[-*] +/.test(line)) {
+          out += '<ul>';
+          while (i < lines.length && /^\s*[-*] +/.test(lines[i])) {
+            out += '<li>' + inlineMd(lines[i].replace(/^\s*[-*] +/, '')) + '</li>';
+            i++;
+          }
+          out += '</ul>';
+          continue;
+        }
+        // List (ordered)
+        if (/^\s*\d+\. +/.test(line)) {
+          out += '<ol>';
+          while (i < lines.length && /^\s*\d+\. +/.test(lines[i])) {
+            out += '<li>' + inlineMd(lines[i].replace(/^\s*\d+\. +/, '')) + '</li>';
+            i++;
+          }
+          out += '</ol>';
+          continue;
+        }
+        // Blank line → paragraph break
+        if (line.trim() === '') { i++; continue; }
+        // Paragraph
+        var para = line;
+        i++;
+        while (i < lines.length && lines[i].trim() !== '' &&
+               !/^#{1,3} /.test(lines[i]) && !/^```/.test(lines[i]) &&
+               !/^\s*[-*] /.test(lines[i]) && !/^\s*\d+\. /.test(lines[i])) {
+          para += ' ' + lines[i];
+          i++;
+        }
+        out += '<p>' + inlineMd(para) + '</p>';
+      }
+      return out;
+    }
+
+    function inlineMd(s) {
+      if (!s) return '';
+      // Order matters: escape first, then apply inline markup.
+      var out = escapeHtml(s);
+      // `code`
+      out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // **bold**
+      out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      return out;
+    }
+
+    // ── Main renderEvent ─────────────────────────────────────────────
 
     function renderEvent(evt) {
       if (!evt || !evt.uuid || rendered[evt.uuid]) return;
@@ -888,60 +1370,120 @@
 
       var kind = evt.kind;
       var payload = evt.payload || {};
-      var el = document.createElement('div');
-      el.className = 'm-evt m-evt-' + kind;
+      var el;
+      var ts = formatTime(new Date(evt.ts).toISOString());
 
       if (kind === 'user_prompt') {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-user';
         el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">user</span> ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<div class="m-evt-meta"><span class="m-label">user</span> ' + ts + '</div>' +
           '<pre>' + escapeHtml(payload.prompt || '') + '</pre>' +
           (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
       } else if (kind === 'assistant_message') {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-assistant';
         el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + ts + '</div>' +
           '<pre>' + escapeHtml(payload.text || '') + '</pre>' +
           (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
       } else if (kind === 'tool_call') {
-        var inputStr = tryJson(payload.input);
-        el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">tool</span> ' + escapeHtml(payload.tool_name || '') + ' ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
-          '<details><summary>input</summary><pre>' + escapeHtml(inputStr) + '</pre></details>';
-        el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+        // Question tools get their own card; everything else uses the
+        // tool-renderer registry with a safe fallback for unknown names.
+        if (payload.tool_name === 'ExitPlanMode') {
+          el = renderQuestionExitPlanMode(evt, payload);
+        } else if (payload.tool_name === 'AskUserQuestion') {
+          el = renderQuestionAskUserQuestion(evt, payload);
+        } else {
+          el = document.createElement('div');
+          el.className = 'm-evt m-evt-tool';
+          el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+          var renderer = TOOL_RENDERERS[payload.tool_name];
+          if (renderer && typeof renderer.call === 'function') {
+            renderer.call(payload, el);
+          } else {
+            renderUnknownToolCall(payload, el);
+          }
+        }
       } else if (kind === 'tool_result') {
-        // Try to attach to the matching tool_call card if present.
+        // Try to attach to the matching tool_call / question card.
         var existing = payload.tool_use_id
           ? transcriptEl.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
           : null;
-        var responseStr = tryJson(payload.response);
         if (existing) {
-          if (payload.is_error) existing.classList.add('is-error');
-          var res = document.createElement('div');
-          res.className = 'm-tool-result';
-          res.innerHTML = '<details open><summary>result' + (payload.is_error ? ' (error)' : '') + '</summary><pre>' + escapeHtml(responseStr) + '</pre></details>';
-          existing.appendChild(res);
-          return; // no new event card
+          if (existing.classList.contains('m-evt-question')) {
+            markQuestionAnswered(existing, payload);
+          } else {
+            var r = TOOL_RENDERERS[payload.tool_name];
+            if (r && typeof r.result === 'function') {
+              r.result(payload, existing);
+            } else {
+              renderUnknownToolResult(payload, existing);
+            }
+          }
+          scrollToBottom();
+          return;
         }
+        // No matching call — render stand-alone result.
+        el = document.createElement('div');
         el.className = 'm-evt m-evt-tool' + (payload.is_error ? ' is-error' : '');
-        el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">tool result</span> ' + escapeHtml(payload.tool_name || '') + ' ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
-          '<details open><summary>result' + (payload.is_error ? ' (error)' : '') + '</summary><pre>' + escapeHtml(responseStr) + '</pre></details>';
+        el.innerHTML = makeHeadline(payload.tool_name || 'tool', '(orphan result)');
+        var r2 = TOOL_RENDERERS[payload.tool_name];
+        if (r2 && typeof r2.result === 'function') r2.result(payload, el);
+        else renderUnknownToolResult(payload, el);
       } else if (kind === 'notification') {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-notif';
         el.innerHTML = escapeHtml(payload.text || '');
       } else if (kind === 'compact') {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-compact';
         el.innerHTML = '— conversation ' + (payload.phase === 'pre' ? 'compacting' : 'compacted') + ' —';
       } else if (kind === 'session_start') {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-notif';
         el.innerHTML = '— session started (' + escapeHtml(payload.source || '') + ') —';
       } else if (kind === 'session_end') {
+        el = document.createElement('div');
         el.className = 'm-evt m-evt-end';
         el.innerHTML = '— session ended (' + escapeHtml(payload.reason || '') + ') —';
       } else {
+        el = document.createElement('div');
+        el.className = 'm-evt';
         el.innerHTML = '<pre>' + escapeHtml(JSON.stringify(evt)) + '</pre>';
       }
 
       transcriptEl.appendChild(el);
-      if (autoscroll) {
-        transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      }
+      scrollToBottom();
+    }
+
+    function prefillCompose(text) {
+      var ct = document.getElementById('mirror-compose-text');
+      if (!ct) return;
+      ct.value = text;
+      ct.focus();
+      // Move caret to end
+      var len = ct.value.length;
+      try { ct.setSelectionRange(len, len); } catch (e) { /* ignore */ }
+    }
+
+    function sendInject(text) {
+      if (!text || !text.trim()) return;
+      var errEl = document.getElementById('mirror-compose-err');
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject?t=' + encodeURIComponent(token), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, watcher: 'web-button' })
+      })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(r) {
+          if (r.status >= 400 && errEl) {
+            errEl.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
+          }
+        })
+        .catch(function(err) {
+          if (errEl) errEl.textContent = 'Send failed: ' + (err && err.message ? err.message : err);
+        });
     }
 
     var isOwner = false;
@@ -960,11 +1502,13 @@
       if (compose && !isOwner) compose.classList.add('compose-hidden');
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
+      userScrolledUp = false;  // fresh init → start at bottom
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
         }
       }
+      scrollToBottom();
     }
 
     var mws = null;

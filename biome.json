@@ -15,6 +15,6 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist"]
+    "ignore": ["node_modules", "dist", "bin/mirror-agent.bundle.js"]
   }
 }

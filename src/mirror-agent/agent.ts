@@ -48,6 +48,8 @@ interface SessionState {
   lastEventAt: number;
   closed: boolean;
   tmuxPane: string | null;
+  /** Set while a recovery round-trip is in flight to avoid duplicate recoveries. */
+  recovering: boolean;
 }
 
 export interface AgentHandle {
@@ -346,14 +348,41 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       lastEventAt: Date.now(),
       closed: false,
       tmuxPane: tmuxPane ?? null,
+      recovering: false,
     };
     sessions.set(sid, session);
 
+    attachHubClient(session);
+    startTailIfNeeded(session);
+
+    log(
+      `[${sid}] session opened for ${ownerAgent}; url=${createResponse.mirror_url}`,
+    );
+    return session;
+  }
+
+  /**
+   * Build + start a HubClient for the session using its current token.
+   * Replaces any existing client. Called from openSession (first time)
+   * and recoverSession (after hub session loss).
+   */
+  function attachHubClient(session: SessionState): void {
+    if (!session.token) return;
+    // Clean up prior client if any.
+    if (session.ws) {
+      try {
+        session.ws.stop();
+      } catch {
+        // ignore
+      }
+      session.ws = null;
+    }
+    const wsUrl = toWsUrl(hubUrl, session.sid, session.token);
+    const sid = session.sid;
     const client = new HubClient({
       url: wsUrl,
       logPrefix: `claude-net/mirror:${sid}`,
       onOpen: () => {
-        // Flush any buffered frames.
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);
@@ -361,6 +390,20 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       onMessage: (raw) => handleHubMessage(session, raw),
       onClose: (code, reason) => {
         log(`[${sid}] WS closed (${code}) ${reason}`);
+        // Hub lost our session (restart, eviction, etc.). Token no longer
+        // validates on the hub, so auto-reconnect would loop forever with a
+        // stale token. Re-register the sid on the hub and swap the WS client
+        // over to the new token.
+        if (
+          code === 1008 &&
+          (reason.includes("not found") || reason.includes("Invalid token")) &&
+          !session.closed &&
+          !session.recovering
+        ) {
+          void recoverSession(session).catch((err: unknown) => {
+            log(`[${sid}] recovery failed: ${String(err)}`);
+          });
+        }
       },
       onError: (err) => {
         log(`[${sid}] WS error: ${err.message}`);
@@ -368,13 +411,53 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     });
     session.ws = client;
     client.start();
+  }
 
-    startTailIfNeeded(session);
-
-    log(
-      `[${sid}] session opened for ${ownerAgent}; url=${createResponse.mirror_url}`,
-    );
-    return session;
+  /**
+   * Hub lost this session (restart, eviction, etc.). Re-register the same
+   * sid with the hub to get a fresh token, then reconnect the WS with it.
+   * The owner URL the user held becomes stale — they need to grab the new
+   * one from the dashboard or `mirror_url` tool.
+   */
+  async function recoverSession(session: SessionState): Promise<void> {
+    session.recovering = true;
+    try {
+      // Tear down the looping client first.
+      if (session.ws) {
+        try {
+          session.ws.stop();
+        } catch {
+          // ignore
+        }
+        session.ws = null;
+      }
+      const res = await fetch(`${hubUrl}/api/mirror/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          owner_agent: session.ownerAgent,
+          cwd: session.cwd,
+          sid: session.sid,
+        }),
+      });
+      if (!res.ok) {
+        log(
+          `[${session.sid}] recovery: session create failed HTTP ${res.status}; will retry on next hook`,
+        );
+        return;
+      }
+      const data = (await res.json()) as {
+        sid: string;
+        owner_token: string;
+        mirror_url: string;
+      };
+      session.token = data.owner_token;
+      session.mirrorUrl = data.mirror_url;
+      log(`[${session.sid}] recovered on hub; new url=${data.mirror_url}`);
+      attachHubClient(session);
+    } finally {
+      session.recovering = false;
+    }
   }
 
   function startTailIfNeeded(session: SessionState): void {

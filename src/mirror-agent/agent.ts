@@ -17,6 +17,7 @@ import { ConsentManager, type ConsentMode } from "./consent";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { HubClient } from "./hub-client";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
+import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -71,6 +72,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessions = new Map<string, SessionState>();
   const consent = new ConsentManager();
   const injector = new TmuxInjector();
+  const redactor = new Redactor({
+    configPaths: defaultConfigPaths(
+      os.homedir(),
+      process.env.CLAUDE_NET_PROJECT_DIR ?? process.cwd(),
+    ),
+  });
+  log(
+    `redactor loaded with ${redactor.ruleCount} rule(s); hit counters logged on shutdown`,
+  );
   let lastActivityAt = Date.now();
 
   // Ensure state dir exists.
@@ -153,7 +163,67 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (req.method === "POST" && url.pathname === "/consent") {
       return handleConsentPost(req);
     }
+    if (req.method === "POST" && url.pathname === "/share") {
+      return handleSharePost(req);
+    }
+    if (req.method === "POST" && url.pathname === "/revoke") {
+      return handleRevokePost(req);
+    }
     return new Response("not found", { status: 404 });
+  }
+
+  async function handleSharePost(req: Request): Promise<Response> {
+    let body: { sid?: string };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const sid = body.sid;
+    const session = sid ? sessions.get(sid) : null;
+    if (!sid || !session || !session.token) {
+      return new Response("unknown sid", { status: 404 });
+    }
+    const res = await fetch(
+      `${hubUrl}/api/mirror/${encodeURIComponent(sid)}/share?t=${encodeURIComponent(
+        session.token,
+      )}`,
+      { method: "POST" },
+    );
+    const data = await res.json().catch(() => ({}));
+    return new Response(JSON.stringify(data), {
+      status: res.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  async function handleRevokePost(req: Request): Promise<Response> {
+    let body: { sid?: string; token?: string; all?: boolean };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const sid = body.sid;
+    const session = sid ? sessions.get(sid) : null;
+    if (!sid || !session || !session.token) {
+      return new Response("unknown sid", { status: 404 });
+    }
+    const res = await fetch(
+      `${hubUrl}/api/mirror/${encodeURIComponent(sid)}/revoke?t=${encodeURIComponent(
+        session.token,
+      )}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: body.token, all: body.all }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    return new Response(JSON.stringify(data), {
+      status: res.status,
+      headers: { "content-type": "application/json" },
+    });
   }
 
   async function handleConsentPost(req: Request): Promise<Response> {
@@ -217,6 +287,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
     }
 
+    // Redact before queueing — keeps sensitive content off the hub WS.
+    redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
 
     // Close on session_end.
@@ -449,6 +521,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     clearInterval(idleTimer);
     for (const s of [...sessions.values()]) {
       closeSession(s, "shutdown");
+    }
+    // Log redactor stats so users can gauge how often rules fired. We log
+    // aggregate counts only — never any matched content.
+    const stats = redactor.stats;
+    const entries = Object.entries(stats);
+    if (entries.length > 0) {
+      const summary = entries
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${v}×${k}`)
+        .join(", ");
+      log(`redactor hit totals: ${summary}`);
     }
     server.stop();
     removePortFile(stateDir);

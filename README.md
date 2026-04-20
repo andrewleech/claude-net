@@ -147,6 +147,15 @@ On the next `claude-channels` launch, the launcher starts the local mirror-agent
 
 **Remote input from the browser (tmux-based, Phase M2).** The `/mirror/<sid>` page has a compose box: type a prompt, hit Enter, and `tmux send-keys` drops it into the live claude REPL. Requires the session to be running inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. First remote inject per session pops a 5-second consent prompt in the terminal via `tmux display-popup`; ask Claude `mirror_consent always` to skip it for the rest of that session, `mirror_consent never` to disable injection entirely, or `mirror_consent reset` to re-arm the first-time prompt. Set `CLAUDE_NET_NO_TMUX_WRAP=1` in your environment to opt out of the auto-wrap. An opt-in binary-patch variant that removes the tmux dependency lands in Phase M4.
 
+**Sharing, redacting, persisting (Phase M3).**
+
+- **Share** — click the `share` button in the mirror header (visible to owners only), or ask claude `mirror_share`. Copies a new URL to your clipboard with a read-only token. Reader-token viewers see the transcript live but can't inject, share, or revoke.
+- **Revoke** — `mirror_revoke <token>` or `mirror_revoke all` closes holders' WebSockets immediately.
+- **Redactor** — the mirror-agent scrubs a starter list of secret formats (AWS keys, GitHub PATs, Anthropic/OpenAI tokens, PEM headers, JWTs) from every event before it leaves your host. Add project-specific regexes at `~/.claude-net/redact.json` or `<cwd>/.claude-net/redact.json`. Redaction is a convenience, not a compliance control — don't treat it as such.
+- **Persistence** — default is in-memory. Set `CLAUDE_NET_MIRROR_STORE=/path/to/dir` on the hub and transcripts are appended to `<sid>.jsonl` files; reach them after a hub restart at `/api/mirror/archive/<sid>`. Retention defaults to 24h (`CLAUDE_NET_MIRROR_RETENTION_HOURS`).
+- **TLS** — set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
+- **Rate limits** — `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
+
 Full design: [`docs/MIRROR_SESSION_PLAN.md`](docs/MIRROR_SESSION_PLAN.md) and the per-phase files next to it.
 
 ## How it works

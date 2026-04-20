@@ -612,6 +612,32 @@ const TOOL_DEFINITIONS = [
       required: ["mode"],
     },
   },
+  {
+    name: "mirror_share",
+    description:
+      "Mint a read-only reader token for the current mirror session and return a URL to share. Reader tokens can watch the transcript but cannot inject.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "mirror_revoke",
+    description:
+      "Revoke a token on the current mirror session. Pass the full token value, or pass 'all' to revoke every token (boots watchers and agent).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        token: {
+          type: "string",
+          description:
+            "Token value to revoke, or 'all' to revoke every token on the session.",
+        },
+      },
+      required: ["token"],
+    },
+  },
 ];
 
 // ── Tool dispatch ─────────────────────────────────────────────────────────
@@ -775,6 +801,51 @@ async function handleMirrorTool(
       reason:
         "mirror_off is not yet implemented (Phase M3 adds mirror-agent-side close). To stop mirroring, disable claudeNet.mirror.enabled in settings and restart.",
     });
+  }
+
+  if (name === "mirror_share") {
+    if (!port) return notConnectedError("mirror-agent is not running");
+    const session = await findOurMirrorSession();
+    if (!session)
+      return notConnectedError("no active mirror session for this process");
+    const res = await mirrorAgentFetch("/share", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sid: session.sid }),
+    });
+    if (!res || !res.ok) {
+      return notConnectedError(
+        `share failed: ${res ? `HTTP ${res.status}` : "no response"}`,
+      );
+    }
+    return toolResult(await res.json().catch(() => ({})));
+  }
+
+  if (name === "mirror_revoke") {
+    if (!port) return notConnectedError("mirror-agent is not running");
+    const session = await findOurMirrorSession();
+    if (!session)
+      return notConnectedError("no active mirror session for this process");
+    const target = args.token;
+    if (!target)
+      return notConnectedError(
+        "token is required (pass 'all' to revoke every token)",
+      );
+    const body =
+      target === "all"
+        ? { sid: session.sid, all: true }
+        : { sid: session.sid, token: target };
+    const res = await mirrorAgentFetch("/revoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res || !res.ok) {
+      return notConnectedError(
+        `revoke failed: ${res ? `HTTP ${res.status}` : "no response"}`,
+      );
+    }
+    return toolResult(await res.json().catch(() => ({})));
   }
 
   if (name === "mirror_consent") {

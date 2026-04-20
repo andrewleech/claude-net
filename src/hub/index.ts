@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
+import { createStoreFromEnv } from "./mirror-store";
 import { Registry } from "./registry";
 import { Router } from "./router";
 import { setupPlugin } from "./setup";
@@ -15,7 +16,8 @@ const startedAt = new Date();
 const registry = new Registry();
 const teams = new Teams(registry);
 const router = new Router(registry, teams);
-const mirrorRegistry = new MirrorRegistry();
+const mirrorStore = createStoreFromEnv();
+const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
 
 // Wire up disconnect timeout to clean up team memberships
 registry.setTimeoutCleanup((fullName, agentTeams) => {
@@ -73,8 +75,26 @@ let app = new Elysia()
 app = wsPlugin(app, registry, teams, router);
 app = wsDashboardPlugin(app, registry, teams);
 app = wsMirrorPlugin(app, mirrorRegistry);
-app.listen(port);
 
-console.log(`claude-net hub listening on port ${port}`);
+// Optional TLS. If CLAUDE_NET_TLS_CERT and CLAUDE_NET_TLS_KEY are both set,
+// bind HTTPS/WSS. The existing message-bus endpoints (/ws, /api/*) work
+// regardless; mirror URLs are generated with the right scheme via the
+// request's X-Forwarded-Proto or url scheme.
+const tlsCert = process.env.CLAUDE_NET_TLS_CERT;
+const tlsKey = process.env.CLAUDE_NET_TLS_KEY;
+if (tlsCert && tlsKey) {
+  const fs = await import("node:fs");
+  app.listen({
+    port,
+    tls: {
+      cert: fs.readFileSync(tlsCert),
+      key: fs.readFileSync(tlsKey),
+    },
+  });
+  console.log(`claude-net hub listening on port ${port} (TLS enabled)`);
+} else {
+  app.listen(port);
+  console.log(`claude-net hub listening on port ${port}`);
+}
 
 export { app, registry, teams, router, mirrorRegistry, startedAt };

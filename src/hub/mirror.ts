@@ -9,6 +9,8 @@ import type {
   MirrorTokenType,
 } from "@/shared/types";
 import { Elysia } from "elysia";
+import { type MirrorStore, NullStore } from "./mirror-store";
+import { RateLimiter } from "./rate-limit";
 
 // ── Defaults ──────────────────────────────────────────────────────────────
 
@@ -23,11 +25,22 @@ export interface SessionWatcher {
   wsIdentity: object;
   id: string;
   tokenType: MirrorTokenType;
+  tokenValue?: string;
+  close?: () => void;
 }
 
 export interface AgentConnection {
   ws: { send(data: string): void };
   wsIdentity: object;
+  tokenValue?: string;
+  close?: () => void;
+}
+
+export interface TokenRecord {
+  value: string;
+  type: MirrorTokenType;
+  createdAt: Date;
+  revokedAt: Date | null;
 }
 
 export interface MirrorSessionEntry {
@@ -39,9 +52,10 @@ export interface MirrorSessionEntry {
   transcript: MirrorEventFrame[];
   watchers: Set<SessionWatcher>;
   agent: AgentConnection | null;
+  /** All issued tokens for this session, keyed by token value. */
+  tokens: Map<string, TokenRecord>;
+  /** Convenience pointer to the initial owner token (for `createSession` return). */
   ownerToken: string;
-  ownerTokenCreatedAt: Date;
-  ownerTokenRevokedAt: Date | null;
   nextInjectSeq: number;
   closedAt: Date | null;
   retentionTimerId: ReturnType<typeof setTimeout> | null;
@@ -50,6 +64,8 @@ export interface MirrorSessionEntry {
 export interface MirrorRegistryOptions {
   transcriptRing?: number;
   retentionMs?: number;
+  /** Opt-in durable store. Defaults to NullStore (in-memory only). */
+  store?: MirrorStore;
 }
 
 // ── MirrorRegistry ────────────────────────────────────────────────────────
@@ -59,10 +75,12 @@ export class MirrorRegistry {
   private transcriptRing: number;
   private retentionMs: number;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
+  readonly store: MirrorStore;
 
   constructor(options?: MirrorRegistryOptions) {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
     this.retentionMs = options?.retentionMs ?? DEFAULT_RETENTION_MS;
+    this.store = options?.store ?? new NullStore();
   }
 
   setDashboardBroadcast(fn: (event: DashboardEvent) => void): void {
@@ -105,6 +123,13 @@ export class MirrorRegistry {
 
     const token = generateToken();
     const now = new Date();
+    const tokens = new Map<string, TokenRecord>();
+    tokens.set(token, {
+      value: token,
+      type: "owner",
+      createdAt: now,
+      revokedAt: null,
+    });
     const entry: MirrorSessionEntry = {
       sid: actualSid,
       ownerAgent,
@@ -114,14 +139,20 @@ export class MirrorRegistry {
       transcript: [],
       watchers: new Set(),
       agent: null,
+      tokens,
       ownerToken: token,
-      ownerTokenCreatedAt: now,
-      ownerTokenRevokedAt: null,
       nextInjectSeq: 0,
       closedAt: null,
       retentionTimerId: null,
     };
     this.sessions.set(actualSid, entry);
+
+    this.store.recordOpen({
+      sid: actualSid,
+      owner_agent: ownerAgent,
+      cwd,
+      created_at: now.toISOString(),
+    });
 
     this.dashboardBroadcast({
       event: "mirror:session_started",
@@ -139,7 +170,9 @@ export class MirrorRegistry {
   }
 
   /**
-   * Validate a token for a session. Uses timing-safe comparison.
+   * Validate a token for a session. Uses timing-safe comparison against
+   * every non-revoked token in the session's token map. Returns the token
+   * type on success.
    */
   validateToken(
     sid: string,
@@ -151,12 +184,102 @@ export class MirrorRegistry {
     const entry = this.sessions.get(sid);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-    if (entry.ownerTokenRevokedAt)
-      return { ok: false, error: "Token revoked.", status: 403 };
-    if (constantTimeEqual(token, entry.ownerToken)) {
-      return { ok: true, entry, type: "owner" };
+
+    // Walk the token map with constant-time comparison. Token values are
+    // 32-hex-char strings of equal length so timingSafeEqual applies.
+    for (const rec of entry.tokens.values()) {
+      if (rec.revokedAt) continue;
+      if (constantTimeEqual(token, rec.value)) {
+        return { ok: true, entry, type: rec.type };
+      }
     }
     return { ok: false, error: "Invalid token.", status: 403 };
+  }
+
+  /**
+   * Mint a new reader token for a session. Caller must have already
+   * authenticated as the owner.
+   */
+  issueReaderToken(
+    sid: string,
+  ):
+    | { ok: true; token: string; entry: MirrorSessionEntry }
+    | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is closed.", status: 409 };
+    const token = generateToken();
+    entry.tokens.set(token, {
+      value: token,
+      type: "reader",
+      createdAt: new Date(),
+      revokedAt: null,
+    });
+    return { ok: true, token, entry };
+  }
+
+  /**
+   * Revoke a single token. If `targetToken` is omitted, revoke *all* tokens
+   * (which effectively boots every watcher and the agent — callers usually
+   * pair this with closeSession).
+   */
+  revokeToken(
+    sid: string,
+    targetToken?: string,
+  ):
+    | { ok: true; revoked: number }
+    | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    const now = new Date();
+    let revoked = 0;
+    if (targetToken) {
+      const rec = entry.tokens.get(targetToken);
+      if (!rec || rec.revokedAt) {
+        return { ok: false, error: "Token not found.", status: 404 };
+      }
+      rec.revokedAt = now;
+      revoked = 1;
+    } else {
+      for (const rec of entry.tokens.values()) {
+        if (!rec.revokedAt) {
+          rec.revokedAt = now;
+          revoked++;
+        }
+      }
+    }
+    // Kick watchers / agents that had the revoked token(s).
+    this.kickRevoked(entry);
+    return { ok: true, revoked };
+  }
+
+  /** Close any watcher / agent WS whose associated token has been revoked. */
+  private kickRevoked(entry: MirrorSessionEntry): void {
+    const activeValues = new Set<string>();
+    for (const rec of entry.tokens.values()) {
+      if (!rec.revokedAt) activeValues.add(rec.value);
+    }
+    for (const watcher of [...entry.watchers]) {
+      if (!activeValues.has(watcher.tokenValue ?? "")) {
+        try {
+          watcher.close?.();
+        } catch {
+          // ignore
+        }
+        entry.watchers.delete(watcher);
+      }
+    }
+    if (entry.agent && !activeValues.has(entry.agent.tokenValue ?? "")) {
+      try {
+        entry.agent.close?.();
+      } catch {
+        // ignore
+      }
+      entry.agent = null;
+    }
   }
 
   /**
@@ -185,6 +308,15 @@ export class MirrorRegistry {
       entry.transcript.splice(0, entry.transcript.length - this.transcriptRing);
     }
     entry.lastEventAt = new Date();
+
+    // Durable write-through. NullStore is a no-op.
+    try {
+      this.store.appendEvent(sid, frame);
+    } catch (err) {
+      process.stderr.write(
+        `[claude-net/mirror] store.appendEvent failed for ${sid}: ${String(err)}\n`,
+      );
+    }
 
     const broadcast: MirrorEventBroadcastEvent = {
       event: "mirror:event",
@@ -270,6 +402,14 @@ export class MirrorRegistry {
       } catch {
         // ignore
       }
+    }
+
+    try {
+      this.store.recordClose(sid, entry.closedAt.toISOString());
+    } catch (err) {
+      process.stderr.write(
+        `[claude-net/mirror] store.recordClose failed for ${sid}: ${String(err)}\n`,
+      );
     }
 
     this.dashboardBroadcast({
@@ -402,6 +542,15 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         set.status = 400;
         return { error: "Missing required fields: owner_agent, cwd" };
       }
+      const remote = remoteKeyFor(request);
+      if (!sessionCreateLimiter.allow(remote)) {
+        const waitMs = sessionCreateLimiter.retryAfterMs(remote);
+        set.status = 429;
+        set.headers["retry-after"] = String(
+          Math.max(1, Math.ceil(waitMs / 1000)),
+        );
+        return { error: "Rate limit: too many session creations." };
+      }
       const result = mirrorRegistry.createSession(
         payload.owner_agent,
         payload.cwd,
@@ -412,7 +561,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         return { error: result.error };
       }
       const host = resolveMirrorHost(externalHost, port, request);
-      const mirrorUrl = `http://${host}/mirror/${result.entry.sid}#token=${result.token}`;
+      const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${result.entry.sid}#token=${result.token}`;
       return {
         sid: result.entry.sid,
         owner_token: result.token,
@@ -465,6 +614,101 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
       return { closed: true };
     })
 
+    .post("/:sid/share", ({ params, query, set, request }) => {
+      const token = (query as Record<string, string | undefined>).t;
+      const validation = mirrorRegistry.validateToken(params.sid, token);
+      if (!validation.ok) {
+        set.status = validation.status;
+        return { error: validation.error };
+      }
+      if (validation.type !== "owner") {
+        set.status = 403;
+        return { error: "Only the owner can share." };
+      }
+      const issued = mirrorRegistry.issueReaderToken(params.sid);
+      if (!issued.ok) {
+        set.status = issued.status;
+        return { error: issued.error };
+      }
+      const host = resolveMirrorHost(externalHost, port, request);
+      const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${params.sid}#token=${issued.token}`;
+      return {
+        sid: params.sid,
+        reader_token: issued.token,
+        mirror_url: mirrorUrl,
+      };
+    })
+
+    .post("/:sid/revoke", ({ params, query, body, set }) => {
+      const token = (query as Record<string, string | undefined>).t;
+      const validation = mirrorRegistry.validateToken(params.sid, token);
+      if (!validation.ok) {
+        set.status = validation.status;
+        return { error: validation.error };
+      }
+      if (validation.type !== "owner") {
+        set.status = 403;
+        return { error: "Only the owner can revoke." };
+      }
+      const payload = (body ?? {}) as { token?: string; all?: boolean };
+      const target = payload.token;
+      const result = mirrorRegistry.revokeToken(
+        params.sid,
+        payload.all ? undefined : target,
+      );
+      if (!result.ok) {
+        set.status = result.status;
+        return { error: result.error };
+      }
+      return { revoked: result.revoked };
+    })
+
+    .get("/archive/:sid", ({ params, query, set }) => {
+      // Archive lookup does NOT require a live session — reads directly
+      // from the persistence store. Protected by a token, but since the hub
+      // restarted the in-memory token map is gone. For M3 we allow archive
+      // retrieval to anyone on the trust network when CLAUDE_NET_MIRROR_STORE
+      // is set, under the assumption the hub is itself on a trusted network.
+      // Phase M4+ should add a durable token store to fix this.
+      const archived = mirrorRegistry.store.loadArchived(params.sid);
+      if (!archived) {
+        set.status = 404;
+        return { error: "Archive not found." };
+      }
+      // Ack the presence of a ?t= param so the URL format matches live mirror
+      // URLs (helps the dashboard re-use one endpoint for both paths).
+      void query;
+      return archived;
+    })
+
+    .get("/:sid/tokens", ({ params, query, set }) => {
+      const token = (query as Record<string, string | undefined>).t;
+      const validation = mirrorRegistry.validateToken(params.sid, token);
+      if (!validation.ok) {
+        set.status = validation.status;
+        return { error: validation.error };
+      }
+      if (validation.type !== "owner") {
+        set.status = 403;
+        return { error: "Only the owner can list tokens." };
+      }
+      const tokens: Array<{
+        type: MirrorTokenType;
+        token_preview: string;
+        created_at: string;
+        revoked_at: string | null;
+      }> = [];
+      for (const rec of validation.entry.tokens.values()) {
+        tokens.push({
+          type: rec.type,
+          token_preview: `${rec.value.slice(0, 6)}…`,
+          created_at: rec.createdAt.toISOString(),
+          revoked_at: rec.revokedAt ? rec.revokedAt.toISOString() : null,
+        });
+      }
+      return { sid: params.sid, tokens };
+    })
+
     .post("/:sid/inject", ({ params, query, body, set, request }) => {
       const token = (query as Record<string, string | undefined>).t;
       const validation = mirrorRegistry.validateToken(params.sid, token);
@@ -486,12 +730,22 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         set.status = 413;
         return { error: `Prompt exceeds ${MAX_INJECT_BYTES} bytes.` };
       }
-      // Per-session rate limit at the hub (defense in depth; mirror-agent
-      // re-applies its own).
-      if (!injectLimiter.allow(params.sid)) {
+      // Two-tier rate limit: a burst floor (one call per 250ms) plus an
+      // hourly ceiling (CLAUDE_NET_MIRROR_INJECT_RPM per minute, default 20).
+      if (!injectBurstLimiter.allow(params.sid)) {
         set.status = 429;
         set.headers["retry-after"] = "1";
-        return { error: "Rate limit exceeded." };
+        return { error: "Rate limit: bursts under 250ms rejected." };
+      }
+      if (!injectMinuteLimiter.allow(params.sid)) {
+        const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
+        set.status = 429;
+        set.headers["retry-after"] = String(
+          Math.max(1, Math.ceil(waitMs / 1000)),
+        );
+        return {
+          error: `Rate limit: ${INJECT_RPM} injects per minute.`,
+        };
       }
       const watcher = sanitizeWatcher(
         payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
@@ -509,22 +763,23 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
 
 const MAX_INJECT_BYTES = 32 * 1024;
 
-class InjectLimiter {
-  private last = new Map<string, number>();
-  private readonly minIntervalMs: number;
-  constructor(minIntervalMs = 250) {
-    this.minIntervalMs = minIntervalMs;
-  }
-  allow(sid: string): boolean {
-    const now = Date.now();
-    const prev = this.last.get(sid) ?? 0;
-    if (now - prev < this.minIntervalMs) return false;
-    this.last.set(sid, now);
-    return true;
-  }
-}
+const INJECT_RPM = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_RPM);
+  return Number.isFinite(raw) && raw > 0 ? raw : 20;
+})();
 
-const injectLimiter = new InjectLimiter();
+// One inject per 250ms (burst control) AND at most INJECT_RPM per minute.
+const injectBurstLimiter = new RateLimiter({ max: 1, windowMs: 250 });
+const injectMinuteLimiter = new RateLimiter({
+  max: INJECT_RPM,
+  windowMs: 60_000,
+});
+
+// 30 session creations per 5 minutes per remote IP.
+const sessionCreateLimiter = new RateLimiter({
+  max: 30,
+  windowMs: 5 * 60_000,
+});
 
 function sanitizeWatcher(s: string): string {
   // Strip control characters and double-quotes so the value is safe to embed
@@ -553,6 +808,21 @@ function resolveMirrorHost(
   const headerHost = request.headers.get("host");
   if (headerHost) return headerHost;
   return `localhost:${port ?? 4815}`;
+}
+
+function schemeFor(request: Request): "http" | "https" {
+  const proto =
+    request.headers.get("x-forwarded-proto") ??
+    (request.url.startsWith("https:") ? "https" : "http");
+  return proto === "https" ? "https" : "http";
+}
+
+function remoteKeyFor(request: Request): string {
+  // Best-effort remote identifier for rate-limit keying. X-Forwarded-For wins
+  // when the hub is behind a reverse proxy; otherwise fall back to host.
+  const xff = request.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0]?.trim() ?? "unknown";
+  return request.headers.get("host") ?? "unknown";
 }
 
 // ── WebSocket plugin (/ws/mirror/:sid) ────────────────────────────────────
@@ -601,21 +871,47 @@ export function wsMirrorPlugin(
       };
 
       if (asParam === "agent") {
+        if (validation.type !== "owner") {
+          ws.send(
+            JSON.stringify({
+              event: "error",
+              message: "Agent connections require an owner token.",
+            }),
+          );
+          ws.close(1008, "reader token cannot act as agent");
+          return;
+        }
         mirrorRegistry.setAgentConnection(sid, {
           ws: { send: sendRaw },
           wsIdentity: ws.raw,
+          tokenValue: token,
+          close: () => {
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+          },
         });
         connMeta.set(ws.raw, { role: "agent", sid });
         ws.send(JSON.stringify({ event: "mirror:agent_ready", sid }));
         return;
       }
 
-      // Default: watcher
+      // Default: watcher (owner OR reader)
       const watcher: SessionWatcher = {
         ws: { send: sendRaw },
         wsIdentity: ws.raw,
         id: crypto.randomUUID(),
         tokenType: validation.type,
+        tokenValue: token,
+        close: () => {
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+        },
       };
       mirrorRegistry.addWatcher(sid, watcher);
       connMeta.set(ws.raw, { role: "watcher", sid, watcher });
@@ -631,6 +927,7 @@ export function wsMirrorPlugin(
           created_at: entry.createdAt.toISOString(),
           last_event_at: entry.lastEventAt.toISOString(),
           closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
+          token_type: validation.type,
           transcript: entry.transcript.map((f) => ({
             uuid: f.uuid,
             kind: f.kind,

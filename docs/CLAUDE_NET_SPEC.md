@@ -254,6 +254,55 @@ Each mirror session carries one or more tokens. Each token is `{ value: string (
 }
 ```
 
+**FR-8.6.1: Share / revoke (Phase M3+)**
+
+Owners can mint additional tokens and revoke any token they own:
+
+```
+POST /api/mirror/:sid/share?t=<owner>
+→ 200 { reader_token, mirror_url }
+→ 403                                   not an owner token
+
+POST /api/mirror/:sid/revoke?t=<owner>
+Body: { "token"?: string, "all"?: boolean }
+→ 200 { revoked: number }
+→ 403                                   not an owner token
+→ 404                                   token value not found
+
+GET /api/mirror/:sid/tokens?t=<owner>
+→ 200 { tokens: [ { type, token_preview, created_at, revoked_at } ] }
+→ 403                                   not an owner token
+```
+
+Revoking a token immediately closes any live WebSocket the holder had open. `all:true` revokes every token on the session.
+
+**FR-8.6.2: Redactor (Phase M3+)**
+
+The mirror-agent runs every event through a regex redactor before shipping it to the hub. Defaults cover AWS access keys, GitHub PATs, Anthropic / OpenAI key prefixes, PEM headers, and JWTs. User-extensible via `~/.claude-net/redact.json` (merged with project-local `.claude-net/redact.json`). Redaction is best-effort — documented as a convenience, not a compliance control.
+
+**FR-8.6.3: Archive (Phase M3+)**
+
+When `CLAUDE_NET_MIRROR_STORE=<dir>` is set, the hub persists every mirror session as `<dir>/<sid>.jsonl`. Post-restart, transcripts are reachable at:
+
+```
+GET /api/mirror/archive/:sid
+→ 200 { sid, owner_agent, cwd, created_at, closed_at, transcript[] }
+→ 404                                   not archived
+```
+
+Archive retention defaults to 24 hours; override with `CLAUDE_NET_MIRROR_RETENTION_HOURS`. Live sessions are NOT auto-restored — archive is post-mortem viewing only.
+
+**FR-8.6.4: TLS (Phase M3+)**
+
+Set both `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` to file paths and the hub binds HTTPS/WSS on its normal port. Generated mirror URLs switch to `https://` / `wss://`.
+
+**FR-8.6.5: Rate limits (Phase M3+)**
+
+- `POST /api/mirror/session` — 30 per 5 minutes per remote IP.
+- `POST /api/mirror/:sid/inject` — one per 250ms burst ceiling, plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute.
+
+Breached requests return `429` with `Retry-After` in seconds.
+
 **FR-8.7: Remote-inject consent (Phase M2+)**
 
 The mirror-agent gates every remote inject through a per-session consent policy:
@@ -536,6 +585,10 @@ docker run -d -p 4815:4815 -e CLAUDE_NET_HOST=mybox.tail1234.ts.net claude-net
 |----------|----------|---------|-------------|
 | `CLAUDE_NET_HOST` | no | _(derived from request Host header)_ | External hostname/IP for setup script |
 | `CLAUDE_NET_PORT` | no | `4815` | Port the hub listens on |
+| `CLAUDE_NET_TLS_CERT` / `CLAUDE_NET_TLS_KEY` | no | _(HTTP)_ | If both set, hub serves HTTPS/WSS; mirror URLs use `https://` |
+| `CLAUDE_NET_MIRROR_STORE` | no | _(in-memory)_ | Directory for persistent mirror transcripts. Archives served via `/api/mirror/archive/:sid` |
+| `CLAUDE_NET_MIRROR_RETENTION_HOURS` | no | `24` | Archive retention window |
+| `CLAUDE_NET_MIRROR_INJECT_RPM` | no | `20` | Per-session inject quota per minute |
 
 ### Client Setup
 

@@ -342,6 +342,12 @@
   .mirror-compose button:disabled { opacity: 0.4; cursor: default; }
   .mirror-compose-err { font-size: 12px; color: var(--red); padding: 4px 12px; min-height: 18px; }
 
+  .mirror-share-btn {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 2px 10px; border-radius: 3px; font-size: 11px; cursor: pointer;
+  }
+  .mirror-share-btn:hover { background: var(--bg-hover); }
+
   .mirror-status { font-size: 11px; padding: 4px 12px; color: var(--text-muted); }
   .mirror-status.error { color: var(--red); }
 </style>
@@ -392,6 +398,7 @@
       <span class="cwd" id="mirror-cwd"></span>
       <span id="mirror-owner"></span>
       <span id="mirror-conn">connecting…</span>
+      <button id="mirror-share-btn" class="mirror-share-btn" type="button" style="display:none" title="Create a read-only share link">share</button>
     </div>
   </header>
   <div class="mirror-status" id="mirror-status"></div>
@@ -820,6 +827,7 @@
       }
     }
 
+    var isOwner = false;
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
@@ -828,6 +836,11 @@
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
       }
+      isOwner = msg.token_type === 'owner';
+      var shareBtn = document.getElementById('mirror-share-btn');
+      if (shareBtn) shareBtn.style.display = isOwner ? '' : 'none';
+      var compose = document.getElementById('mirror-compose');
+      if (compose && !isOwner) compose.classList.add('compose-hidden');
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       if (Array.isArray(msg.transcript)) {
@@ -910,6 +923,36 @@
           e.preventDefault();
           doInject();
         }
+      });
+    }
+
+    var shareBtn = document.getElementById('mirror-share-btn');
+    if (shareBtn) {
+      shareBtn.addEventListener('click', function() {
+        shareBtn.disabled = true;
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/share?t=' + encodeURIComponent(token), { method: 'POST' })
+          .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+          .then(function(r) {
+            shareBtn.disabled = false;
+            if (r.status >= 400) {
+              statusEl.className = 'mirror-status error';
+              statusEl.textContent = (r.body && r.body.error) || 'share failed';
+              return;
+            }
+            var url = r.body.mirror_url;
+            if (url) {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).catch(function() { /* ignore */ });
+              }
+              statusEl.className = 'mirror-status';
+              statusEl.textContent = 'reader link copied: ' + url;
+            }
+          })
+          .catch(function(err) {
+            shareBtn.disabled = false;
+            statusEl.className = 'mirror-status error';
+            statusEl.textContent = 'share failed: ' + (err && err.message ? err.message : err);
+          });
       });
     }
   }

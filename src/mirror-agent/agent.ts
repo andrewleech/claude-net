@@ -8,13 +8,16 @@
 // (so it survives restarts and /clear) and the claude-net MCP plugin (so a
 // plugin crash can't take the agent down).
 
+import crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { MirrorEventFrame } from "@/shared/types";
+import { ConsentManager, type ConsentMode } from "./consent";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { HubClient } from "./hub-client";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
+import { TmuxInjector } from "./tmux-inject";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -43,6 +46,7 @@ interface SessionState {
   tail: TailHandle | null;
   lastEventAt: number;
   closed: boolean;
+  tmuxPane: string | null;
 }
 
 export interface AgentHandle {
@@ -65,6 +69,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
   const sessions = new Map<string, SessionState>();
+  const consent = new ConsentManager();
+  const injector = new TmuxInjector();
   let lastActivityAt = Date.now();
 
   // Ensure state dir exists.
@@ -144,7 +150,31 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       void stop();
       return new Response("stopping", { status: 200 });
     }
+    if (req.method === "POST" && url.pathname === "/consent") {
+      return handleConsentPost(req);
+    }
     return new Response("not found", { status: 404 });
+  }
+
+  async function handleConsentPost(req: Request): Promise<Response> {
+    let body: { sid?: string; mode?: ConsentMode; action?: string };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const sid = body.sid;
+    if (!sid || !sessions.has(sid)) {
+      return new Response("unknown sid", { status: 404 });
+    }
+    if (body.action === "reset") {
+      consent.reset(sid);
+    } else if (body.mode) {
+      consent.setMode(sid, body.mode);
+    } else {
+      return new Response("missing mode or action", { status: 400 });
+    }
+    return Response.json({ sid, ...consent.describe(sid) });
   }
 
   async function handleHookPost(req: Request): Promise<Response> {
@@ -164,17 +194,27 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     const sid = ingested.sid;
     let session = sessions.get(sid);
     if (!session) {
-      session = await openSession(sid, ingested.cwd, ingested.transcriptPath);
+      session = await openSession(
+        sid,
+        ingested.cwd,
+        ingested.transcriptPath,
+        ingested.tmuxPane,
+      );
       if (!session) {
         return new Response("hub unavailable", { status: 503 });
       }
-    } else if (
-      ingested.transcriptPath &&
-      session.transcriptPath !== ingested.transcriptPath
-    ) {
-      // Transcript path first becomes known partway through; start tail then.
-      session.transcriptPath = ingested.transcriptPath;
-      startTailIfNeeded(session);
+    } else {
+      if (
+        ingested.transcriptPath &&
+        session.transcriptPath !== ingested.transcriptPath
+      ) {
+        session.transcriptPath = ingested.transcriptPath;
+        startTailIfNeeded(session);
+      }
+      // Update tmux pane on each hook — if the user moves panes, we track it.
+      if (ingested.tmuxPane && session.tmuxPane !== ingested.tmuxPane) {
+        session.tmuxPane = ingested.tmuxPane;
+      }
     }
 
     queueEvent(session, ingested.frame);
@@ -191,6 +231,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     sid: string,
     cwd: string | undefined,
     transcriptPath: string | undefined,
+    tmuxPane: string | undefined,
   ): Promise<SessionState | null> {
     const ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
     let createResponse: {
@@ -232,6 +273,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       tail: null,
       lastEventAt: Date.now(),
       closed: false,
+      tmuxPane: tmuxPane ?? null,
     };
     sessions.set(sid, session);
 
@@ -301,18 +343,82 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   function handleHubMessage(session: SessionState, raw: string): void {
-    let data: { event?: string };
+    let data: {
+      event?: string;
+      text?: string;
+      seq?: number;
+      origin?: { watcher?: string };
+    };
     try {
-      data = JSON.parse(raw) as { event?: string };
+      data = JSON.parse(raw) as typeof data;
     } catch {
       return;
     }
-    // Inject frames land in M2. For M1 we log if the hub sends anything.
     if (data.event === "mirror_inject") {
-      log(
-        `[${session.sid}] received inject frame; injection lands in Phase M2`,
-      );
+      const text = typeof data.text === "string" ? data.text : "";
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      void handleInject(session, text, watcher).catch((err: unknown) => {
+        log(`[${session.sid}] inject handler threw: ${String(err)}`);
+      });
     }
+  }
+
+  async function handleInject(
+    session: SessionState,
+    text: string,
+    watcher: string,
+  ): Promise<void> {
+    const consentResult = await consent.check(
+      session.sid,
+      session.tmuxPane,
+      watcher,
+    );
+    if (!consentResult.ok) {
+      emitAuditEvent(
+        session,
+        `inject rejected (consent: ${consentResult.reason}): ${consentResult.message}`,
+      );
+      return;
+    }
+    if (!session.tmuxPane) {
+      emitAuditEvent(
+        session,
+        "inject rejected: session is not running inside tmux (no pane recorded)",
+      );
+      return;
+    }
+    const result = await injector.inject(session.sid, session.tmuxPane, text);
+    if (!result.ok) {
+      emitAuditEvent(
+        session,
+        `inject failed (${result.code}): ${result.error}`,
+      );
+      return;
+    }
+    const preview = text.length > 80 ? `${text.slice(0, 77)}…` : text;
+    emitAuditEvent(
+      session,
+      `inject from ${watcher}: ${JSON.stringify(preview)}`,
+    );
+  }
+
+  function emitAuditEvent(session: SessionState, text: string): void {
+    const frame = {
+      action: "mirror_event" as const,
+      sid: session.sid,
+      uuid: crypto.randomUUID(),
+      kind: "notification" as const,
+      ts: Date.now(),
+      payload: {
+        kind: "notification" as const,
+        text,
+        source: "mirror-agent",
+      },
+    };
+    queueEvent(session, frame);
   }
 
   function closeSession(session: SessionState, reason: string): void {

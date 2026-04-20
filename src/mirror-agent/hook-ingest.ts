@@ -33,6 +33,11 @@ export interface RawHookPayload {
   message?: string;
   phase?: string;
   summary?: string;
+  /** Synthetic metadata added by claude-net-mirror-push (not a hook field). */
+  _mirror_env?: {
+    TMUX?: string;
+    TMUX_PANE?: string;
+  };
   // Forward-compatible: allow unknown keys.
   [key: string]: unknown;
 }
@@ -42,6 +47,7 @@ export interface IngestedEvent {
   frame: MirrorEventFrame;
   transcriptPath: string | undefined;
   cwd: string | undefined;
+  tmuxPane: string | undefined;
 }
 
 /**
@@ -80,6 +86,10 @@ export function ingestHook(payload: RawHookPayload): IngestedEvent | null {
         ? payload.transcript_path
         : undefined,
     cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
+    tmuxPane:
+      typeof payload._mirror_env?.TMUX_PANE === "string"
+        ? payload._mirror_env.TMUX_PANE
+        : undefined,
   };
 }
 

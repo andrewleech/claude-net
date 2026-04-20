@@ -589,6 +589,29 @@ const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: "mirror_consent",
+    description:
+      "Set or reset the remote-inject consent policy for this mirror session. Modes: 'ask-first-per-session' (default — prompt on first inject, then allow), 'ask-every-time', 'always' (no prompting), 'never' (inject disabled). Use 'reset' to require a fresh prompt on the next inject.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        mode: {
+          type: "string",
+          enum: [
+            "ask-first-per-session",
+            "ask-every-time",
+            "always",
+            "never",
+            "reset",
+          ],
+          description:
+            "Consent mode, or 'reset' to clear accepted state without changing the mode.",
+        },
+      },
+      required: ["mode"],
+    },
+  },
 ];
 
 // ── Tool dispatch ─────────────────────────────────────────────────────────
@@ -670,7 +693,10 @@ async function findOurMirrorSession(): Promise<MirrorAgentSession | null> {
   );
 }
 
-async function handleMirrorTool(name: string): Promise<{
+async function handleMirrorTool(
+  name: string,
+  args: Record<string, string>,
+): Promise<{
   isError?: boolean;
   content: { type: "text"; text: string }[];
 }> {
@@ -751,6 +777,36 @@ async function handleMirrorTool(name: string): Promise<{
     });
   }
 
+  if (name === "mirror_consent") {
+    if (!port) {
+      return notConnectedError("mirror-agent is not running");
+    }
+    const session = await findOurMirrorSession();
+    if (!session) {
+      return notConnectedError("no active mirror session for this process yet");
+    }
+    const mode = args.mode;
+    if (!mode) {
+      return notConnectedError("mode is required");
+    }
+    const body =
+      mode === "reset"
+        ? { sid: session.sid, action: "reset" }
+        : { sid: session.sid, mode };
+    const res = await mirrorAgentFetch("/consent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res || !res.ok) {
+      return notConnectedError(
+        `Failed to update consent: ${res ? `HTTP ${res.status}` : "no response"}`,
+      );
+    }
+    const data = (await res.json().catch(() => null)) as unknown;
+    return toolResult(data ?? { ok: true });
+  }
+
   return notConnectedError(`Unknown mirror tool: ${name}`);
 }
 
@@ -774,7 +830,7 @@ async function handleToolCall(
   // Mirror tools talk to the local mirror-agent daemon via loopback.
   // They are independent of the hub WebSocket connection.
   if (name.startsWith("mirror_")) {
-    return handleMirrorTool(name);
+    return handleMirrorTool(name, args);
   }
 
   if (!hubWsUrl) {

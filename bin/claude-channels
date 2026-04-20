@@ -182,6 +182,25 @@ except Exception:
 " 2>/dev/null
 }
 
+mirror_injection_mode() {
+    # Echo the configured injection mode ("tmux" | "none" | "patch"), default "tmux".
+    local config="$HOME/.claude/settings.json"
+    if [ ! -f "$config" ]; then
+        echo "tmux"
+        return
+    fi
+    python3 -c "
+import json
+try:
+    with open('$config') as f:
+        d = json.load(f)
+    v = d.get('claudeNet', {}).get('mirror', {}).get('injection', 'tmux')
+    print(v if v in ('tmux', 'none', 'patch') else 'tmux')
+except Exception:
+    print('tmux')
+" 2>/dev/null
+}
+
 mirror_hooks_installed() {
     local config="$HOME/.claude/settings.json"
     [ -f "$config" ] || return 1
@@ -275,6 +294,25 @@ if mirror_enabled; then
     start_mirror_agent || true
     if ! mirror_hooks_installed; then
         print_mirror_hook_instructions
+    fi
+
+    # Optional: transparent tmux auto-wrap so remote injection has a target.
+    # Triggered when mirror.injection == "tmux" AND we're not already in tmux
+    # AND we haven't already wrapped once (guard: CLAUDE_NET_IN_TMUX_WRAP).
+    if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
+        && [ -z "${CLAUDE_NET_IN_TMUX_WRAP:-}" ] \
+        && [ -z "${TMUX:-}" ] \
+        && [ "$(mirror_injection_mode)" = "tmux" ] \
+        && command -v tmux >/dev/null 2>&1; then
+        export CLAUDE_NET_IN_TMUX_WRAP=1
+        tmux_session_name="claude-channels-$$"
+        echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
+        # new-session replaces the current shell with tmux. When tmux exits
+        # (claude exits), the whole script exits too. This gives the user a
+        # seamless view — they never see the tmux chrome unless they look.
+        exec tmux new-session -s "$tmux_session_name" \
+            -e CLAUDE_NET_IN_TMUX_WRAP=1 \
+            -- "$SELF" "$@"
     fi
 fi
 

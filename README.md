@@ -144,7 +144,8 @@ On the next `claude-channels` launch, the launcher starts the local mirror-agent
 - Tokens are 128-bit hex, delivered in the URL fragment — never in `Referer` or hub access logs.
 - The mirror-agent listens on loopback only and sits between claude's hooks and the hub — claude never blocks on the network (hard 50ms hook timeout).
 - In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence + reader tokens + redactor land in Phase M3.
-- Remote input injection lands in Phase M2 (tmux) / M4 (opt-in binary patch).
+
+**Remote input from the browser (tmux-based, Phase M2).** The `/mirror/<sid>` page has a compose box: type a prompt, hit Enter, and `tmux send-keys` drops it into the live claude REPL. Requires the session to be running inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. First remote inject per session pops a 5-second consent prompt in the terminal via `tmux display-popup`; ask Claude `mirror_consent always` to skip it for the rest of that session, `mirror_consent never` to disable injection entirely, or `mirror_consent reset` to re-arm the first-time prompt. Set `CLAUDE_NET_NO_TMUX_WRAP=1` in your environment to opt out of the auto-wrap. An opt-in binary-patch variant that removes the tmux dependency lands in Phase M4.
 
 Full design: [`docs/MIRROR_SESSION_PLAN.md`](docs/MIRROR_SESSION_PLAN.md) and the per-phase files next to it.
 

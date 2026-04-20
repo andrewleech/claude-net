@@ -192,12 +192,13 @@ Each event emitted for a mirror session has one of these kinds:
 **FR-8.3: Hub → mirror-agent frames (inbound control)**
 
 ```typescript
-// Inject a user prompt into the live local session (Phase M2+)
+// Inject a user prompt into the live local session (Phase M2+).
+// Hub sends these on /ws/mirror/:sid to the connected agent-role client.
 {
   event: "mirror_inject",
   sid: string,
   text: string,
-  seq: number,
+  seq: number,                 // monotonic per session, starting at 1
   origin: { watcher: string, ts: number }
 }
 
@@ -208,6 +209,24 @@ Each event emitted for a mirror session has one of these kinds:
   op: "pause" | "resume" | "close"
 }
 ```
+
+**FR-8.3.1: Inject REST endpoint**
+
+Dashboard clients submit injects through the hub:
+
+```
+POST /api/mirror/:sid/inject?t=<owner-token>
+Body: { "text": string, "watcher"?: string }
+→ 200 { accepted: true, seq: number }   on success
+→ 400                                    empty / missing text
+→ 401                                    missing token
+→ 403                                    bad token / reader token used
+→ 413                                    prompt > 32 KB
+→ 429                                    rate limit (≥ 1 per 250ms per session)
+→ 503                                    mirror-agent not connected
+```
+
+Reader-type tokens (FR-8.5) cannot inject — the endpoint returns 403.
 
 **FR-8.4: Dashboard events**
 
@@ -235,7 +254,20 @@ Each mirror session carries one or more tokens. Each token is `{ value: string (
 }
 ```
 
-Phase M1 implements read-only outbound mirror and the owner token. Phase M2 adds tmux-based injection. Phase M3 adds reader tokens, a redactor, optional disk persistence, optional TLS, and rate limiting. Phase M4 (opt-in) replaces tmux injection with a same-length binary patch. Full per-phase spec lives in `docs/MIRROR_SESSION_IMPLEMENTATION_PLAN.md` and `docs/MIRROR_SESSION_PHASE_{0..4}.md`.
+**FR-8.7: Remote-inject consent (Phase M2+)**
+
+The mirror-agent gates every remote inject through a per-session consent policy:
+
+- `ask-first-per-session` — default; tmux `display-popup` prompts the terminal user on the first inject per session; subsequent injects pass silently.
+- `ask-every-time` — popup on every inject.
+- `always` — allow without prompting.
+- `never` — reject without prompting.
+
+The policy is set via the plugin's `mirror_consent` tool (with mode `reset` to re-arm). When the session isn't running inside tmux (no pane recorded), consent cannot be obtained and injects are refused with `unavailable`.
+
+Successful injects are logged back into the transcript as a `notification` event (`source: "mirror-agent"`) for auditability. Rejections / failures are also logged, so watchers can see outcomes.
+
+Phase M1 implements read-only outbound mirror and the owner token. Phase M2 adds tmux-based injection + consent. Phase M3 adds reader tokens, a redactor, optional disk persistence, optional TLS, and stricter rate limiting. Phase M4 (opt-in) replaces tmux injection with a same-length binary patch. Full per-phase spec lives in `docs/MIRROR_SESSION_IMPLEMENTATION_PLAN.md` and `docs/MIRROR_SESSION_PHASE_{0..4}.md`.
 
 ---
 

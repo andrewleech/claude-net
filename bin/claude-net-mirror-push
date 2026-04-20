@@ -20,13 +20,15 @@ async function main(): Promise<void> {
   const port = readPort();
   if (!port) return;
 
+  const enriched = enrichPayload(payload);
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HOOK_TIMEOUT_MS);
   try {
     await fetch(`http://127.0.0.1:${port}/hook`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: payload,
+      body: enriched,
       signal: controller.signal,
     });
   } catch {
@@ -34,6 +36,25 @@ async function main(): Promise<void> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function enrichPayload(raw: string): string {
+  // Splice a `_mirror_env` field carrying TMUX / TMUX_PANE into the JSON body
+  // so the mirror-agent can discover the tmux target for remote injection.
+  // Never throws — if the payload isn't valid JSON, pass it through untouched.
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      obj._mirror_env = {
+        TMUX: process.env.TMUX ?? "",
+        TMUX_PANE: process.env.TMUX_PANE ?? "",
+      };
+      return JSON.stringify(obj);
+    }
+  } catch {
+    // ignore — pass through
+  }
+  return raw;
 }
 
 function readPort(): number | null {

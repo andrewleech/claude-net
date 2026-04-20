@@ -4,6 +4,7 @@ import type {
   DashboardEvent,
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
+  MirrorInjectFrame,
   MirrorSessionSummary,
   MirrorTokenType,
 } from "@/shared/types";
@@ -307,6 +308,47 @@ export class MirrorRegistry {
       }
     }
   }
+
+  /**
+   * Forward an inject frame to the session's mirror-agent. Returns the
+   * assigned sequence number on success. Caller must have already
+   * validated the token and the text.
+   */
+  relayInject(
+    sid: string,
+    text: string,
+    watcher: string,
+  ): { ok: true; seq: number } | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const seq = ++entry.nextInjectSeq;
+    const frame: MirrorInjectFrame = {
+      event: "mirror_inject",
+      sid,
+      text,
+      seq,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true, seq };
+  }
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────
@@ -421,7 +463,80 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
       }
       mirrorRegistry.closeSession(params.sid, "exit");
       return { closed: true };
+    })
+
+    .post("/:sid/inject", ({ params, query, body, set, request }) => {
+      const token = (query as Record<string, string | undefined>).t;
+      const validation = mirrorRegistry.validateToken(params.sid, token);
+      if (!validation.ok) {
+        set.status = validation.status;
+        return { error: validation.error };
+      }
+      if (validation.type !== "owner") {
+        set.status = 403;
+        return { error: "Reader tokens cannot inject." };
+      }
+      const payload = body as { text?: string; watcher?: string };
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (text.trim().length === 0) {
+        set.status = 400;
+        return { error: "Empty prompt." };
+      }
+      if (Buffer.byteLength(text, "utf8") > MAX_INJECT_BYTES) {
+        set.status = 413;
+        return { error: `Prompt exceeds ${MAX_INJECT_BYTES} bytes.` };
+      }
+      // Per-session rate limit at the hub (defense in depth; mirror-agent
+      // re-applies its own).
+      if (!injectLimiter.allow(params.sid)) {
+        set.status = 429;
+        set.headers["retry-after"] = "1";
+        return { error: "Rate limit exceeded." };
+      }
+      const watcher = sanitizeWatcher(
+        payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
+      );
+      const result = mirrorRegistry.relayInject(params.sid, text, watcher);
+      if (!result.ok) {
+        set.status = result.status;
+        return { error: result.error };
+      }
+      return { accepted: true, seq: result.seq };
     });
+}
+
+// ── Inject limits & helpers ───────────────────────────────────────────────
+
+const MAX_INJECT_BYTES = 32 * 1024;
+
+class InjectLimiter {
+  private last = new Map<string, number>();
+  private readonly minIntervalMs: number;
+  constructor(minIntervalMs = 250) {
+    this.minIntervalMs = minIntervalMs;
+  }
+  allow(sid: string): boolean {
+    const now = Date.now();
+    const prev = this.last.get(sid) ?? 0;
+    if (now - prev < this.minIntervalMs) return false;
+    this.last.set(sid, now);
+    return true;
+  }
+}
+
+const injectLimiter = new InjectLimiter();
+
+function sanitizeWatcher(s: string): string {
+  // Strip control characters and double-quotes so the value is safe to embed
+  // in notifications and logs.
+  let out = "";
+  for (const ch of s) {
+    const code = ch.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f || ch === '"') continue;
+    out += ch;
+    if (out.length >= 120) break;
+  }
+  return out;
 }
 
 function resolveMirrorHost(

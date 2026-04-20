@@ -322,11 +322,25 @@
   .m-truncated { color: var(--orange); font-size: 11px; margin-left: 6px; }
 
   .mirror-compose {
-    display: flex; align-items: flex-start; gap: 12px;
+    display: flex; align-items: stretch; gap: 8px;
     padding: 12px 24px; background: var(--bg-surface); border-top: 1px solid var(--border);
   }
   .mirror-compose.compose-hidden { display: none; }
-  .mirror-compose-note { font-size: 12px; color: var(--text-muted); padding: 6px 0; }
+  .mirror-compose-note { font-size: 12px; color: var(--text-muted); padding: 6px 0; flex: 1; }
+  .mirror-compose textarea {
+    flex: 1; min-height: 44px; max-height: 140px; resize: vertical;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 10px;
+  }
+  .mirror-compose textarea:focus { outline: none; border-color: var(--blue); }
+  .mirror-compose button {
+    background: var(--blue); color: var(--bg); border: none; padding: 0 18px;
+    border-radius: 4px; font-weight: 600; font-size: 13px; cursor: pointer;
+    align-self: stretch; min-width: 80px;
+  }
+  .mirror-compose button:hover { opacity: 0.85; }
+  .mirror-compose button:disabled { opacity: 0.4; cursor: default; }
+  .mirror-compose-err { font-size: 12px; color: var(--red); padding: 4px 12px; min-height: 18px; }
 
   .mirror-status { font-size: 11px; padding: 4px 12px; color: var(--text-muted); }
   .mirror-status.error { color: var(--red); }
@@ -383,8 +397,10 @@
   <div class="mirror-status" id="mirror-status"></div>
   <div class="mirror-transcript" id="mirror-transcript"></div>
   <div class="mirror-compose compose-hidden" id="mirror-compose">
-    <div class="mirror-compose-note">Inject from this view is disabled in this build (Phase M2 adds tmux-based injection).</div>
+    <textarea id="mirror-compose-text" placeholder="Send a prompt to the local claude (Enter to send, Shift+Enter for newline)…" rows="2"></textarea>
+    <button id="mirror-compose-send" type="button">Send</button>
   </div>
+  <div class="mirror-compose-err" id="mirror-compose-err"></div>
 </div>
 
 <script>
@@ -853,6 +869,49 @@
       mws.onerror = function() { /* close will follow */ };
     }
     mConnect();
+
+    // Compose box (remote inject). Shown because we have an owner token —
+    // reader-token UX lands in Phase M3.
+    var composeEl = document.getElementById('mirror-compose');
+    var composeText = document.getElementById('mirror-compose-text');
+    var composeSend = document.getElementById('mirror-compose-send');
+    var composeErr = document.getElementById('mirror-compose-err');
+    if (composeEl) composeEl.classList.remove('compose-hidden');
+
+    function doInject() {
+      var text = composeText.value;
+      if (!text || !text.trim()) return;
+      composeSend.disabled = true;
+      composeErr.textContent = '';
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject?t=' + encodeURIComponent(token), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, watcher: 'web' })
+      })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(r) {
+          composeSend.disabled = false;
+          if (r.status >= 400) {
+            composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
+          } else {
+            composeText.value = '';
+          }
+        })
+        .catch(function(err) {
+          composeSend.disabled = false;
+          composeErr.textContent = 'Send failed: ' + (err && err.message ? err.message : err);
+        });
+    }
+
+    if (composeSend) composeSend.addEventListener('click', doInject);
+    if (composeText) {
+      composeText.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          doInject();
+        }
+      });
+    }
   }
 
   function tryJson(v) {

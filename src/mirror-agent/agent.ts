@@ -637,9 +637,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         typeof data.origin?.watcher === "string"
           ? data.origin.watcher
           : "unknown";
-      log(
-        `[${session.sid}] mirror_paste received: ${Buffer.byteLength(text, "utf8")} bytes, requestId=${requestId}`,
-      );
       if (!requestId) return;
       void handlePaste(session, requestId, text, watcher).catch(
         (err: unknown) => {
@@ -656,9 +653,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     text: string,
     watcher: string,
   ): Promise<void> {
-    log(
-      `[${session.sid}] handlePaste entering; dir=${PASTE_DIR} watcher=${watcher}`,
-    );
     try {
       fs.mkdirSync(PASTE_DIR, { recursive: true, mode: 0o700 });
     } catch (err) {
@@ -677,9 +671,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       });
       return;
     }
-    log(
-      `[${session.sid}] paste wrote ${Buffer.byteLength(text, "utf8")} bytes → ${filePath}; sending ack`,
-    );
     emitAuditEvent(
       session,
       `paste from ${watcher}: saved ${Buffer.byteLength(text, "utf8")} bytes → ${filePath}`,
@@ -699,12 +690,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       ...(result.path ? { path: result.path } : {}),
       ...(result.error ? { error: result.error } : {}),
     };
-    const payload = JSON.stringify(frame);
-    const ok = session.ws ? session.ws.send(payload) : false;
-    log(
-      `[${session.sid}] paste ack sent? ok=${ok} hasWs=${Boolean(session.ws)} hasPath=${Boolean(result.path)}`,
-    );
-    if (!ok) {
+    if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
       log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
     }
   }

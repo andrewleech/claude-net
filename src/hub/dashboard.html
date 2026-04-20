@@ -989,72 +989,148 @@
     border: 1px solid var(--gold);
   }
 
-  /* ── COMPOSE — terminal prompt. The textarea is the 'input line'
-     with a leading `>` indicator and an accent focus glow. ── */
+  /* ── COMPOSE — a single unified terminal prompt. The textarea,
+     the `>` glyph and the Send button share one bordered frame so
+     it reads as ONE instrument, not 'input + button'. Focus the
+     textarea and the whole frame lights up. ── */
   .mirror-compose {
-    display: flex; align-items: stretch; gap: 10px;
+    display: flex;
+    align-items: stretch;
     padding: 14px 20px;
     background: var(--bg-panel);
     border-top: 1px solid var(--border);
     position: relative;
   }
-  .mirror-compose::before {
-    content: ">";
-    position: absolute;
-    left: 22px; top: 22px;
-    font-family: var(--font-mono);
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--accent);
-    pointer-events: none;
-  }
   .mirror-compose.compose-hidden { display: none; }
-  .mirror-compose-note {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 6px 0;
+
+  /* Inner 'frame' the textarea + button both live inside. */
+  .mirror-compose-frame {
+    display: flex;
+    align-items: stretch;
     flex: 1;
-    letter-spacing: 0.3px;
-  }
-  .mirror-compose textarea {
-    flex: 1; min-height: 46px; max-height: 160px; resize: vertical;
     background: var(--bg);
     border: 1px solid var(--border);
+    transition: border-color 0.1s, box-shadow 0.1s;
+    position: relative;
+  }
+  .mirror-compose-frame:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 18px var(--accent-glow);
+  }
+
+  /* Left-rail prompt: small accent tick + `>` glyph, integrated into
+     the frame's left edge rather than floating in the bar. */
+  .mirror-compose-frame::before {
+    content: ">";
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    width: 34px;
+    padding-top: 10px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--accent);
+    border-right: 1px solid var(--border);
+    user-select: none;
+    flex-shrink: 0;
+  }
+  .mirror-compose-frame:focus-within::before {
+    background: var(--accent-ink);
+  }
+
+  .mirror-compose textarea {
+    flex: 1;
+    min-height: 46px;
+    max-height: 180px;
+    resize: vertical;
+    background: transparent;
+    border: none;
     color: var(--text);
     font-family: var(--font-mono);
     font-size: 13px;
-    line-height: 1.5;
-    padding: 10px 14px 10px 28px;
-    transition: border-color 0.1s, box-shadow 0.1s;
+    line-height: 1.55;
+    padding: 11px 14px;
   }
   .mirror-compose textarea::placeholder {
     color: var(--text-muted);
     font-style: italic;
+    letter-spacing: 0.2px;
   }
   .mirror-compose textarea:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 16px var(--accent-glow);
+    box-shadow: none;
   }
+
+  /* Trailing cluster: keyboard hint + Send button, stacked so the
+     hint reads 'Enter to send · Shift+Enter for newline' without
+     bloating the button text itself. */
+  .mirror-compose-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 12px 0 10px;
+    border-left: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .mirror-compose-hint {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    line-height: 1.3;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .mirror-compose-hint kbd {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-dim);
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    margin: 0 2px;
+    background: var(--bg-panel);
+  }
+  @media (max-width: 700px) {
+    .mirror-compose-hint { display: none; }
+  }
+
   .mirror-compose button {
-    background: var(--accent);
-    color: #0b0c10;
-    border: none;
-    padding: 0 22px;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    padding: 0 16px;
     font-family: var(--font-mono);
     font-weight: 700;
     font-size: 11px;
-    letter-spacing: 2px;
+    letter-spacing: 1.8px;
     text-transform: uppercase;
     cursor: pointer;
-    align-self: stretch;
-    min-width: 100px;
-    transition: background 0.1s, transform 0.05s;
+    min-width: 88px;
+    height: 34px;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    transition: background 0.1s, color 0.1s;
   }
-  .mirror-compose button:hover { background: #ff6344; }
-  .mirror-compose button:active { transform: translateY(1px); }
-  .mirror-compose button:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
+  .mirror-compose button::before {
+    content: "↵";
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1;
+  }
+  .mirror-compose button:hover { background: var(--accent); color: #0b0c10; }
+  .mirror-compose button:active { background: var(--accent-dim); }
+  .mirror-compose button:disabled {
+    color: var(--text-muted);
+    border-color: var(--border);
+    cursor: default;
+  }
+  .mirror-compose button:disabled:hover { background: transparent; color: var(--text-muted); }
 
   .mirror-compose-err {
     font-family: var(--font-mono);
@@ -1458,8 +1534,17 @@
   <div class="mirror-status" id="mirror-status"></div>
   <div class="mirror-transcript" id="mirror-transcript"></div>
   <div class="mirror-compose compose-hidden" id="mirror-compose">
-    <textarea id="mirror-compose-text" placeholder="Send a prompt to the local claude (Enter to send, Shift+Enter for newline)…" rows="2"></textarea>
-    <button id="mirror-compose-send" type="button">Send</button>
+    <div class="mirror-compose-frame">
+      <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
+      <div class="mirror-compose-actions">
+        <div class="mirror-compose-hint">
+          <kbd>↵</kbd>send
+          <br>
+          <kbd>⇧↵</kbd>newline
+        </div>
+        <button id="mirror-compose-send" type="button">Transmit</button>
+      </div>
+    </div>
   </div>
   <div class="mirror-compose-err" id="mirror-compose-err"></div>
 </div>

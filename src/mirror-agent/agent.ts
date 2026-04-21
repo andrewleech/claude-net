@@ -270,6 +270,22 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
     }
 
+    // /clear handling. If any OTHER session shares this one's tmux pane
+    // it's a stale mirror from before a /clear — same claude process,
+    // new session_id — and every inject aimed at the stale sid would
+    // actually land in the current pane, confusing users. Close them.
+    if (ingested.tmuxPane) {
+      for (const other of sessions.values()) {
+        if (
+          other.sid !== sid &&
+          !other.closed &&
+          other.tmuxPane === ingested.tmuxPane
+        ) {
+          closeSession(other, "replaced-by-clear");
+        }
+      }
+    }
+
     // Stop / SubagentStop fire at turn end and carry only the FINAL
     // assistant text block. When the JSONL tail is running for this
     // session we already emit every text block (including the final

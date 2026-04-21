@@ -275,6 +275,24 @@ except Exception:
 
 start_mirror_agent || true
 
+# Warn if tmux is needed but missing. Without tmux there's no pane for
+# the mirror-agent to send-keys into, so web inject lands as:
+#   "inject rejected: session is not running inside tmux (no pane recorded)"
+# and silently nothing reaches Claude. Visible warning at startup saves
+# the "why isn't my paste landing?" debugging.
+if [ "$(mirror_injection_mode)" = "tmux" ] \
+    && [ -z "${TMUX:-}" ] \
+    && [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
+    && ! command -v tmux >/dev/null 2>&1; then
+    case "$(uname -s)" in
+        Darwin) install_hint="brew install tmux" ;;
+        Linux)  install_hint="sudo apt install tmux  # or your package manager" ;;
+        *)      install_hint="install tmux via your package manager" ;;
+    esac
+    echo "[claude-net/mirror] tmux not found — remote inject from the web will be rejected." >&2
+    echo "[claude-net/mirror] install tmux to enable: $install_hint" >&2
+fi
+
 # Optional: transparent tmux auto-wrap so remote injection has a target.
 # Triggered when mirror.injection == "tmux" AND we're not already in tmux
 # AND we haven't already wrapped once (guard: CLAUDE_NET_IN_TMUX_WRAP).

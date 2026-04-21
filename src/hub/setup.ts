@@ -37,6 +37,17 @@ if ! command -v bun >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v tmux >/dev/null 2>&1; then
+    case "\$(uname -s)" in
+        Darwin) tmux_hint="brew install tmux" ;;
+        Linux)  tmux_hint="sudo apt install tmux  # or your package manager" ;;
+        *)      tmux_hint="install tmux via your package manager" ;;
+    esac
+    echo "NOTE: tmux is not installed. The install will continue, but" >&2
+    echo "      remote inject from the web dashboard will not work" >&2
+    echo "      until you install tmux: \$tmux_hint" >&2
+fi
+
 HUB="${hubUrl}"
 INSTALL_DIR="\$HOME/.local/share/claude-channels/bin"
 BIN_DIR="\$HOME/.local/bin"

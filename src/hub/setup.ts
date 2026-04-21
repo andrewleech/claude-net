@@ -81,7 +81,7 @@ claude mcp add \\
     --scope user \\
     -e CLAUDE_NET_HUB="\$HUB" \\
     --transport stdio \\
-    claude-net -- bash -c 'P=\$(mktemp /tmp/claude-net-plugin.XXXXXX.ts) && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"' \\
+    claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"' \\
     2>&1 | grep -v "already configured" || true
 
 echo "[3/4] Merging mirror hooks into \${SETTINGS}…"

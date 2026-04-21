@@ -159,29 +159,14 @@ if ! $already_has_channels; then
     [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
 fi
 
-# ── Mirror-session daemon (auto-start if enabled) ────────────────────────
-# Reads `claudeNet.mirror.enabled` from ~/.claude/settings.json. If enabled,
-# starts the mirror-agent daemon in the background (idempotent — the agent
-# itself detects an existing instance via its port file).
+# ── Mirror-session daemon (always auto-started) ──────────────────────────
+# Starts the mirror-agent daemon in the background (idempotent — the agent
+# itself detects an existing instance via its port file). Mirror is always
+# on; the `claudeNet.mirror.enabled` setting is no longer consulted.
 #
 # Hook installation in ~/.claude/settings.json is handled by the hub's
 # `/setup` endpoint, not by this launcher. If hooks are missing, mirror
 # simply produces no events; the launcher does not mutate settings.json.
-
-mirror_enabled() {
-    local config="$HOME/.claude/settings.json"
-    [ -f "$config" ] || return 1
-    python3 -c "
-import json, sys
-try:
-    with open('$config') as f:
-        d = json.load(f)
-    v = d.get('claudeNet', {}).get('mirror', {}).get('enabled', False)
-    sys.exit(0 if v else 1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null
-}
 
 mirror_injection_mode() {
     # Echo the configured injection mode ("tmux" | "none" | "patch"), default "tmux".
@@ -269,27 +254,25 @@ except Exception:
     done
 }
 
-if mirror_enabled; then
-    start_mirror_agent || true
+start_mirror_agent || true
 
-    # Optional: transparent tmux auto-wrap so remote injection has a target.
-    # Triggered when mirror.injection == "tmux" AND we're not already in tmux
-    # AND we haven't already wrapped once (guard: CLAUDE_NET_IN_TMUX_WRAP).
-    if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
-        && [ -z "${CLAUDE_NET_IN_TMUX_WRAP:-}" ] \
-        && [ -z "${TMUX:-}" ] \
-        && [ "$(mirror_injection_mode)" = "tmux" ] \
-        && command -v tmux >/dev/null 2>&1; then
-        export CLAUDE_NET_IN_TMUX_WRAP=1
-        tmux_session_name="claude-channels-$$"
-        echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
-        # new-session replaces the current shell with tmux. When tmux exits
-        # (claude exits), the whole script exits too. This gives the user a
-        # seamless view — they never see the tmux chrome unless they look.
-        exec tmux new-session -s "$tmux_session_name" \
-            -e CLAUDE_NET_IN_TMUX_WRAP=1 \
-            -- "$SELF" "$@"
-    fi
+# Optional: transparent tmux auto-wrap so remote injection has a target.
+# Triggered when mirror.injection == "tmux" AND we're not already in tmux
+# AND we haven't already wrapped once (guard: CLAUDE_NET_IN_TMUX_WRAP).
+if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
+    && [ -z "${CLAUDE_NET_IN_TMUX_WRAP:-}" ] \
+    && [ -z "${TMUX:-}" ] \
+    && [ "$(mirror_injection_mode)" = "tmux" ] \
+    && command -v tmux >/dev/null 2>&1; then
+    export CLAUDE_NET_IN_TMUX_WRAP=1
+    tmux_session_name="claude-channels-$$"
+    echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
+    # new-session replaces the current shell with tmux. When tmux exits
+    # (claude exits), the whole script exits too. This gives the user a
+    # seamless view — they never see the tmux chrome unless they look.
+    exec tmux new-session -s "$tmux_session_name" \
+        -e CLAUDE_NET_IN_TMUX_WRAP=1 \
+        -- "$SELF" "$@"
 fi
 
 exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"

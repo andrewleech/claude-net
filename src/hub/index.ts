@@ -11,7 +11,6 @@ import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
 import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
 const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
-const externalHost = process.env.CLAUDE_NET_HOST || undefined;
 const startedAt = new Date();
 
 const registry = new Registry();
@@ -34,8 +33,10 @@ mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
 // Resolve plugin.ts path relative to hub source directory
 const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
 const dashboardPath = `${import.meta.dir}/dashboard.html`;
+const dashboardParsersPath = `${import.meta.dir}/dashboard/parsers.js`;
 let pluginCache: string | null = null;
 let dashboardCache: string | null = null;
+let dashboardParsersCache: string | null = null;
 
 async function getDashboardHtml(): Promise<string> {
   if (!dashboardCache) {
@@ -45,12 +46,16 @@ async function getDashboardHtml(): Promise<string> {
   return dashboardCache;
 }
 
+async function getDashboardParsersJs(): Promise<string> {
+  if (!dashboardParsersCache) {
+    const file = Bun.file(dashboardParsersPath);
+    dashboardParsersCache = await file.text();
+  }
+  return dashboardParsersCache;
+}
+
 let app = new Elysia()
   .get("/", async ({ set }) => {
-    set.headers["content-type"] = "text/html";
-    return await getDashboardHtml();
-  })
-  .get("/mirror/:sid", async ({ set }) => {
     set.headers["content-type"] = "text/html";
     return await getDashboardHtml();
   })
@@ -69,8 +74,12 @@ let app = new Elysia()
     set.headers["content-type"] = "text/typescript";
     return pluginCache;
   })
+  .get("/dashboard/parsers.js", async ({ set }) => {
+    set.headers["content-type"] = "application/javascript";
+    return await getDashboardParsersJs();
+  })
   .use(apiPlugin({ registry, teams, router, startedAt }))
-  .use(mirrorPlugin({ mirrorRegistry, externalHost, port }))
+  .use(mirrorPlugin({ mirrorRegistry }))
   .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { MirrorRegistry } from "@/hub/mirror";
+import { MirrorRegistry, mirrorPlugin } from "@/hub/mirror";
 import type { MirrorEventFrame } from "@/shared/types";
+import { Elysia } from "elysia";
 
 function makeFrame(
   sid: string,
@@ -25,15 +26,15 @@ describe("MirrorRegistry", () => {
     reg = new MirrorRegistry({ transcriptRing: 50, retentionMs: 0 });
   });
 
-  test("createSession returns an entry and token", () => {
+  test("createSession returns an entry with no token in the shape", () => {
     const r = reg.createSession("alice:u@h", "/home/alice");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.entry.ownerAgent).toBe("alice:u@h");
     expect(r.entry.cwd).toBe("/home/alice");
-    expect(r.token).toMatch(/^[0-9a-f]{32}$/);
     expect(r.restored).toBe(false);
     expect(reg.sessions.size).toBe(1);
+    expect(r).not.toHaveProperty("token");
   });
 
   test("createSession is idempotent for same sid + owner", () => {
@@ -42,7 +43,7 @@ describe("MirrorRegistry", () => {
     expect(r1.ok && r2.ok).toBe(true);
     if (!r1.ok || !r2.ok) return;
     expect(r2.restored).toBe(true);
-    expect(r2.token).toBe(r1.token);
+    expect(r2.entry.sid).toBe(r1.entry.sid);
     expect(reg.sessions.size).toBe(1);
   });
 
@@ -54,26 +55,19 @@ describe("MirrorRegistry", () => {
     expect(r2.error).toContain("different owner");
   });
 
-  test("validateToken accepts correct token and rejects wrong token", () => {
+  test("getSession returns the entry for a known sid, 404 otherwise", () => {
     const r = reg.createSession("alice:u@h", "/home/alice");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const good = reg.validateToken(r.entry.sid, r.token);
-    expect(good.ok).toBe(true);
-    const bad = reg.validateToken(r.entry.sid, "deadbeef".repeat(4));
-    expect(bad.ok).toBe(false);
-  });
+    const found = reg.getSession(r.entry.sid);
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    expect(found.entry.sid).toBe(r.entry.sid);
 
-  test("validateToken returns status codes for missing / unknown session / missing token", () => {
-    const missing = reg.validateToken("nope", "x".repeat(32));
+    const missing = reg.getSession("nope");
     expect(missing.ok).toBe(false);
     if (missing.ok) return;
     expect(missing.status).toBe(404);
-
-    const noTok = reg.validateToken("nope", undefined);
-    expect(noTok.ok).toBe(false);
-    if (noTok.ok) return;
-    expect(noTok.status).toBe(401);
   });
 
   test("recordEvent appends to transcript and dedupes by uuid", () => {
@@ -102,7 +96,6 @@ describe("MirrorRegistry", () => {
       tiny.recordEvent(r.entry.sid, makeFrame(r.entry.sid, `u-${i}`));
     }
     expect(r.entry.transcript).toHaveLength(3);
-    // The last three uuids survive.
     const uuids = r.entry.transcript.map((f) => f.uuid);
     expect(uuids).toEqual(["u-7", "u-8", "u-9"]);
   });
@@ -116,11 +109,8 @@ describe("MirrorRegistry", () => {
     const ws = { send: (s: string) => sent.push(s) };
     const watcher = {
       ws,
-      wsIdentity: {
-        /* plain */
-      },
+      wsIdentity: {},
       id: "w-1",
-      tokenType: "owner" as const,
     };
     reg.addWatcher(sid, watcher);
     expect(r.entry.watchers.size).toBe(1);
@@ -144,7 +134,6 @@ describe("MirrorRegistry", () => {
       ws: { send: (s: string) => sent.push(s) },
       wsIdentity: {},
       id: "w-1",
-      tokenType: "owner",
     });
     reg.closeSession(sid, "exit");
     const endEvent = sent
@@ -154,7 +143,6 @@ describe("MirrorRegistry", () => {
         return m.event === "mirror:event" && p?.kind === "session_end";
       });
     expect(endEvent).toBeDefined();
-    // recordEvent must refuse further events after close.
     const late = reg.recordEvent(sid, makeFrame(sid, "late"));
     expect(late.ok).toBe(false);
   });
@@ -248,5 +236,47 @@ describe("MirrorRegistry", () => {
     const names = events.map((e) => e.event);
     expect(names).toContain("mirror:session_started");
     expect(names).toContain("mirror:session_ended");
+  });
+});
+
+// Auto-start flow: simulate the mirror-agent POSTing to /api/mirror/session
+// (what happens on `register`) and confirm the session appears without any
+// `mirror_on` MCP call or token handshake.
+describe("mirror auto-start via POST /api/mirror/session", () => {
+  test("session shows up immediately with no token in the response", async () => {
+    const reg = new MirrorRegistry({ transcriptRing: 100, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/mirror/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          owner_agent: "agent-x:u@h",
+          cwd: "/workspace",
+          sid: "auto-sid-1",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.sid).toBe("auto-sid-1");
+      expect(body.restored).toBe(false);
+      expect(body).not.toHaveProperty("owner_token");
+      expect(body).not.toHaveProperty("mirror_url");
+      expect(reg.sessions.has("auto-sid-1")).toBe(true);
+
+      const transcript = await fetch(
+        `http://localhost:${port}/api/mirror/auto-sid-1/transcript`,
+      );
+      expect(transcript.status).toBe(200);
+      const payload = (await transcript.json()) as Record<string, unknown>;
+      expect(payload.sid).toBe("auto-sid-1");
+      expect(Array.isArray(payload.transcript)).toBe(true);
+    } finally {
+      app.stop();
+    }
   });
 });

@@ -297,7 +297,6 @@ export interface MirrorEventBroadcastEvent {
 export interface MirrorWatcherJoinedEvent {
   event: "mirror:watcher_joined";
   sid: string;
-  token_type: MirrorTokenType;
   watcher_id: string;
 }
 
@@ -418,18 +417,6 @@ export type MirrorEventPayload =
   | MirrorCompactPayload;
 
 // ── Mirror data models ────────────────────────────────────────────────────
-
-export type MirrorTokenType = "owner" | "reader";
-
-// Storage-only. Token `value` must never be included in payloads returned to
-// dashboard clients or included in broadcast events.
-export interface MirrorToken {
-  value: string;
-  type: MirrorTokenType;
-  sid: string;
-  created_at: string;
-  revoked_at?: string;
-}
 
 // Public summary suitable for `GET /api/mirror/sessions`.
 export interface MirrorSessionSummary {

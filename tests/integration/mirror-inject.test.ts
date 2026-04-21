@@ -13,7 +13,7 @@ type Msg = Record<string, unknown>;
 
 function startHub() {
   const reg = new MirrorRegistry({ transcriptRing: 200, retentionMs: 0 });
-  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg, port: 0 }));
+  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
   app = wsMirrorPlugin(app, reg);
   app.listen(0);
   // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
@@ -88,12 +88,8 @@ async function createSession(port: number) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ owner_agent: "t:u@h", cwd: "/tmp" }),
   });
-  const d = (await r.json()) as {
-    sid: string;
-    owner_token: string;
-    mirror_url: string;
-  };
-  return { sid: d.sid, token: d.owner_token };
+  const d = (await r.json()) as { sid: string };
+  return { sid: d.sid };
 }
 
 describe("mirror inject REST → WS relay", () => {
@@ -109,14 +105,14 @@ describe("mirror inject REST → WS relay", () => {
 
   test("POST /inject relays MirrorInjectFrame to agent WS with seq", async () => {
     const s = await createSession(hub.port);
-    const agentUrl =
-      `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}` +
-      `?t=${encodeURIComponent(s.token)}&as=agent`;
+    const agentUrl = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(
+      s.sid,
+    )}?as=agent`;
     const agent = await connectWs(agentUrl);
     await agent.waitFor((m) => m.event === "mirror:agent_ready");
 
     const res = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -139,23 +135,22 @@ describe("mirror inject REST → WS relay", () => {
     agent.close();
   });
 
-  test("rejects inject without a token", async () => {
-    const s = await createSession(hub.port);
+  test("rejects inject on an unknown sid", async () => {
     const res = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
+      `http://localhost:${hub.port}/api/mirror/unknown-sid/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: "hi" }),
       },
     );
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
   });
 
   test("rejects empty prompt", async () => {
     const s = await createSession(hub.port);
     const res = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -168,7 +163,7 @@ describe("mirror inject REST → WS relay", () => {
   test("returns 503 when no mirror-agent is connected", async () => {
     const s = await createSession(hub.port);
     const res = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -180,14 +175,14 @@ describe("mirror inject REST → WS relay", () => {
 
   test("hub-side rate limit kicks in on burst", async () => {
     const s = await createSession(hub.port);
-    const agentUrl =
-      `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}` +
-      `?t=${encodeURIComponent(s.token)}&as=agent`;
+    const agentUrl = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(
+      s.sid,
+    )}?as=agent`;
     const agent = await connectWs(agentUrl);
     await agent.waitFor((m) => m.event === "mirror:agent_ready");
 
     const first = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -196,7 +191,7 @@ describe("mirror inject REST → WS relay", () => {
     );
     expect(first.status).toBe(200);
     const second = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/inject`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },

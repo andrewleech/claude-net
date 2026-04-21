@@ -1,6 +1,6 @@
-// Covers GET /api/mirror/sessions/all — returns every session with its
-// owner token + ready-to-click mirror URL. Used by the dashboard on a
-// trusted internal network.
+// Covers GET /api/mirror/sessions/all — returns every active session as a
+// plain summary. No tokens, no click-through URL. Used by the dashboard on
+// a trusted internal network.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { MirrorRegistry, mirrorPlugin } from "@/hub/mirror";
@@ -8,7 +8,7 @@ import { Elysia } from "elysia";
 
 function startHub() {
   const reg = new MirrorRegistry({ transcriptRing: 100, retentionMs: 0 });
-  const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg, port: 0 }));
+  const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
   app.listen(0);
   // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
   const port = app.server!.port;
@@ -34,7 +34,7 @@ describe("GET /api/mirror/sessions/all", () => {
     expect(await r.json()).toEqual([]);
   });
 
-  test("returns summary + owner_token + mirror_url for each session", async () => {
+  test("returns summary for each session without any token fields", async () => {
     const c1 = hub.reg.createSession("a:u@h", "/a");
     const c2 = hub.reg.createSession("b:u@h", "/b");
     expect(c1.ok && c2.ok).toBe(true);
@@ -44,34 +44,16 @@ describe("GET /api/mirror/sessions/all", () => {
       `http://localhost:${hub.port}/api/mirror/sessions/all`,
     );
     expect(r.status).toBe(200);
-    const list = (await r.json()) as Array<{
-      sid: string;
-      owner_agent: string;
-      owner_token: string;
-      mirror_url: string;
-      watcher_count: number;
-      transcript_len: number;
-    }>;
+    const list = (await r.json()) as Array<Record<string, unknown>>;
     expect(list).toHaveLength(2);
-    const sids = list.map((s) => s.sid).sort();
+    const sids = list.map((s) => s.sid as string).sort();
     expect(sids).toEqual([c1.entry.sid, c2.entry.sid].sort());
     for (const s of list) {
-      expect(s.owner_token).toMatch(/^[0-9a-f]{32}$/);
-      expect(s.mirror_url).toContain(`/mirror/${s.sid}#token=${s.owner_token}`);
+      expect(s).not.toHaveProperty("owner_token");
+      expect(s).not.toHaveProperty("mirror_url");
+      expect(typeof s.owner_agent).toBe("string");
+      expect(typeof s.watcher_count).toBe("number");
+      expect(typeof s.transcript_len).toBe("number");
     }
-  });
-
-  test("mirror_url scheme follows X-Forwarded-Proto", async () => {
-    const c = hub.reg.createSession("a:u@h", "/a");
-    expect(c.ok).toBe(true);
-    if (!c.ok) return;
-    const r = await fetch(
-      `http://localhost:${hub.port}/api/mirror/sessions/all`,
-      {
-        headers: { "x-forwarded-proto": "https" },
-      },
-    );
-    const list = (await r.json()) as Array<{ mirror_url: string }>;
-    expect(list[0]?.mirror_url).toStartWith("https://");
   });
 });

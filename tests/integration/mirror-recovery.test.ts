@@ -1,10 +1,9 @@
 // Smoke-test for the agent recovery path.
 //
-// We test the hub's reject behavior (returns 1008 + 'Session not found' when
-// a WS tries to connect with a sid the registry doesn't know about), which is
-// the trigger the agent uses to recreate a session. The agent's actual reconnect
-// logic is exercised at the unit level by checking that createSession with the
-// same sid succeeds after a hub "restart" (wipe of MirrorRegistry state).
+// The hub's reject behavior is the trigger the agent uses to recreate a
+// session. We check that a WS connection to an unknown sid is closed with
+// code 1008 + "not found", and that re-creating the same sid after a
+// registry wipe succeeds.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "@/hub/mirror";
@@ -17,7 +16,7 @@ describe("mirror session loss + recovery", () => {
 
   beforeEach(() => {
     reg = new MirrorRegistry({ transcriptRing: 100, retentionMs: 0 });
-    let a = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg, port: 0 }));
+    let a = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
     a = wsMirrorPlugin(a, reg);
     a.listen(0);
     app = a;
@@ -31,8 +30,7 @@ describe("mirror session loss + recovery", () => {
 
   test("hub rejects WS with code 1008 + 'not found' reason when session is unknown", async () => {
     const sid = "ghost-sid";
-    const token = "a".repeat(32);
-    const url = `ws://localhost:${port}/ws/mirror/${sid}?t=${token}&as=agent`;
+    const url = `ws://localhost:${port}/ws/mirror/${sid}?as=agent`;
     const ws = new WebSocket(url);
     const closeInfo = await new Promise<{ code: number; reason: string }>(
       (resolve) => {
@@ -45,11 +43,10 @@ describe("mirror session loss + recovery", () => {
     expect(closeInfo.reason.toLowerCase()).toContain("not found");
   });
 
-  test("re-creating the same sid after registry wipe produces a fresh token", () => {
+  test("re-creating the same sid after registry wipe works", () => {
     const c1 = reg.createSession("a:u@h", "/a", "stable-sid");
     expect(c1.ok).toBe(true);
     if (!c1.ok) return;
-    const origToken = c1.token;
 
     // Simulate hub restart wiping in-memory state.
     reg.sessions.delete("stable-sid");
@@ -57,25 +54,21 @@ describe("mirror session loss + recovery", () => {
     const c2 = reg.createSession("a:u@h", "/a", "stable-sid");
     expect(c2.ok).toBe(true);
     if (!c2.ok) return;
-    expect(c2.token).not.toBe(origToken);
     expect(c2.entry.sid).toBe("stable-sid");
-    // New token validates:
-    const v = reg.validateToken("stable-sid", c2.token);
-    expect(v.ok).toBe(true);
-    // Old token does NOT validate:
-    const bad = reg.validateToken("stable-sid", origToken);
-    expect(bad.ok).toBe(false);
+    expect(c2.restored).toBe(false);
+    // getSession finds the new entry.
+    const found = reg.getSession("stable-sid");
+    expect(found.ok).toBe(true);
   });
 
-  test("recreated session shares sid but has a distinct listAllWithTokens entry", () => {
+  test("recreated session shows up in listAll()", () => {
     const c1 = reg.createSession("a:u@h", "/a", "rewind-sid");
     if (!c1.ok) return;
     reg.sessions.delete("rewind-sid");
     const c2 = reg.createSession("a:u@h", "/a", "rewind-sid");
     if (!c2.ok) return;
-    const listed = reg.listAllWithTokens();
+    const listed = reg.listAll();
     expect(listed).toHaveLength(1);
     expect(listed[0]?.sid).toBe("rewind-sid");
-    expect(listed[0]?.owner_token).toBe(c2.token);
   });
 });

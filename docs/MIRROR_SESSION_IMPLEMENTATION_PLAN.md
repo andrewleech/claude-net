@@ -5,6 +5,8 @@
 **Total Phases:** 5 (M0 – M4)
 **Generated:** 2026-04-20
 
+> **2026-04 update (dashboard restructure, Phase 1):** the token model described below has been removed. Mirror is always on when `claude-channels` runs; `claudeNet.mirror.enabled` is no longer consulted; the `mirror_on` / `mirror_off` / `mirror_status` / `mirror_url` / `mirror_share` / `mirror_revoke` / `mirror_consent` MCP tools are gone; the share / revoke REST endpoints are gone; `/mirror/:sid` no longer exists as a route — sessions appear inline in the hub dashboard. The design rationale below still reads top-down as if those features are alive; treat any mention of owner tokens, reader tokens, or consent-gate flows as historical.
+
 ## Overview
 
 Build "mirror-session": a feature that live-streams a local Claude Code session (all user prompts, assistant messages, tool calls/results, and notifications) to the claude-net hub's web UI, and allows a remote browser on the trust network to inject new user prompts back into the live session.

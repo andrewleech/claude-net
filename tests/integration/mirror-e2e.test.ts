@@ -1,7 +1,8 @@
 // End-to-end: stand up a real hub on a random port, create a mirror session
 // via the REST endpoint, connect an "agent" WebSocket that pushes events, and
 // a "watcher" WebSocket that consumes them. Assert the watcher sees the same
-// events the agent pushed, in order, with token-gating enforced.
+// events the agent pushed, in order. Tokens are no longer required — the hub
+// sits on a trusted network.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import crypto from "node:crypto";
@@ -22,7 +23,7 @@ function startHub(): TestHub {
     retentionMs: 0,
   });
 
-  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry, port: 0 }));
+  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry }));
   app = wsMirrorPlugin(app, mirrorRegistry);
   app.listen(0);
 
@@ -102,23 +103,15 @@ async function createSession(
   port: number,
   owner = "session:u@h",
   cwd = "/tmp",
-): Promise<{ sid: string; token: string; mirror_url: string }> {
+): Promise<{ sid: string }> {
   const res = await fetch(`http://localhost:${port}/api/mirror/session`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ owner_agent: owner, cwd }),
   });
   if (!res.ok) throw new Error(`create session failed: ${res.status}`);
-  const data = (await res.json()) as {
-    sid: string;
-    owner_token: string;
-    mirror_url: string;
-  };
-  return {
-    sid: data.sid,
-    token: data.owner_token,
-    mirror_url: data.mirror_url,
-  };
+  const data = (await res.json()) as { sid: string };
+  return { sid: data.sid };
 }
 
 function eventFrame(
@@ -148,20 +141,16 @@ describe("mirror-session end-to-end", () => {
     hub.stop();
   });
 
-  test("creates a session and returns a mirror URL + token", async () => {
+  test("creates a session and returns just the sid", async () => {
     const s = await createSession(hub.port);
     expect(s.sid).toMatch(/.+/);
-    expect(s.token).toMatch(/^[0-9a-f]{32}$/);
-    expect(s.mirror_url).toContain(`/mirror/${s.sid}#token=${s.token}`);
   });
 
   test("watcher receives init then live events pushed by the agent", async () => {
     const s = await createSession(hub.port);
-    const wsBase = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(
-      s.sid,
-    )}?t=${encodeURIComponent(s.token)}`;
+    const wsBase = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}`;
 
-    const agent = await connectWs(`${wsBase}&as=agent`);
+    const agent = await connectWs(`${wsBase}?as=agent`);
     await agent.waitFor((m) => m.event === "mirror:agent_ready");
 
     const watcher = await connectWs(wsBase);
@@ -208,13 +197,10 @@ describe("mirror-session end-to-end", () => {
     watcher.close();
   });
 
-  test("rejects watcher with wrong token", async () => {
-    const s = await createSession(hub.port);
-    const bad = "0".repeat(32);
+  test("watcher connection on an unknown sid is rejected", async () => {
     const watcher = await connectWs(
-      `ws://localhost:${hub.port}/ws/mirror/${s.sid}?t=${bad}`,
+      `ws://localhost:${hub.port}/ws/mirror/bogus-sid`,
     );
-    // Server sends an error frame then closes.
     const err = (await watcher.waitFor((m) => m.event === "error")) as Record<
       string,
       unknown
@@ -225,10 +211,8 @@ describe("mirror-session end-to-end", () => {
 
   test("transcript snapshot replays in the init frame", async () => {
     const s = await createSession(hub.port);
-    const wsBase = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(
-      s.sid,
-    )}?t=${encodeURIComponent(s.token)}`;
-    const agent = await connectWs(`${wsBase}&as=agent`);
+    const wsBase = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}`;
+    const agent = await connectWs(`${wsBase}?as=agent`);
     await agent.waitFor((m) => m.event === "mirror:agent_ready");
 
     const uuids = [crypto.randomUUID(), crypto.randomUUID()];
@@ -242,7 +226,6 @@ describe("mirror-session end-to-end", () => {
         ),
       );
     }
-    // Small wait so the hub has ingested them before the watcher connects.
     await new Promise((r) => setTimeout(r, 50));
 
     const watcher = await connectWs(wsBase);
@@ -255,25 +238,23 @@ describe("mirror-session end-to-end", () => {
     watcher.close();
   });
 
-  test("REST /transcript and /close enforce tokens", async () => {
+  test("REST /transcript and /close work without any token query", async () => {
     const s = await createSession(hub.port);
     const ok = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/transcript?t=${s.token}`,
-    );
-    expect(ok.status).toBe(200);
-
-    const bad = await fetch(
       `http://localhost:${hub.port}/api/mirror/${s.sid}/transcript`,
     );
-    expect(bad.status).toBe(401);
+    expect(ok.status).toBe(200);
+    const payload = (await ok.json()) as Record<string, unknown>;
+    expect(payload.sid).toBe(s.sid);
+    expect(Array.isArray(payload.transcript)).toBe(true);
 
-    const wrong = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/transcript?t=${"0".repeat(32)}`,
+    const missing = await fetch(
+      `http://localhost:${hub.port}/api/mirror/does-not-exist/transcript`,
     );
-    expect(wrong.status).toBe(403);
+    expect(missing.status).toBe(404);
 
     const close = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/close?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/close`,
       { method: "POST" },
     );
     expect(close.status).toBe(200);

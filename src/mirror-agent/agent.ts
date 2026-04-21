@@ -14,7 +14,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { MirrorEventFrame } from "@/shared/types";
 import { scanCommands } from "./command-scanner";
-import { ConsentManager, type ConsentMode } from "./consent";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { HubClient } from "./hub-client";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
@@ -40,8 +39,6 @@ interface SessionState {
   ownerAgent: string;
   cwd: string;
   transcriptPath: string | null;
-  token: string | null;
-  mirrorUrl: string | null;
   ws: HubClient | null;
   seenUuids: Set<string>;
   outbox: string[];
@@ -121,7 +118,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
   const sessions = new Map<string, SessionState>();
-  const consent = new ConsentManager();
   const injector = new TmuxInjector();
   const redactor = new Redactor({
     configPaths: defaultConfigPaths(
@@ -209,7 +205,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           sid: s.sid,
           owner_agent: s.ownerAgent,
           cwd: s.cwd,
-          mirror_url: s.mirrorUrl,
           last_event_at: new Date(s.lastEventAt).toISOString(),
           closed: s.closed,
         })),
@@ -219,91 +214,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       void stop();
       return new Response("stopping", { status: 200 });
     }
-    if (req.method === "POST" && url.pathname === "/consent") {
-      return handleConsentPost(req);
-    }
-    if (req.method === "POST" && url.pathname === "/share") {
-      return handleSharePost(req);
-    }
-    if (req.method === "POST" && url.pathname === "/revoke") {
-      return handleRevokePost(req);
-    }
     return new Response("not found", { status: 404 });
-  }
-
-  async function handleSharePost(req: Request): Promise<Response> {
-    let body: { sid?: string };
-    try {
-      body = (await req.json()) as typeof body;
-    } catch {
-      return new Response("bad json", { status: 400 });
-    }
-    const sid = body.sid;
-    const session = sid ? sessions.get(sid) : null;
-    if (!sid || !session || !session.token) {
-      return new Response("unknown sid", { status: 404 });
-    }
-    const res = await fetch(
-      `${hubUrl}/api/mirror/${encodeURIComponent(sid)}/share?t=${encodeURIComponent(
-        session.token,
-      )}`,
-      { method: "POST" },
-    );
-    const data = await res.json().catch(() => ({}));
-    return new Response(JSON.stringify(data), {
-      status: res.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  async function handleRevokePost(req: Request): Promise<Response> {
-    let body: { sid?: string; token?: string; all?: boolean };
-    try {
-      body = (await req.json()) as typeof body;
-    } catch {
-      return new Response("bad json", { status: 400 });
-    }
-    const sid = body.sid;
-    const session = sid ? sessions.get(sid) : null;
-    if (!sid || !session || !session.token) {
-      return new Response("unknown sid", { status: 404 });
-    }
-    const res = await fetch(
-      `${hubUrl}/api/mirror/${encodeURIComponent(sid)}/revoke?t=${encodeURIComponent(
-        session.token,
-      )}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: body.token, all: body.all }),
-      },
-    );
-    const data = await res.json().catch(() => ({}));
-    return new Response(JSON.stringify(data), {
-      status: res.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  async function handleConsentPost(req: Request): Promise<Response> {
-    let body: { sid?: string; mode?: ConsentMode; action?: string };
-    try {
-      body = (await req.json()) as typeof body;
-    } catch {
-      return new Response("bad json", { status: 400 });
-    }
-    const sid = body.sid;
-    if (!sid || !sessions.has(sid)) {
-      return new Response("unknown sid", { status: 404 });
-    }
-    if (body.action === "reset") {
-      consent.reset(sid);
-    } else if (body.mode) {
-      consent.setMode(sid, body.mode);
-    } else {
-      return new Response("missing mode or action", { status: 400 });
-    }
-    return Response.json({ sid, ...consent.describe(sid) });
   }
 
   async function handleHookPost(req: Request): Promise<Response> {
@@ -396,11 +307,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     tmuxPane: string | undefined,
   ): Promise<SessionState | null> {
     const ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
-    let createResponse: {
-      sid: string;
-      owner_token: string;
-      mirror_url: string;
-    };
     try {
       const res = await fetch(`${hubUrl}/api/mirror/session`, {
         method: "POST",
@@ -411,24 +317,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         log(`session create failed: HTTP ${res.status} ${await res.text()}`);
         return null;
       }
-      createResponse = (await res.json()) as typeof createResponse;
+      await res.json().catch(() => ({}));
     } catch (err) {
       log(`session create threw: ${String(err)}`);
       return null;
     }
 
-    const wsUrl = toWsUrl(
-      hubUrl,
-      createResponse.sid,
-      createResponse.owner_token,
-    );
     const session: SessionState = {
       sid,
       ownerAgent,
       cwd: cwd ?? "",
       transcriptPath: transcriptPath ?? null,
-      token: createResponse.owner_token,
-      mirrorUrl: createResponse.mirror_url,
       ws: null,
       seenUuids: new Set(),
       outbox: [],
@@ -443,19 +342,16 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     attachHubClient(session);
     startTailIfNeeded(session);
 
-    log(
-      `[${sid}] session opened for ${ownerAgent}; url=${createResponse.mirror_url}`,
-    );
+    log(`[${sid}] session opened for ${ownerAgent}`);
     return session;
   }
 
   /**
-   * Build + start a HubClient for the session using its current token.
-   * Replaces any existing client. Called from openSession (first time)
-   * and recoverSession (after hub session loss).
+   * Build + start a HubClient for the session. Replaces any existing
+   * client. Called from openSession (first time) and recoverSession
+   * (after hub session loss).
    */
   function attachHubClient(session: SessionState): void {
-    if (!session.token) return;
     // Clean up prior client if any.
     if (session.ws) {
       try {
@@ -465,7 +361,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
       session.ws = null;
     }
-    const wsUrl = toWsUrl(hubUrl, session.sid, session.token);
+    const wsUrl = toWsUrl(hubUrl, session.sid);
     const sid = session.sid;
     const client = new HubClient({
       url: wsUrl,
@@ -478,13 +374,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       onMessage: (raw) => handleHubMessage(session, raw),
       onClose: (code, reason) => {
         log(`[${sid}] WS closed (${code}) ${reason}`);
-        // Hub lost our session (restart, eviction, etc.). Token no longer
-        // validates on the hub, so auto-reconnect would loop forever with a
-        // stale token. Re-register the sid on the hub and swap the WS client
-        // over to the new token.
+        // Hub lost our session (restart, eviction, etc.). Re-register
+        // the same sid so the hub recreates the entry and we can
+        // reconnect; auto-reconnecting blindly would loop forever
+        // against a 404.
         if (
           code === 1008 &&
-          (reason.includes("not found") || reason.includes("Invalid token")) &&
+          reason.includes("not found") &&
           !session.closed &&
           !session.recovering
         ) {
@@ -503,21 +399,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 
   /**
    * Hub lost this session (restart, eviction, etc.). Re-register the same
-   * sid with the hub to get a fresh token, then reconnect the WS with it.
-   * The owner URL the user held becomes stale — they need to grab the new
-   * one from the dashboard or `mirror_url` tool.
+   * sid with the hub, then reconnect the WS.
    *
    * Retries with exponential backoff (1s → 30s cap, 20 attempts, ~8 min
    * worst case) because the POST can legitimately fail while the hub is
-   * still booting after a redeploy. Without retry, one failed attempt left
-   * `session.ws = null` with no reconnect timer, and every subsequent hook
-   * event queued silently into a never-draining outbox — the session was
-   * permanently wedged until the whole daemon restarted.
+   * still booting after a redeploy.
    */
   async function recoverSession(session: SessionState): Promise<void> {
     session.recovering = true;
     try {
-      // Tear down the looping client first.
       if (session.ws) {
         try {
           session.ws.stop();
@@ -541,16 +431,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             }),
           });
           if (res.ok) {
-            const data = (await res.json()) as {
-              sid: string;
-              owner_token: string;
-              mirror_url: string;
-            };
-            session.token = data.owner_token;
-            session.mirrorUrl = data.mirror_url;
-            log(
-              `[${session.sid}] recovered on hub (attempt ${attempt}); new url=${data.mirror_url}`,
-            );
+            log(`[${session.sid}] recovered on hub (attempt ${attempt})`);
             attachHubClient(session);
             return;
           }
@@ -833,18 +714,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     text: string,
     watcher: string,
   ): Promise<void> {
-    const consentResult = await consent.check(
-      session.sid,
-      session.tmuxPane,
-      watcher,
-    );
-    if (!consentResult.ok) {
-      emitAuditEvent(
-        session,
-        `inject rejected (consent: ${consentResult.reason}): ${consentResult.message}`,
-      );
-      return;
-    }
     if (!session.tmuxPane) {
       emitAuditEvent(
         session,
@@ -999,14 +868,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       session.ws = null;
     }
     // Fire-and-forget hub close.
-    if (session.token) {
-      const url = `${hubUrl}/api/mirror/${encodeURIComponent(
-        session.sid,
-      )}/close?t=${encodeURIComponent(session.token)}`;
-      fetch(url, { method: "POST" }).catch(() => {
-        /* best effort */
-      });
-    }
+    const url = `${hubUrl}/api/mirror/${encodeURIComponent(session.sid)}/close`;
+    fetch(url, { method: "POST" }).catch(() => {
+      /* best effort */
+    });
     sessions.delete(session.sid);
   }
 
@@ -1039,11 +904,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function toWsUrl(hubUrl: string, sid: string, token: string): string {
+function toWsUrl(hubUrl: string, sid: string): string {
   const wsBase = hubUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-  return `${wsBase}/ws/mirror/${encodeURIComponent(sid)}?t=${encodeURIComponent(
-    token,
-  )}&as=agent`;
+  return `${wsBase}/ws/mirror/${encodeURIComponent(sid)}?as=agent`;
 }
 
 function deriveOwnerAgent(cwd: string): string {

@@ -1,5 +1,7 @@
 # claude-net Specification
 
+> **2026-04 update (dashboard restructure, Phase 1):** mirror-session is now always on and trusts the hub's network boundary (LAN / Tailscale / reverse proxy with auth) — the per-session owner/reader token model, the `/mirror/:sid` permalink, and the `mirror_on` / `mirror_off` / `mirror_status` / `mirror_url` / `mirror_share` / `mirror_revoke` / `mirror_consent` MCP tools have all been removed. The sections below still reference the token model in places; treat those as historical context.
+
 ## Overview
 
 claude-net is a lightweight messaging hub that enables Claude Code agents on a LAN to communicate through named identities. A single Docker container runs the hub (Bun + Elysia), which routes messages between agents, serves a built-in monitoring dashboard, and hosts the plugin script that Claude Code fetches at startup.

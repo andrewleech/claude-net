@@ -134,23 +134,15 @@ Wraps to multiple lines on narrow terminals (reads width via `/dev/tty`).
 
 ## Mirror sessions (follow & continue a chat from another device)
 
-With mirror-session turned on, every Claude Code session launched via `claude-channels` streams its conversation to the hub's web UI. Open the mirror URL in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results), type prompts back in, and interrupt the agent — all from anywhere on your trust network, including a phone.
+Mirror is always on whenever a Claude Code session is launched via `claude-channels`. The session streams its conversation to the hub's web UI, which lives at the hub's home page. Open it in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results), type prompts back in, and interrupt the agent — all from anywhere on your trust network, including a phone.
 
-Enable once in `~/.claude/settings.json`:
+On `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only). The `/setup` script installs the hooks for you; if you skipped that, the launcher prints the hook block to paste into `~/.claude/settings.json`. Every session auto-appears in the dashboard — no MCP call required.
 
-```json
-{
-  "claudeNet": { "mirror": { "enabled": true } }
-}
-```
-
-On the next `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only). The `/setup` script installs the hooks for you; if you skipped that, the launcher prints the hook block to paste into the same `settings.json`. Every session auto-appears at `http://<hub>:4815/mirror/<sid>#token=<owner-token>`. Ask Claude `/mirror url` (or `mirror_status`) for the URL of the current session.
-
-- Tokens are 128-bit hex, delivered in the URL fragment — never in `Referer` or hub access logs.
 - The mirror-agent listens on loopback only and sits between claude's hooks and the hub — claude never blocks on the network (hard 50ms hook timeout).
+- The hub is expected to sit on a trusted network (LAN / Tailscale / reverse-proxy with auth). No per-session tokens are issued; anyone who can reach the hub can watch any session.
 - In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence via `CLAUDE_NET_MIRROR_STORE` (see below).
 
-**Remote input.** The `/mirror/<sid>` page has a compose box: type a prompt, hit Enter (or tap Transmit), and `tmux send-keys` drops it into the live claude REPL. Requires the session to run inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. Injects are accepted by default; run `mirror_consent never` inside the session to flip to read-only, or `mirror_consent always` / `mirror_consent reset` to re-enable. Set `CLAUDE_NET_NO_TMUX_WRAP=1` to opt out of the auto-wrap.
+**Remote input.** The dashboard's mirror pane has a compose box: type a prompt, hit Enter (or tap Transmit), and `tmux send-keys` drops it into the live claude REPL. Requires the session to run inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. Set `CLAUDE_NET_NO_TMUX_WRAP=1` to opt out of the auto-wrap.
 
 Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: the mirror-agent writes the blob to `/tmp/claude-net/pastes/paste-<uuid>.txt` and the hub auto-injects `@<path>` so Claude reads the file. Caps are tunable with `CLAUDE_NET_MIRROR_INJECT_MAX_KB` (default 512) and `CLAUDE_NET_MIRROR_PASTE_MAX_MB` (default 64).
 
@@ -159,8 +151,6 @@ Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: 
 **Slash-command autocomplete.** Typing `/` at the start of a prompt opens a popover with every slash command available to this session's Claude Code: built-ins, user commands (`~/.claude/commands/`), project-local commands, and plugin-provided commands. Arrow keys + Enter/Tab on desktop, tap on mobile.
 
 **Theme.** Toggle between dark (broadcast-console) and light (newsprint) via the ◐ button; the choice is remembered per-browser.
-
-**Sharing.** Click the `share` button in the mirror header (owners only) or ask claude `mirror_share`. Copies a new URL with a read-only token. Reader-token viewers see the transcript live but can't inject, share, or revoke. Revoke with `mirror_revoke <token>` or `mirror_revoke all`.
 
 **Redaction.** The mirror-agent scrubs a starter list of secret formats (AWS keys, GitHub PATs, Anthropic/OpenAI tokens, PEM headers, JWTs) from every event before it leaves your host. Add project-specific regexes at `~/.claude-net/redact.json` or `<cwd>/.claude-net/redact.json`. Convenience, not a compliance control.
 

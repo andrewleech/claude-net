@@ -9,7 +9,6 @@ import type {
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorStopFrame,
-  MirrorTokenType,
 } from "@/shared/types";
 
 interface SlashCommand {
@@ -18,7 +17,6 @@ interface SlashCommand {
   source: string;
 }
 import { Elysia } from "elysia";
-import { resolveCanonicalHubUrl } from "./hub-url";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 
@@ -26,7 +24,6 @@ import { RateLimiter } from "./rate-limit";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
-const TOKEN_BYTES = 16;
 
 // ── Entry types ───────────────────────────────────────────────────────────
 
@@ -34,23 +31,13 @@ export interface SessionWatcher {
   ws: { send(data: string): void };
   wsIdentity: object;
   id: string;
-  tokenType: MirrorTokenType;
-  tokenValue?: string;
   close?: () => void;
 }
 
 export interface AgentConnection {
   ws: { send(data: string): void };
   wsIdentity: object;
-  tokenValue?: string;
   close?: () => void;
-}
-
-export interface TokenRecord {
-  value: string;
-  type: MirrorTokenType;
-  createdAt: Date;
-  revokedAt: Date | null;
 }
 
 export interface MirrorSessionEntry {
@@ -62,10 +49,6 @@ export interface MirrorSessionEntry {
   transcript: MirrorEventFrame[];
   watchers: Set<SessionWatcher>;
   agent: AgentConnection | null;
-  /** All issued tokens for this session, keyed by token value. */
-  tokens: Map<string, TokenRecord>;
-  /** Convenience pointer to the initial owner token (for `createSession` return). */
-  ownerToken: string;
   nextInjectSeq: number;
   closedAt: Date | null;
   retentionTimerId: ReturnType<typeof setTimeout> | null;
@@ -122,7 +105,7 @@ export class MirrorRegistry {
     cwd: string,
     sid?: string,
   ):
-    | { ok: true; entry: MirrorSessionEntry; token: string; restored: boolean }
+    | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
     const actualSid = sid ?? crypto.randomUUID();
     const existing = this.sessions.get(actualSid);
@@ -149,20 +132,11 @@ export class MirrorRegistry {
       return {
         ok: true,
         entry: existing,
-        token: existing.ownerToken,
         restored: true,
       };
     }
 
-    const token = generateToken();
     const now = new Date();
-    const tokens = new Map<string, TokenRecord>();
-    tokens.set(token, {
-      value: token,
-      type: "owner",
-      createdAt: now,
-      revokedAt: null,
-    });
     const entry: MirrorSessionEntry = {
       sid: actualSid,
       ownerAgent,
@@ -172,8 +146,6 @@ export class MirrorRegistry {
       transcript: [],
       watchers: new Set(),
       agent: null,
-      tokens,
-      ownerToken: token,
       nextInjectSeq: 0,
       closedAt: null,
       retentionTimerId: null,
@@ -195,124 +167,18 @@ export class MirrorRegistry {
       created_at: now.toISOString(),
     });
 
-    return { ok: true, entry, token, restored: false };
+    return { ok: true, entry, restored: false };
   }
 
-  getSession(sid: string): MirrorSessionEntry | null {
-    return this.sessions.get(sid) ?? null;
-  }
-
-  /**
-   * Validate a token for a session. Uses timing-safe comparison against
-   * every non-revoked token in the session's token map. Returns the token
-   * type on success.
-   */
-  validateToken(
-    sid: string,
-    token: string | undefined,
-  ):
-    | { ok: true; entry: MirrorSessionEntry; type: MirrorTokenType }
-    | { ok: false; error: string; status: number } {
-    if (!token) return { ok: false, error: "Missing token.", status: 401 };
-    const entry = this.sessions.get(sid);
-    if (!entry)
-      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-
-    // Walk the token map with constant-time comparison. Token values are
-    // 32-hex-char strings of equal length so timingSafeEqual applies.
-    for (const rec of entry.tokens.values()) {
-      if (rec.revokedAt) continue;
-      if (constantTimeEqual(token, rec.value)) {
-        return { ok: true, entry, type: rec.type };
-      }
-    }
-    return { ok: false, error: "Invalid token.", status: 403 };
-  }
-
-  /**
-   * Mint a new reader token for a session. Caller must have already
-   * authenticated as the owner.
-   */
-  issueReaderToken(
+  getSession(
     sid: string,
   ):
-    | { ok: true; token: string; entry: MirrorSessionEntry }
+    | { ok: true; entry: MirrorSessionEntry }
     | { ok: false; error: string; status: number } {
     const entry = this.sessions.get(sid);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-    if (entry.closedAt)
-      return { ok: false, error: "Session is closed.", status: 409 };
-    const token = generateToken();
-    entry.tokens.set(token, {
-      value: token,
-      type: "reader",
-      createdAt: new Date(),
-      revokedAt: null,
-    });
-    return { ok: true, token, entry };
-  }
-
-  /**
-   * Revoke a single token. If `targetToken` is omitted, revoke *all* tokens
-   * (which effectively boots every watcher and the agent — callers usually
-   * pair this with closeSession).
-   */
-  revokeToken(
-    sid: string,
-    targetToken?: string,
-  ):
-    | { ok: true; revoked: number }
-    | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
-    if (!entry)
-      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-    const now = new Date();
-    let revoked = 0;
-    if (targetToken) {
-      const rec = entry.tokens.get(targetToken);
-      if (!rec || rec.revokedAt) {
-        return { ok: false, error: "Token not found.", status: 404 };
-      }
-      rec.revokedAt = now;
-      revoked = 1;
-    } else {
-      for (const rec of entry.tokens.values()) {
-        if (!rec.revokedAt) {
-          rec.revokedAt = now;
-          revoked++;
-        }
-      }
-    }
-    // Kick watchers / agents that had the revoked token(s).
-    this.kickRevoked(entry);
-    return { ok: true, revoked };
-  }
-
-  /** Close any watcher / agent WS whose associated token has been revoked. */
-  private kickRevoked(entry: MirrorSessionEntry): void {
-    const activeValues = new Set<string>();
-    for (const rec of entry.tokens.values()) {
-      if (!rec.revokedAt) activeValues.add(rec.value);
-    }
-    for (const watcher of [...entry.watchers]) {
-      if (!activeValues.has(watcher.tokenValue ?? "")) {
-        try {
-          watcher.close?.();
-        } catch {
-          // ignore
-        }
-        entry.watchers.delete(watcher);
-      }
-    }
-    if (entry.agent && !activeValues.has(entry.agent.tokenValue ?? "")) {
-      try {
-        entry.agent.close?.();
-      } catch {
-        // ignore
-      }
-      entry.agent = null;
-    }
+    return { ok: true, entry };
   }
 
   /**
@@ -379,7 +245,6 @@ export class MirrorRegistry {
       event: "mirror:watcher_joined",
       sid,
       watcher_id: watcher.id,
-      token_type: watcher.tokenType,
     });
   }
 
@@ -475,15 +340,13 @@ export class MirrorRegistry {
   }
 
   /**
-   * Return a summary of every active session with the owner token attached.
-   * Used by the hub's internal dashboard (which is on a private trust
-   * network) to build click-through links without requiring the viewer to
-   * re-paste a token. Do NOT expose this endpoint on a public-trust hub.
+   * Return a summary of every active session. The hub runs on a trusted
+   * network, so no extra auth gates this listing.
    */
-  listAllWithTokens(): Array<MirrorSessionSummary & { owner_token: string }> {
-    const result: Array<MirrorSessionSummary & { owner_token: string }> = [];
+  listAll(): MirrorSessionSummary[] {
+    const result: MirrorSessionSummary[] = [];
     for (const entry of this.sessions.values()) {
-      result.push({ ...toSummary(entry), owner_token: entry.ownerToken });
+      result.push(toSummary(entry));
     }
     return result;
   }
@@ -811,21 +674,6 @@ export class MirrorRegistry {
   }
 }
 
-// ── Token helpers ─────────────────────────────────────────────────────────
-
-function generateToken(): string {
-  return crypto.randomBytes(TOKEN_BYTES).toString("hex");
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-  } catch {
-    return false;
-  }
-}
-
 function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
   return {
     sid: entry.sid,
@@ -842,14 +690,10 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
 
 export interface MirrorPluginDeps {
   mirrorRegistry: MirrorRegistry;
-  /** External hostname used to generate mirror URLs. Overrides the Host header when set. */
-  externalHost?: string;
-  /** Port used to generate mirror URLs when the host is bare. */
-  port?: number;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry, externalHost, port } = deps;
+  const { mirrorRegistry } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })
@@ -881,26 +725,17 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = 409;
           return { error: result.error };
         }
-        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
-        const mirrorUrl = `${hubBase}/mirror/${result.entry.sid}#token=${result.token}`;
         return {
           sid: result.entry.sid,
-          owner_token: result.token,
-          mirror_url: mirrorUrl,
           restored: result.restored,
         };
       })
 
-      .get("/sessions/all", ({ request }) => {
-        // All live mirror sessions including owner tokens. Intended for the
-        // hub's internal dashboard on a trusted network — the same trust
-        // posture as the rest of the hub. Do not expose this to a public
-        // dashboard without a further auth layer.
-        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
-        return mirrorRegistry.listAllWithTokens().map((s) => ({
-          ...s,
-          mirror_url: `${hubBase}/mirror/${s.sid}#token=${s.owner_token}`,
-        }));
+      .get("/sessions/all", () => {
+        // All live mirror sessions. The hub sits on a trusted network
+        // (LAN / Tailscale / reverse-proxy with auth), so this listing is
+        // not further gated.
+        return mirrorRegistry.listAll();
       })
 
       .get("/sessions", ({ query, set }) => {
@@ -912,14 +747,13 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         return mirrorRegistry.listOwnedBy(owner);
       })
 
-      .get("/:sid/transcript", ({ params, query, set }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
+      .get("/:sid/transcript", ({ params, set }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
-        const entry = validation.entry;
+        const entry = found.entry;
         return {
           sid: entry.sid,
           owner_agent: entry.ownerAgent,
@@ -936,122 +770,32 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         };
       })
 
-      .post("/:sid/close", ({ params, query, set }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
+      .post("/:sid/close", ({ params, set }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
         mirrorRegistry.closeSession(params.sid, "exit");
         return { closed: true };
       })
 
-      .post("/:sid/share", ({ params, query, set, request }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Only the owner can share." };
-        }
-        const issued = mirrorRegistry.issueReaderToken(params.sid);
-        if (!issued.ok) {
-          set.status = issued.status;
-          return { error: issued.error };
-        }
-        const hubBase = resolveCanonicalHubUrl(request, externalHost, port);
-        const mirrorUrl = `${hubBase}/mirror/${params.sid}#token=${issued.token}`;
-        return {
-          sid: params.sid,
-          reader_token: issued.token,
-          mirror_url: mirrorUrl,
-        };
-      })
-
-      .post("/:sid/revoke", ({ params, query, body, set }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Only the owner can revoke." };
-        }
-        const payload = (body ?? {}) as { token?: string; all?: boolean };
-        const target = payload.token;
-        const result = mirrorRegistry.revokeToken(
-          params.sid,
-          payload.all ? undefined : target,
-        );
-        if (!result.ok) {
-          set.status = result.status;
-          return { error: result.error };
-        }
-        return { revoked: result.revoked };
-      })
-
-      .get("/archive/:sid", ({ params, query, set }) => {
-        // Archive lookup does NOT require a live session — reads directly
-        // from the persistence store. Protected by a token, but since the hub
-        // restarted the in-memory token map is gone. For M3 we allow archive
-        // retrieval to anyone on the trust network when CLAUDE_NET_MIRROR_STORE
-        // is set, under the assumption the hub is itself on a trusted network.
-        // Phase M4+ should add a durable token store to fix this.
+      .get("/archive/:sid", ({ params, set }) => {
+        // Archive lookup reads directly from the persistence store. The hub
+        // runs on a trusted network so no further auth is applied.
         const archived = mirrorRegistry.store.loadArchived(params.sid);
         if (!archived) {
           set.status = 404;
           return { error: "Archive not found." };
         }
-        // Ack the presence of a ?t= param so the URL format matches live mirror
-        // URLs (helps the dashboard re-use one endpoint for both paths).
-        void query;
         return archived;
       })
 
-      .get("/:sid/tokens", ({ params, query, set }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Only the owner can list tokens." };
-        }
-        const tokens: Array<{
-          type: MirrorTokenType;
-          token_preview: string;
-          created_at: string;
-          revoked_at: string | null;
-        }> = [];
-        for (const rec of validation.entry.tokens.values()) {
-          tokens.push({
-            type: rec.type,
-            token_preview: `${rec.value.slice(0, 6)}…`,
-            created_at: rec.createdAt.toISOString(),
-            revoked_at: rec.revokedAt ? rec.revokedAt.toISOString() : null,
-          });
-        }
-        return { sid: params.sid, tokens };
-      })
-
-      .post("/:sid/inject", ({ params, query, body, set, request }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Reader tokens cannot inject." };
+      .post("/:sid/inject", ({ params, body, set, request }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
         const payload = body as { text?: string; watcher?: string };
         const text = typeof payload.text === "string" ? payload.text : "";
@@ -1098,16 +842,11 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
        * `@<path>` via the existing tmux path so the user's Claude picks it up
        * with the Read tool.
        */
-      .post("/:sid/paste", async ({ params, query, body, set, request }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Reader tokens cannot paste." };
+      .post("/:sid/paste", async ({ params, body, set, request }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
         const payload = body as { text?: string; watcher?: string };
         const text = typeof payload.text === "string" ? payload.text : "";
@@ -1185,19 +924,14 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
 
       /**
        * POST /:sid/stop — send Escape to the session's tmux pane.
-       * Owner-only. Fire-and-forget; response is just confirmation
-       * that the frame was relayed.
+       * Fire-and-forget; response is just confirmation that the frame
+       * was relayed.
        */
-      .post("/:sid/stop", ({ params, query, set, request }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Reader tokens cannot stop the session." };
+      .post("/:sid/stop", ({ params, set, request }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
         if (!injectBurstLimiter.allow(params.sid)) {
           set.status = 429;
@@ -1218,19 +952,14 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
       /**
        * GET /:sid/commands — list slash commands available to this
        * session's Claude Code (built-ins + user/project/plugin commands
-       * on the agent's host). Owner-only; the response is agent-scoped
-       * and can leak plugin names from the user's install.
+       * on the agent's host). The response is agent-scoped and can leak
+       * plugin names from the user's install — trusted-network only.
        */
-      .get("/:sid/commands", async ({ params, query, set }) => {
-        const token = (query as Record<string, string | undefined>).t;
-        const validation = mirrorRegistry.validateToken(params.sid, token);
-        if (!validation.ok) {
-          set.status = validation.status;
-          return { error: validation.error };
-        }
-        if (validation.type !== "owner") {
-          set.status = 403;
-          return { error: "Reader tokens cannot list commands." };
+      .get("/:sid/commands", async ({ params, set }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
         }
         const result = await mirrorRegistry.relayListCommands(
           params.sid,
@@ -1336,35 +1065,24 @@ export function wsMirrorPlugin(
     open(ws: MirrorWs) {
       const sid = ws.data.params.sid;
       const q = ws.data.query ?? {};
-      const token = q.t;
       const asParam = q.as;
 
-      const validation = mirrorRegistry.validateToken(sid, token);
-      if (!validation.ok) {
-        ws.send(JSON.stringify({ event: "error", message: validation.error }));
-        ws.close(1008, validation.error);
+      const found = mirrorRegistry.getSession(sid);
+      if (!found.ok) {
+        ws.send(JSON.stringify({ event: "error", message: found.error }));
+        ws.close(1008, found.error);
         return;
       }
+      const entry = found.entry;
 
       const sendRaw = (data: string): void => {
         ws.send(data);
       };
 
       if (asParam === "agent") {
-        if (validation.type !== "owner") {
-          ws.send(
-            JSON.stringify({
-              event: "error",
-              message: "Agent connections require an owner token.",
-            }),
-          );
-          ws.close(1008, "reader token cannot act as agent");
-          return;
-        }
         mirrorRegistry.setAgentConnection(sid, {
           ws: { send: sendRaw },
           wsIdentity: ws.raw,
-          tokenValue: token,
           close: () => {
             try {
               ws.close();
@@ -1378,13 +1096,10 @@ export function wsMirrorPlugin(
         return;
       }
 
-      // Default: watcher (owner OR reader)
       const watcher: SessionWatcher = {
         ws: { send: sendRaw },
         wsIdentity: ws.raw,
         id: crypto.randomUUID(),
-        tokenType: validation.type,
-        tokenValue: token,
         close: () => {
           try {
             ws.close();
@@ -1396,8 +1111,6 @@ export function wsMirrorPlugin(
       mirrorRegistry.addWatcher(sid, watcher);
       connMeta.set(ws.raw, { role: "watcher", sid, watcher });
 
-      // Initial snapshot: session meta + full transcript
-      const entry = validation.entry;
       ws.send(
         JSON.stringify({
           event: "mirror:init",
@@ -1407,7 +1120,6 @@ export function wsMirrorPlugin(
           created_at: entry.createdAt.toISOString(),
           last_event_at: entry.lastEventAt.toISOString(),
           closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
-          token_type: validation.type,
           transcript: entry.transcript.map((f) => ({
             uuid: f.uuid,
             kind: f.kind,

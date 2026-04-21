@@ -12,8 +12,7 @@ export interface SetupDeps {
  *    and symlinked into ~/.local/bin/.
  *  - claude-net MCP server registered user-wide (points at this hub).
  *  - Mirror hooks merged into ~/.claude/settings.json (idempotent, backed up
- *    first). Mirror stays off at runtime until the user flips
- *    claudeNet.mirror.enabled=true in settings.json.
+ *    first). Mirror is always on whenever claude-channels runs.
  *
  * All binaries are fetched from this hub's /bin/* endpoints so no GitHub
  * auth or remote access is required for private hubs.
@@ -100,11 +99,9 @@ PY
 
 echo "[4/4] Done."
 echo ""
-echo "To enable remote mirroring of every claude-channels session, add:"
-echo ""
-echo '    "claudeNet": { "mirror": { "enabled": true } }'
-echo ""
-echo "to \$SETTINGS. Then launch with 'claude-channels' instead of 'claude'."
+echo "Launch with 'claude-channels' instead of 'claude' to start a mirrored"
+echo "session — the mirror-agent auto-starts and the session will appear on"
+echo "the hub dashboard."
 echo ""
 echo "If anything looks wrong, restore the backup:"
 echo "    cp \$SETTINGS.pre-mirror.bak \$SETTINGS"

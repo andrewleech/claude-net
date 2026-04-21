@@ -11,7 +11,7 @@ type Msg = Record<string, unknown>;
 
 function startHub() {
   const reg = new MirrorRegistry({ transcriptRing: 200, retentionMs: 0 });
-  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg, port: 0 }));
+  let app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
   app = wsMirrorPlugin(app, reg);
   app.listen(0);
   // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
@@ -85,12 +85,8 @@ async function createSession(port: number) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ owner_agent: "t:u@h", cwd: "/tmp" }),
   });
-  const d = (await r.json()) as {
-    sid: string;
-    owner_token: string;
-    mirror_url: string;
-  };
-  return { sid: d.sid, token: d.owner_token };
+  const d = (await r.json()) as { sid: string };
+  return { sid: d.sid };
 }
 
 describe("mirror paste REST → WS relay → ack → auto-inject", () => {
@@ -106,16 +102,16 @@ describe("mirror paste REST → WS relay → ack → auto-inject", () => {
 
   test("POST /paste relays frame, resolves on agent ack, auto-injects @path", async () => {
     const s = await createSession(hub.port);
-    const agentUrl =
-      `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}` +
-      `?t=${encodeURIComponent(s.token)}&as=agent`;
+    const agentUrl = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(
+      s.sid,
+    )}?as=agent`;
     const agent = await connectWs(agentUrl);
     await agent.waitFor((m) => m.event === "mirror:agent_ready");
 
     // Fire the paste while the agent listens for the frame + acks it.
     const pasteResponse = (async () => {
       const r = await fetch(
-        `http://localhost:${hub.port}/api/mirror/${s.sid}/paste?t=${s.token}`,
+        `http://localhost:${hub.port}/api/mirror/${s.sid}/paste`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -171,7 +167,7 @@ describe("mirror paste REST → WS relay → ack → auto-inject", () => {
     // send something obviously over. The endpoint checks Buffer.byteLength.
     const huge = "a".repeat(65 * 1024 * 1024);
     const r = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/paste?t=${s.token}`,
+      `http://localhost:${hub.port}/api/mirror/${s.sid}/paste`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -181,25 +177,6 @@ describe("mirror paste REST → WS relay → ack → auto-inject", () => {
     expect(r.status).toBe(413);
     const body = (await r.json()) as { error?: string };
     expect(body.error || "").toContain("Paste exceeds");
-  });
-
-  test("rejects paste with reader token (owner-only)", async () => {
-    const s = await createSession(hub.port);
-    const shareRes = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/share?t=${s.token}`,
-      { method: "POST" },
-    );
-    const share = (await shareRes.json()) as { reader_token?: string };
-    if (!share.reader_token) throw new Error("no reader token");
-    const r = await fetch(
-      `http://localhost:${hub.port}/api/mirror/${s.sid}/paste?t=${share.reader_token}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "x", watcher: "test" }),
-      },
-    );
-    expect(r.status).toBe(403);
   });
 
   test("GET /config returns limits", async () => {

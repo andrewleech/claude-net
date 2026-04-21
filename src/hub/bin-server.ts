@@ -55,6 +55,14 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
     rel: "bin/diff.min.js",
     contentType: "application/javascript",
   },
+  "bootstrap.min.css": {
+    rel: "bin/bootstrap.min.css",
+    contentType: "text/css",
+  },
+  "bootstrap.bundle.min.js": {
+    rel: "bin/bootstrap.bundle.min.js",
+    contentType: "application/javascript",
+  },
 };
 
 const BUNDLE_SOURCE_REL = "src/mirror-agent/agent.ts";

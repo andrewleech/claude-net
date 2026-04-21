@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="/bin/bootstrap.min.css" rel="stylesheet">
 <style>
   /* ───────────────────────────────────────────────────────────────
      BROADCAST CONSOLE
@@ -126,151 +127,16 @@
     color: var(--text-muted);
   }
 
-  /* Header */
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 16px;
-    background: var(--bg-surface);
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-
-  header {
-    min-height: calc(44px + env(safe-area-inset-top));
-    /* Respect iOS Dynamic Island / notch via env() insets. */
-    padding:
-      env(safe-area-inset-top) calc(16px + env(safe-area-inset-right))
-      0 calc(18px + env(safe-area-inset-left));
-    background: var(--bg-panel);
-    border-bottom: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1;
-    font-weight: 500;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-
-  /* Wordmark: stylised as a broadcast callsign. The leading dot is
-     the accent — small touch but it's what makes this feel like a
-     station identity rather than a generic app title. */
-  header h1 {
-    font: inherit;
-    font-weight: 700;
-    letter-spacing: 2.2px;
-    color: var(--text);
-    display: inline-flex;
-    align-items: center;
-    gap: 9px;
-  }
-  header h1::before {
-    content: "";
-    width: 7px;
-    height: 7px;
-    background: var(--accent);
-    border-radius: 50%;
-    animation: live-pulse 2.2s ease-in-out infinite;
-  }
-
-  .header-stats {
-    display: flex;
-    align-items: center;
-    gap: 22px;
-  }
-  .header-stats > * {
-    font: inherit;
-    letter-spacing: inherit;
-    text-transform: inherit;
-    line-height: 1;
-  }
-
+  /* Connection dot in the navbar. */
   .status-dot {
     display: inline-block;
     width: 6px; height: 6px;
-    margin-right: 6px;
-    vertical-align: 1px;
     background: var(--text-muted);
   }
   .status-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
   .status-dot.offline { background: var(--text-muted); }
 
-  /* ── Main layout ─────────────────────────────────────────────── */
-  main {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
-  }
-
-  .panel {
-    display: flex;
-    flex-direction: column;
-    border-right: 1px solid var(--border);
-    overflow: hidden;
-    background: var(--bg);
-  }
-  .panel:last-child { border-right: none; }
-
-  .panel-header {
-    padding: 10px 14px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: var(--text-muted);
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-panel);
-    flex-shrink: 0;
-    /* Tiny accent tick next to every panel header — signals that
-       this is a named "channel" in the broadcast metaphor. */
-    position: relative;
-  }
-  .panel-header::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 50%;
-    width: 3px; height: 11px;
-    background: var(--accent);
-    transform: translateY(-50%);
-  }
-
-  .panel-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 0;
-  }
-
-  /* Agent sidebar */
-  .sidebar { width: 200px; flex-shrink: 0; }
-  .sidebar-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 4px 0;
-  }
-
-  /* Agent rows: teletype-style. No rounded pill. Left accent
-     tick appears only when online. */
-  .agent-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 14px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text);
-    cursor: pointer;
-    border-left: 2px solid transparent;
-    transition: background 0.08s, border-color 0.08s;
-  }
-  .agent-item:hover {
-    background: var(--bg-hover);
-    border-left-color: var(--accent-dim);
-  }
-
+  /* Agent row dot + name — used by the unified sidebar. */
   .agent-dot {
     width: 5px; height: 5px;
     flex-shrink: 0;
@@ -278,328 +144,13 @@
   }
   .agent-dot.online { background: var(--accent); box-shadow: 0 0 4px var(--accent-glow); }
   .agent-dot.offline { background: var(--text-muted); opacity: 0.5; }
-
   .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  /* Message feed */
-  .feed { flex: 1; min-width: 0; }
-  .feed .panel-body { padding: 6px 0; }
-
-  .msg-entry {
-    padding: 6px 14px;
-    margin-bottom: 1px;
-    font-size: 13px;
-    line-height: 1.5;
-    border-left: 2px solid transparent;
-  }
-  .msg-entry:hover {
-    background: var(--bg-hover);
-    border-left-color: var(--border);
-  }
-
-  .msg-meta {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    margin-bottom: 2px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-  }
-
-  .msg-route { font-weight: 600; }
-  .msg-route.direct { color: var(--accent); }
-  .msg-route.broadcast { color: var(--gold); }
-  .msg-route.team { color: var(--purple); }
-
-  .msg-time {
-    color: var(--text-muted);
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-
-  .msg-content {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 80px;
-    overflow: hidden;
-  }
-
-  /* Teams panel */
-  .teams-panel { width: 220px; flex-shrink: 0; }
-
-  .team-item {
-    padding: 8px 14px;
-    font-size: 13px;
-    border-bottom: 1px solid var(--border-dim);
-  }
-
-  .team-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    cursor: pointer;
-    padding: 2px 0;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    letter-spacing: 0.5px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .team-header:hover { color: var(--accent); }
-
-  .team-count {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
-    letter-spacing: 0.8px;
-  }
-
-  .team-members {
-    padding-left: 14px;
-    margin-top: 4px;
-  }
-
-  .team-member {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 1px 0;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-
-  /* ── Send bar — dashboard's DM composer. Terminal prompt look. ── */
-  .send-bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    background: var(--bg-panel);
-    border-top: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-
-  .send-bar label {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    font-weight: 600;
-  }
-
-  .send-bar input, .send-bar select {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 7px 10px;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    outline: none;
-    transition: border-color 0.1s, box-shadow 0.1s;
-  }
-  .send-bar input::placeholder, .send-bar select::placeholder {
-    color: var(--text-muted);
-    font-style: italic;
-  }
-  .send-bar input:focus, .send-bar select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent), 0 0 12px var(--accent-glow);
-  }
-
-  #to-field { width: 180px; }
-  #msg-field { flex: 1; }
-
-  #send-btn {
-    background: var(--accent);
-    color: var(--on-accent);
-    border: none;
-    padding: 7px 18px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: background 0.1s, transform 0.05s;
-  }
-  #send-btn:hover { background: #ff6344; }
-  #send-btn:active { transform: translateY(1px); }
-  #send-btn:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
-
-  .send-error {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--accent);
-    margin-left: 4px;
-  }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-
-  /* Dashboard / mirror root wrappers — each behaves like the original body
-     flex column so header + main + footer keep their layout. */
-  #dashboard-root,
-  #mirror-root {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  #mirror-root { display: none; }
-  body.mirror-mode #dashboard-root { display: none; }
-  body.mirror-mode #mirror-root { display: flex; }
-
-  /* ── Mirror header = the 'station bug' strip. ── */
-  .mirror-nav-back {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    text-decoration: none;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    margin-right: 14px;
-    transition: color 0.1s, border-color 0.1s;
-  }
-  .mirror-nav-back:hover { color: var(--accent); border-color: var(--accent); }
-
-  .mirror-header {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    padding: 0 20px;
-    height: 48px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-panel);
-    position: relative;
-    /* All direct chrome elements share one font-size / line-height so
-       the baseline is consistent end-to-end. Per-element overrides
-       (the cwd, the LIVE indicator) must opt in. */
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-  }
-  /* Thin accent rule under the header — gives the 'on-air' feel
-     without a gaudy red bar across the top. */
-  .mirror-header::after {
-    content: "";
-    position: absolute;
-    bottom: -1px; left: 0; right: 0;
-    height: 1px;
-    background: linear-gradient(
-      90deg,
-      var(--accent) 0%, var(--accent) 60px,
-      transparent 60px, transparent 100%
-    );
-  }
-  .mirror-title {
-    font: inherit;
-    font-weight: 700;
-    letter-spacing: 1.8px;
-    color: var(--text);
-    white-space: nowrap;
-  }
-  .mirror-title .sid {
-    color: var(--text-muted);
-    font-weight: 400;
-    margin-left: 10px;
-    letter-spacing: 1px;
-  }
-  .mirror-meta {
-    display: flex;
-    align-items: center;
-    gap: 22px;
-    margin-left: auto;
-    min-width: 0;
-    /* Inherit font-family/size/letter-spacing/text-transform from
-       .mirror-header, so every meta element sits on the same
-       baseline. */
-  }
-  .mirror-meta > * {
-    font: inherit;
-    letter-spacing: inherit;
-    text-transform: inherit;
-    color: var(--text-muted);
-    white-space: nowrap;
-    line-height: 1;
-  }
-  .mirror-meta .cwd {
-    color: var(--text-dim);
-    /* path is not a label — drop the uppercase + wide tracking so it
-       stays readable, but keep the same font-size so the baseline
-       still agrees with the rest of the row. */
-    text-transform: none;
-    letter-spacing: 0.2px;
-  }
-
-  /* LIVE / OFFLINE / CONNECTING / ERROR indicator. Sizing matches
-     the rest of the meta row; state is driven by classes on the
-     element itself. */
-  #mirror-conn {
-    color: var(--text);
-    font-weight: 700;
-    letter-spacing: 1.8px;
-  }
-  #mirror-conn::before {
-    content: "●";
-    display: inline-block;
-    margin-right: 7px;
-    color: var(--text-muted);
-    vertical-align: 0;
-  }
-  #mirror-conn.is-live::before {
-    color: var(--accent);
-    animation: live-pulse 2.2s ease-in-out infinite;
-  }
-  #mirror-conn.is-error { color: var(--accent); }
-  #mirror-conn.is-error::before { color: var(--accent); }
-
-  /* On narrow screens the header was overflowing the viewport because
-     every item (back link, title, sid, cwd, owner, LIVE, share) was
-     crammed into one non-wrapping flex row. Drop the least-essential
-     items (cwd, owner name) and shrink the sid to its short tail so
-     the remaining title / LIVE / share comfortably fit. */
-  @media (max-width: 700px) {
-    .mirror-header {
-      height: auto;
-      min-height: calc(44px + env(safe-area-inset-top));
-      /* Respect iOS safe-area insets (Dynamic Island / notch). */
-      padding:
-        calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
-        8px calc(12px + env(safe-area-inset-left));
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .mirror-nav-back { margin-right: 6px; padding: 3px 7px; }
-    .mirror-title { font-size: 10px; letter-spacing: 1.2px; }
-    .mirror-title .sid {
-      margin-left: 6px;
-      max-width: 8ch;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      vertical-align: bottom;
-      display: inline-block;
-    }
-    .mirror-meta { gap: 12px; }
-    .mirror-meta .cwd,
-    .mirror-meta #mirror-owner { display: none; }
-  }
 
   /* ── TRANSCRIPT: the broadcast feed.
      Every event is a row hanging off a 72px left-gutter timeline
@@ -1400,31 +951,8 @@
   .mirror-compose-err.is-notice { color: var(--green); }
   .mirror-compose-err:empty { display: none; }
 
-  .mirror-share-btn,
-  .mirror-stop-btn,
-  .theme-toggle {
-    background: transparent;
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    padding: 4px 10px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: color 0.1s, border-color 0.1s, background 0.1s;
-    white-space: nowrap;
-  }
-  .mirror-share-btn:hover,
-  .mirror-stop-btn:hover,
-  .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
-  .mirror-stop-btn { color: var(--accent); border-color: var(--accent-dim); }
-  .mirror-stop-btn:hover { background: var(--accent); color: var(--on-accent); }
-  .mirror-stop-btn:disabled {
-    color: var(--text-muted); border-color: var(--border);
-    background: transparent; cursor: default;
-  }
-
+  /* Stop button in the mirror header — sized to match Bootstrap's btn-sm. */
+  #mirror-stop-btn { font-family: var(--font-mono); letter-spacing: 0.8px; text-transform: uppercase; }
   .mirror-status {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -1756,10 +1284,154 @@
     .m-evt { animation: none; }
     header h1::before, #mirror-conn::before { animation: none; }
   }
+
+  /* ── Phase 3+4 unified shell ─────────────────────────────────────────
+     Bootstrap provides the heavy lifting (navbar, offcanvas, list-group);
+     these rules bind the theme vars and layout helpers the app needs on
+     top of that. Phase 5 deletes the hand-rolled panel/card/sidebar
+     chrome above. */
+  :root {
+    --bs-body-bg: var(--bg);
+    --bs-body-color: var(--text);
+    --bs-border-color: var(--border);
+    --bs-border-color-translucent: var(--border);
+    --bs-secondary-bg: var(--bg-panel);
+    --bs-tertiary-bg: var(--bg-panel);
+    --bs-secondary-color: var(--text-dim);
+    --bs-link-color: var(--accent);
+    --bs-link-hover-color: var(--accent-dim);
+    --bs-offcanvas-bg: var(--bg-panel);
+    --bs-offcanvas-color: var(--text);
+    --bs-offcanvas-border-color: var(--border);
+    --bs-offcanvas-width: 280px;
+  }
+
+  /* Restrain Bootstrap's reset so our app shell can go full-viewport. */
+  html, body { height: 100%; }
+  body { overflow: hidden; }
+
+  /* Navbar sits flush at the top; its gap/padding come from Bootstrap. */
+  nav[data-cn-navbar] {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+  }
+  nav[data-cn-navbar] .navbar-brand { font-family: var(--font-sans); }
+
+  /* Pin the offcanvas below the navbar so the burger stays visible. */
+  .offcanvas.offcanvas-start { top: auto; height: calc(100vh - 56px); }
+
+  /* Main pane: fills the remaining viewport next to the pinned sidebar. */
+  #app-main {
+    margin-left: var(--bs-offcanvas-width);
+    height: calc(100vh - 56px);
+    min-height: 0;
+  }
+  #app-main.sidebar-collapsed { margin-left: 0; }
+
+  /* Contextual header: one row that morphs between log / mirror modes. */
+  .cn-main-header { flex-shrink: 0; background: var(--bg-panel); }
+  .cn-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    min-height: 44px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .cn-header-title { font-weight: 600; color: var(--text); }
+  .cn-header-sub { color: var(--text-dim); font-size: 11px; }
+  .cn-header-back {
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+  .cn-header-back:hover { color: var(--accent); border-color: var(--accent); }
+  .cn-header-thinking { color: var(--text-dim); font-style: italic; }
+
+  /* The main-view container stacks the log view and the mirror view; only
+     one is visible at a time (via d-none). Each view fills the pane. */
+  .cn-main-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .cn-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+  /* Message log — bounded live-tail of agent traffic. */
+  .cn-message-log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .cn-log-entry {
+    padding: 6px 16px;
+    border-left: 2px solid transparent;
+    border-bottom: 1px solid var(--border-dim);
+    animation: event-flash 1.2s ease-out;
+  }
+  .cn-log-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 2px;
+  }
+  .cn-log-route { color: var(--text-dim); }
+  .cn-log-time { color: var(--text-muted); }
+  .cn-log-content { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+  .cn-log-broadcast { border-left-color: var(--gold); }
+  .cn-log-team { border-left-color: var(--cyan); }
+
+  /* Sidebar unified agent list — Bootstrap list-group with our dot/badge. */
+  .list-group-item.agent-item {
+    background: transparent;
+    border-color: var(--border-dim);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+  .list-group-item.agent-item:hover { background: var(--bg-hover); color: var(--text); }
+  .list-group-item.agent-item.active {
+    background: var(--accent-ink);
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .agent-mirror-badge { margin-left: auto; font-size: 14px; line-height: 1; }
+
+  /* Mirror transcript inlined into the main pane. */
+  #mirror-view .mirror-transcript {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px 16px;
+  }
+  #mirror-conn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
+  #mirror-conn.is-error { color: var(--red); }
 </style>
+<script src="/bin/bootstrap.bundle.min.js"></script>
 <script src="/bin/marked.umd.min.js"></script>
 <script src="/bin/purify.min.js"></script>
 <script src="/bin/diff.min.js"></script>
+<script type="module">
+  // Expose the extracted response parsers on window.Parsers so the
+  // classic inline <script> can reach them through thin bridges.
+  import * as Parsers from "/dashboard/parsers.js";
+  window.Parsers = Parsers;
+</script>
 </head>
 <body>
 
@@ -1777,80 +1449,76 @@
   })();
 </script>
 
-<div id="dashboard-root">
-<header>
-  <h1>claude-net</h1>
-  <div class="header-stats">
-    <span id="agent-count">0 agents</span>
-    <span id="team-count">0 teams</span>
-    <span><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
-    <button type="button" class="theme-toggle" data-theme-toggle title="Switch theme">◐ DARK</button>
+<nav class="navbar navbar-expand bg-body-tertiary border-bottom" data-cn-navbar>
+  <div class="container-fluid gap-2">
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-controls="sidebar" title="Toggle agents sidebar">☰</button>
+    <a class="navbar-brand mb-0 h1 me-auto" href="#">claude-net</a>
+    <span class="badge text-bg-secondary" id="agent-count">0 agents</span>
+    <span class="d-flex align-items-center gap-1 small"><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-theme-toggle title="Switch theme">◐ DARK</button>
   </div>
-</header>
+</nav>
 
-<main>
-  <div class="panel sidebar">
-    <div class="panel-header">Agents</div>
-    <div class="sidebar-scroll">
-      <div id="agent-list"></div>
-      <div class="mirror-list-heading">Mirror sessions</div>
-      <div id="mirror-session-list"></div>
+<div class="offcanvas offcanvas-start show" data-bs-scroll="true" data-bs-backdrop="false" tabindex="-1" id="sidebar" aria-labelledby="sidebarLabel">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="sidebarLabel">Agents</h5>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body p-0">
+    <div id="agent-list" class="list-group list-group-flush"></div>
+  </div>
+</div>
+
+<main class="container-fluid p-0 d-flex flex-column" id="app-main">
+  <header class="cn-main-header border-bottom" id="main-header">
+    <!-- Message-log mode header -->
+    <div class="cn-header cn-header-log" data-header-mode="log">
+      <span class="cn-header-title">Message log</span>
+      <span class="cn-header-sub"><span id="log-agent-count">0 agents online</span></span>
     </div>
-  </div>
-
-  <div class="panel feed">
-    <div class="panel-header">Messages</div>
-    <div class="panel-body" id="msg-feed"></div>
-  </div>
-
-  <div class="panel teams-panel">
-    <div class="panel-header">Teams</div>
-    <div class="panel-body" id="team-list"></div>
-  </div>
-</main>
-
-<div class="send-bar">
-  <label for="to-field">To:</label>
-  <input type="text" id="to-field" placeholder="agent, broadcast, team:name" list="to-suggestions">
-  <datalist id="to-suggestions"></datalist>
-  <input type="text" id="msg-field" placeholder="Message content...">
-  <button id="send-btn">Send</button>
-  <span class="send-error" id="send-error"></span>
-</div>
-</div>
-
-<div id="mirror-root">
-  <header class="mirror-header">
-    <a class="mirror-nav-back" href="/" title="Back to main dashboard">← dashboard</a>
-    <div class="mirror-title">mirror session<span class="sid" id="mirror-sid"></span></div>
-    <div class="mirror-meta">
-      <span class="cwd" id="mirror-cwd"></span>
-      <span id="mirror-owner"></span>
+    <!-- Mirror-mode header (hidden when no agent selected) -->
+    <div class="cn-header cn-header-mirror d-none" data-header-mode="mirror">
+      <a class="cn-header-back" href="#" title="Back to message log">← log</a>
+      <span class="cn-header-title" id="mirror-owner"></span>
+      <span class="cn-header-sub cwd" id="mirror-cwd"></span>
       <span id="mirror-conn">connecting…</span>
-      <button id="mirror-stop-btn" class="mirror-stop-btn" type="button" style="display:none" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
-      <button id="mirror-share-btn" class="mirror-share-btn" type="button" style="display:none" title="Create a read-only share link">share</button>
-      <button type="button" class="theme-toggle" data-theme-toggle title="Switch theme">◐ DARK</button>
+      <span class="cn-header-thinking" id="mirror-thinking"></span>
+      <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm ms-auto" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
     </div>
   </header>
-  <div class="mirror-status" id="mirror-status"></div>
-  <div class="mirror-transcript" id="mirror-transcript"></div>
-  <div class="mirror-thinking" id="mirror-thinking"></div>
-  <div class="mirror-compose compose-hidden" id="mirror-compose">
-    <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
-    <div class="mirror-compose-frame">
-      <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
-      <div class="mirror-compose-actions">
-        <div class="mirror-compose-hint">
-          <kbd>↵</kbd>send
-          <br>
-          <kbd>⇧↵</kbd>newline
+
+  <div id="main-view" class="cn-main-view">
+    <!-- Default view: Message log -->
+    <section id="message-log-view" class="cn-view">
+      <div class="cn-message-log" id="message-log">
+        <div class="cn-log-empty text-secondary p-3">
+          No agent messages yet. When agents talk to each other via send_message / send_team / broadcast, it'll show up here.
         </div>
-        <button id="mirror-compose-send" type="button">Transmit</button>
       </div>
-    </div>
+    </section>
+
+    <!-- Mirror view (hidden until agent selected) -->
+    <section id="mirror-view" class="cn-view d-none">
+      <div class="mirror-status" id="mirror-status"></div>
+      <div class="mirror-transcript" id="mirror-transcript"></div>
+      <div class="mirror-compose compose-hidden" id="mirror-compose">
+        <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
+        <div class="mirror-compose-frame">
+          <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
+          <div class="mirror-compose-actions">
+            <div class="mirror-compose-hint">
+              <kbd>↵</kbd>send
+              <br>
+              <kbd>⇧↵</kbd>newline
+            </div>
+            <button id="mirror-compose-send" type="button">Transmit</button>
+          </div>
+        </div>
+      </div>
+      <div class="mirror-compose-err" id="mirror-compose-err"></div>
+    </section>
   </div>
-  <div class="mirror-compose-err" id="mirror-compose-err"></div>
-</div>
+</main>
 
 <script>
 (function() {
@@ -1876,38 +1544,27 @@
   });
   syncThemeLabel();
 
-  // --- Router: dashboard (default) vs mirror view (/mirror/:sid) ---
-  var mirrorMatch = location.pathname.match(/^\/mirror\/([^/]+)\/?$/);
-  if (mirrorMatch) {
-    document.body.classList.add('mirror-mode');
-    startMirror(decodeURIComponent(mirrorMatch[1]));
-    return;
-  }
-
   // --- Dashboard state ---
-  const agents = new Map(); // fullName -> { name, fullName, status }
-  const teams = new Map();  // teamName -> { members: string[] }
-  const messages = [];       // { from, to, type, content, team?, timestamp, routeType }
-  const MAX_MESSAGES = 200;
+  // Unified sidebar: one row per agent, with a `mirrorSid` field set
+  // when that agent has an active mirror session. Selection drives the
+  // main pane via window.location.hash (#agent=<sid>).
+  const agents = new Map(); // fullName -> { name, fullName, status, mirrorSid, cwd }
+  const mirrorBySid = new Map(); // sid -> { sid, owner_agent, cwd, last_event_at, ... }
+  const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
+  const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
 
   // --- DOM refs ---
   const agentListEl = document.getElementById('agent-list');
-  const msgFeedEl = document.getElementById('msg-feed');
-  const teamListEl = document.getElementById('team-list');
   const agentCountEl = document.getElementById('agent-count');
-  const teamCountEl = document.getElementById('team-count');
+  const logAgentCountEl = document.getElementById('log-agent-count');
   const connDot = document.getElementById('conn-dot');
   const connLabel = document.getElementById('conn-label');
-  const toField = document.getElementById('to-field');
-  const msgField = document.getElementById('msg-field');
-  const sendBtn = document.getElementById('send-btn');
-  const sendError = document.getElementById('send-error');
-  const toSuggestions = document.getElementById('to-suggestions');
-  const mirrorListEl = document.getElementById('mirror-session-list');
-
-  // Active mirror sessions (full entries with owner_token for click-through).
-  const mirrorSessions = new Map(); // sid -> entry
+  const messageLogEl = document.getElementById('message-log');
+  const messageLogView = document.getElementById('message-log-view');
+  const mirrorView = document.getElementById('mirror-view');
+  const headerLog = document.querySelector('[data-header-mode="log"]');
+  const headerMirror = document.querySelector('[data-header-mode="mirror"]');
 
   // --- WebSocket ---
   let ws = null;
@@ -1921,6 +1578,7 @@
       setConnected(true);
       if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
       refreshMirrorSessions();
+      refreshAgents();
     };
 
     ws.onmessage = function(e) {
@@ -1957,67 +1615,45 @@
   function handleEvent(event) {
     switch (event.event) {
       case 'agent:connected':
-        agents.set(event.full_name, {
+        upsertAgent({
           name: event.name,
           fullName: event.full_name,
           status: 'online'
         });
         renderAgents();
-        updateSuggestions();
         break;
 
       case 'agent:disconnected':
         agents.delete(event.full_name);
         renderAgents();
-        updateSuggestions();
         break;
 
       case 'message:routed':
-        addMessage(event);
-        break;
-
       case 'dashboard:message':
-        addMessage(event);
-        break;
-
-      case 'team:changed':
-        if (event.action === 'deleted') {
-          teams.delete(event.team);
-        } else {
-          teams.set(event.team, { members: event.members || [] });
-        }
-        renderTeams();
-        updateSuggestions();
+        addLogMessage(event);
         break;
 
       case 'mirror:session_started':
-        // Partial info from the event; fetch full session (with token + URL).
         refreshMirrorSessions();
         break;
 
-      case 'mirror:session_ended':
-        mirrorSessions.delete(event.sid);
-        renderMirrorSessions();
-        break;
-
-      case 'mirror:watcher_joined':
-      case 'mirror:watcher_left': {
-        const entry = mirrorSessions.get(event.sid);
-        if (entry) {
-          entry.watcher_count = (entry.watcher_count || 0) +
-            (event.event === 'mirror:watcher_joined' ? 1 : -1);
-          if (entry.watcher_count < 0) entry.watcher_count = 0;
-          renderMirrorSessions();
+      case 'mirror:session_ended': {
+        mirrorBySid.delete(event.sid);
+        for (const ag of agents.values()) {
+          if (ag.mirrorSid === event.sid) { ag.mirrorSid = null; ag.cwd = null; }
+        }
+        renderAgents();
+        if (activeAgentSid === event.sid) {
+          // The mirror we're viewing vanished — fall back to the log.
+          window.location.hash = '';
         }
         break;
       }
 
       case 'mirror:event': {
-        const entry = mirrorSessions.get(event.sid);
+        const entry = mirrorBySid.get(event.sid);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
-          entry.transcript_len = (entry.transcript_len || 0) + 1;
-          renderMirrorSessions();
         }
         break;
       }
@@ -2026,113 +1662,101 @@
     updateCounts();
   }
 
-  // --- Mirror sessions (dashboard panel) ---
+  function upsertAgent(patch) {
+    const existing = agents.get(patch.fullName) || {};
+    agents.set(patch.fullName, Object.assign({}, existing, patch));
+  }
+
+  function refreshAgents() {
+    fetch('/api/agents')
+      .then(function(r) { return r.ok ? r.json() : []; })
+      .then(function(list) {
+        if (!Array.isArray(list)) return;
+        agents.clear();
+        for (var i = 0; i < list.length; i++) {
+          var a = list[i];
+          upsertAgent({
+            name: a.shortName || a.fullName,
+            fullName: a.fullName,
+            status: a.status || 'online',
+          });
+        }
+        // Merge in mirror state we already know about.
+        for (const entry of mirrorBySid.values()) {
+          const ag = agents.get(entry.owner_agent);
+          if (ag) { ag.mirrorSid = entry.sid; ag.cwd = entry.cwd; }
+        }
+        renderAgents();
+        updateCounts();
+      })
+      .catch(function() {});
+  }
+
+  // --- Mirror sessions (feed sidebar state) ---
   function refreshMirrorSessions() {
     fetch('/api/mirror/sessions/all')
       .then(function(r) { return r.ok ? r.json() : []; })
       .then(function(list) {
-        mirrorSessions.clear();
+        mirrorBySid.clear();
+        // Drop any prior mirror association so dead sessions are cleared.
+        for (const ag of agents.values()) { ag.mirrorSid = null; ag.cwd = null; }
         if (Array.isArray(list)) {
           for (var i = 0; i < list.length; i++) {
-            mirrorSessions.set(list[i].sid, list[i]);
+            var e = list[i];
+            mirrorBySid.set(e.sid, e);
+            if (!agents.has(e.owner_agent)) {
+              // Register placeholder so a mirror that started before the
+              // dashboard loaded still shows its owner.
+              upsertAgent({
+                name: e.owner_agent,
+                fullName: e.owner_agent,
+                status: 'online',
+              });
+            }
+            var ag = agents.get(e.owner_agent);
+            if (ag) { ag.mirrorSid = e.sid; ag.cwd = e.cwd; }
           }
         }
-        renderMirrorSessions();
+        renderAgents();
       })
       .catch(function() { /* ignore */ });
   }
 
-  function renderMirrorSessions() {
-    if (!mirrorListEl) return;
-    // Sort by last_event_at (most recent first). Rows will reorder as
-    // events arrive, but that's desirable — the active session floats
-    // to the top. Tiebreak by sid for stable ordering of quiet sessions.
-    var entries = Array.from(mirrorSessions.values())
-      .sort(function(a, b) {
-        var ae = a.last_event_at || '', be = b.last_event_at || '';
-        if (ae !== be) return be.localeCompare(ae);
-        return (a.sid || '').localeCompare(b.sid || '');
-      });
-    if (entries.length === 0) {
-      mirrorListEl.innerHTML = '<div class="mirror-list-empty">no active mirrors</div>';
-      return;
-    }
-    var html = '';
-    for (var i = 0; i < entries.length; i++) {
-      var e = entries[i];
-      var age = relativeTime(e.last_event_at);
-      var watchers = (e.watcher_count || 0) > 0
-        ? '<span class="mli-watchers">' + e.watcher_count + ' watching</span>'
-        : '';
-      // Short sid suffix so fork-sessions in the same folder are
-      // visibly distinct in the sidebar without needing name-sync
-      // between plugin and mirror-agent.
-      var sidTail = e.sid ? String(e.sid).slice(-6) : '';
-      // Build a RELATIVE link so the mirror view opens on the same
-      // domain the user is currently browsing from (cn.tynan.io,
-      // london:4815, tailscale hostname, whatever). The absolute
-      // mirror_url on the summary is kept for the plugin / share flow
-      // which needs to embed the canonical URL in shareable text.
-      var href = '/mirror/' + encodeURIComponent(e.sid) +
-        '#token=' + encodeURIComponent(e.owner_token || '');
-      html +=
-        '<a class="mirror-list-item" href="' + escapeAttr(href) + '">' +
-          '<div class="mli-owner">' +
-            escapeHtml(e.owner_agent) +
-            (sidTail ? ' <span class="mli-sid">· ' + escapeHtml(sidTail) + '</span>' : '') +
-          '</div>' +
-          '<div class="mli-cwd">' + escapeHtml(e.cwd || '') + '</div>' +
-          '<div class="mli-meta">' +
-            '<span>' + (e.transcript_len || 0) + ' events</span>' +
-            '<span>' + age + '</span>' +
-            watchers +
-          '</div>' +
-        '</a>';
-    }
-    mirrorListEl.innerHTML = html;
-  }
-
-  function relativeTime(iso) {
-    if (!iso) return '';
-    var t = new Date(iso).getTime();
-    if (!isFinite(t)) return '';
-    var dt = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (dt < 10) return 'just now';
-    if (dt < 60) return dt + 's ago';
-    if (dt < 3600) return Math.floor(dt / 60) + 'm ago';
-    if (dt < 86400) return Math.floor(dt / 3600) + 'h ago';
-    return Math.floor(dt / 86400) + 'd ago';
-  }
-
-  // --- Render agents ---
+  // --- Render agents (unified sidebar) ---
   function renderAgents() {
     var sorted = Array.from(agents.values()).sort(function(a, b) {
+      // Online first, then agents with an active mirror, then by name.
       if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
+      var ma = a.mirrorSid ? 0 : 1, mb = b.mirrorSid ? 0 : 1;
+      if (ma !== mb) return ma - mb;
       return a.fullName.localeCompare(b.fullName);
     });
 
     var html = '';
     for (var i = 0; i < sorted.length; i++) {
       var ag = sorted[i];
-      html += '<div class="agent-item" data-name="' + escapeAttr(ag.fullName) + '">'
+      var clickable = !!ag.mirrorSid;
+      var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
+      var mirrorBadge = ag.mirrorSid
+        ? '<span class="agent-mirror-badge" title="active mirror">🎥</span>'
+        : '';
+      var tag = clickable ? 'a' : 'div';
+      var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
+      html += '<' + tag + ' class="list-group-item list-group-item-action agent-item' + activeCls + '"'
+        + (clickable ? '' : ' style="cursor:default"')
+        + href
+        + ' data-sid="' + escapeAttr(ag.mirrorSid || '') + '"'
+        + ' data-name="' + escapeAttr(ag.fullName) + '">'
         + '<span class="agent-dot ' + ag.status + '"></span>'
         + '<span class="agent-name">' + escapeHtml(ag.fullName) + '</span>'
-        + '</div>';
+        + mirrorBadge
+        + '</' + tag + '>';
     }
     agentListEl.innerHTML = html;
-
-    // Bind click handlers
-    var items = agentListEl.querySelectorAll('.agent-item');
-    for (var j = 0; j < items.length; j++) {
-      items[j].addEventListener('click', function() {
-        toField.value = this.getAttribute('data-name');
-        msgField.focus();
-      });
-    }
   }
 
-  // --- Render messages ---
-  function addMessage(event) {
+  // --- Message log (live tail, ring buffer) ---
+  function addLogMessage(event) {
     var routeType = 'direct';
     var toLabel = event.to;
     if (event.to === 'broadcast') {
@@ -2142,78 +1766,41 @@
       routeType = 'team';
       toLabel = 'team:' + event.team;
     }
-
-    messages.push({
+    var entry = {
       from: event.from,
       to: toLabel,
       type: event.type,
       content: event.content,
       timestamp: event.timestamp,
-      routeType: routeType
-    });
-
-    while (messages.length > MAX_MESSAGES) {
-      messages.shift();
-    }
-
-    renderLastMessage();
+      routeType: routeType,
+    };
+    messageLogBuffer.push(entry);
+    if (messageLogBuffer.length > MAX_LOG_ENTRIES) messageLogBuffer.shift();
+    appendLogEntry(entry);
   }
 
-  function renderLastMessage() {
-    var msg = messages[messages.length - 1];
-    if (!msg) return;
-
+  function appendLogEntry(msg) {
+    if (!messageLogEl) return;
+    var empty = messageLogEl.querySelector('.cn-log-empty');
+    if (empty) empty.remove();
     var el = document.createElement('div');
-    el.className = 'msg-entry';
+    el.className = 'cn-log-entry cn-log-' + msg.routeType;
     el.innerHTML =
-      '<div class="msg-meta">'
-        + '<span class="msg-route ' + msg.routeType + '">'
+      '<div class="cn-log-meta">'
+        + '<span class="cn-log-route">'
           + escapeHtml(msg.from) + ' &rarr; ' + escapeHtml(msg.to)
         + '</span>'
-        + '<span class="msg-time">' + formatTime(msg.timestamp) + '</span>'
+        + '<span class="cn-log-time">' + formatTime(msg.timestamp) + '</span>'
       + '</div>'
-      + '<div class="msg-content">' + escapeHtml(msg.content) + '</div>';
-
-    msgFeedEl.appendChild(el);
-
-    // Remove excess DOM nodes
-    while (msgFeedEl.children.length > MAX_MESSAGES) {
-      msgFeedEl.removeChild(msgFeedEl.firstChild);
+      + '<div class="cn-log-content">' + escapeHtml(msg.content) + '</div>';
+    messageLogEl.appendChild(el);
+    while (messageLogEl.children.length > MAX_LOG_ENTRIES) {
+      messageLogEl.removeChild(messageLogEl.firstChild);
     }
-
-    // Auto-scroll
-    msgFeedEl.scrollTop = msgFeedEl.scrollHeight;
-  }
-
-  // --- Render teams ---
-  function renderTeams() {
-    var html = '';
-    var teamNames = Array.from(teams.keys()).sort();
-    for (var i = 0; i < teamNames.length; i++) {
-      var tName = teamNames[i];
-      var team = teams.get(tName);
-      var members = team.members || [];
-
-      html += '<div class="team-item">'
-        + '<div class="team-header" data-team="' + escapeAttr(tName) + '">'
-          + '<span>' + escapeHtml(tName) + '</span>'
-          + '<span class="team-count">' + members.length + '</span>'
-        + '</div>'
-        + '<div class="team-members">';
-
-      for (var j = 0; j < members.length; j++) {
-        var memberName = members[j];
-        var ag = agents.get(memberName);
-        var status = ag ? ag.status : 'offline';
-        html += '<div class="team-member">'
-          + '<span class="agent-dot ' + status + '"></span>'
-          + '<span>' + escapeHtml(memberName) + '</span>'
-          + '</div>';
-      }
-
-      html += '</div></div>';
+    // Only auto-scroll when the log is the visible view.
+    if (messageLogView && !messageLogView.classList.contains('d-none')) {
+      messageLogEl.scrollTop = messageLogEl.scrollHeight;
     }
-    teamListEl.innerHTML = html;
   }
 
   // --- Update counts ---
@@ -2221,69 +1808,8 @@
     var onlineCount = 0;
     agents.forEach(function(ag) { if (ag.status === 'online') onlineCount++; });
     agentCountEl.textContent = onlineCount + ' agent' + (onlineCount !== 1 ? 's' : '');
-    teamCountEl.textContent = teams.size + ' team' + (teams.size !== 1 ? 's' : '');
+    if (logAgentCountEl) logAgentCountEl.textContent = onlineCount + ' agent' + (onlineCount !== 1 ? 's' : '') + ' online';
   }
-
-  // --- Update to-field suggestions ---
-  function updateSuggestions() {
-    var html = '<option value="broadcast">';
-    agents.forEach(function(ag) {
-      html += '<option value="' + escapeAttr(ag.fullName) + '">';
-    });
-    teams.forEach(function(_, tName) {
-      html += '<option value="team:' + escapeAttr(tName) + '">';
-    });
-    toSuggestions.innerHTML = html;
-  }
-
-  // --- Send message ---
-  function doSend() {
-    var to = toField.value.trim();
-    var content = msgField.value.trim();
-    sendError.textContent = '';
-
-    if (!to || !content) return;
-    sendBtn.disabled = true;
-
-    var url, body;
-    if (to === 'broadcast') {
-      url = '/api/broadcast';
-      body = { from: 'dashboard', content: content };
-    } else if (to.startsWith('team:')) {
-      url = '/api/send_team';
-      body = { from: 'dashboard', team: to.slice(5), content: content };
-    } else {
-      url = '/api/send';
-      body = { from: 'dashboard', to: to, content: content };
-    }
-
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
-    .then(function(resp) { return resp.json(); })
-    .then(function(data) {
-      sendBtn.disabled = false;
-      if (data.error) {
-        sendError.textContent = data.error;
-      } else {
-        msgField.value = '';
-      }
-    })
-    .catch(function(err) {
-      sendBtn.disabled = false;
-      sendError.textContent = 'Send failed: ' + err.message;
-    });
-  }
-
-  sendBtn.addEventListener('click', doSend);
-  msgField.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      doSend();
-    }
-  });
 
   // --- Helpers ---
   function escapeHtml(str) {
@@ -2307,43 +1833,132 @@
     } catch { return ''; }
   }
 
+  // --- View swap (message log ↔ mirror) ---
+  function showMessageLogView() {
+    if (messageLogView) messageLogView.classList.remove('d-none');
+    if (mirrorView) mirrorView.classList.add('d-none');
+    if (headerLog) headerLog.classList.remove('d-none');
+    if (headerMirror) headerMirror.classList.add('d-none');
+    if (messageLogEl) messageLogEl.scrollTop = messageLogEl.scrollHeight;
+  }
+  function showMirrorView() {
+    if (messageLogView) messageLogView.classList.add('d-none');
+    if (mirrorView) mirrorView.classList.remove('d-none');
+    if (headerLog) headerLog.classList.add('d-none');
+    if (headerMirror) headerMirror.classList.remove('d-none');
+  }
+
+  // --- Hash routing ---
+  // /            → message log
+  // /#agent=SID  → mirror view for that session
+  function sidFromHash() {
+    var h = window.location.hash || '';
+    var m = h.match(/^#agent=(.+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  function applyHashRoute() {
+    var sid = sidFromHash();
+    if (!sid) {
+      detachMirror();
+      showMessageLogView();
+      renderAgents();
+      return;
+    }
+    // Valid sid: must match a known mirror session.
+    var known = mirrorBySid.has(sid);
+    if (!known) {
+      // Might be an early page-load race where the session list hasn't
+      // arrived yet. Fetch + retry once, then fall back.
+      fetch('/api/mirror/sessions/all')
+        .then(function(r) { return r.ok ? r.json() : []; })
+        .then(function(list) {
+          if (Array.isArray(list)) {
+            for (var i = 0; i < list.length; i++) {
+              mirrorBySid.set(list[i].sid, list[i]);
+              var ag = agents.get(list[i].owner_agent);
+              if (ag) { ag.mirrorSid = list[i].sid; ag.cwd = list[i].cwd; }
+            }
+            renderAgents();
+          }
+          if (mirrorBySid.has(sid)) {
+            showMirrorView();
+            attachMirror(sid);
+            renderAgents();
+          } else {
+            // Unknown sid — show empty-state and reset.
+            if (messageLogEl) {
+              var hint = document.createElement('div');
+              hint.className = 'cn-log-empty text-secondary p-3';
+              hint.textContent = "This session isn't active. Returning to the message log…";
+              messageLogEl.prepend(hint);
+              setTimeout(function() { hint.remove(); }, 3000);
+            }
+            window.location.hash = '';
+          }
+        })
+        .catch(function() { window.location.hash = ''; });
+      return;
+    }
+    showMirrorView();
+    attachMirror(sid);
+    renderAgents();
+  }
+
+  window.addEventListener('hashchange', applyHashRoute);
+
+  // Navbar brand + header "back to log" link return to the message log.
+  document.addEventListener('click', function(e) {
+    var back = e.target.closest && e.target.closest('.cn-header-back');
+    if (back) {
+      e.preventDefault();
+      if (window.location.hash) window.location.hash = '';
+      else applyHashRoute();
+    }
+  });
+
   // --- Init ---
   connect();
   updateCounts();
+  showMessageLogView();
+  // Honour a pre-existing hash on first load (reload / deep link).
+  if (sidFromHash()) applyHashRoute();
 
-  // ── Mirror view (scoped within the outer IIFE so helpers are in scope) ─
-  function startMirror(sid) {
-    var token = '';
-    var hash = location.hash || '';
-    var m = hash.match(/(?:^#|&)token=([^&]+)/);
-    if (m) token = decodeURIComponent(m[1]);
+  // ── Mirror view attach/detach ───────────────────────────────────────
+  // A single mirror WebSocket at a time. Set by attachMirror, closed by
+  // detachMirror. The teardown closure captures the WS + reconnect timer
+  // for the currently-attached session.
+  var activeAgentSid = null;
+  var mirrorTeardown = null;
 
-    var sidEl = document.getElementById('mirror-sid');
+  function detachMirror() {
+    if (typeof mirrorTeardown === 'function') {
+      try { mirrorTeardown(); } catch (e) { /* ignore */ }
+      mirrorTeardown = null;
+    }
+    activeAgentSid = null;
+  }
+
+  function attachMirror(sid) {
+    detachMirror();
+    activeAgentSid = sid;
+
     var cwdEl = document.getElementById('mirror-cwd');
     var ownerEl = document.getElementById('mirror-owner');
     var connEl = document.getElementById('mirror-conn');
     var statusEl = document.getElementById('mirror-status');
     var transcriptEl = document.getElementById('mirror-transcript');
 
-    sidEl.textContent = sid;
     // Broadcast-style states: CONNECTING / LIVE / OFFLINE / ERROR.
-    // The is-live / is-error classes drive the pulsing red dot CSS.
     function setConnState(state) {
       connEl.classList.remove('is-live', 'is-error');
       if (state === 'live') { connEl.textContent = 'LIVE'; connEl.classList.add('is-live'); }
       else if (state === 'offline') { connEl.textContent = 'OFFLINE'; }
       else if (state === 'connecting') { connEl.textContent = 'CONNECTING'; }
       else if (state === 'error') { connEl.textContent = 'ERROR'; connEl.classList.add('is-error'); }
-      else if (state === 'unauth') { connEl.textContent = 'UNAUTHENTICATED'; connEl.classList.add('is-error'); }
     }
     setConnState('connecting');
-
-    if (!token) {
-      statusEl.className = 'mirror-status error';
-      statusEl.textContent = 'Missing token in URL fragment. Paste the full mirror URL (including #token=...).';
-      setConnState('unauth');
-      return;
-    }
+    if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
 
     var rendered = Object.create(null); // uuid → true
     var userScrolledUp = false;
@@ -3542,245 +3157,17 @@
     // but the older cat -n string form still turns up in orphan-result
     // paths and redacted fallbacks. Normalise to { rows, totalLines,
     // startLine } and let callers render.
-    function parseReadContent(resp) {
-      if (resp && typeof resp === 'object' && !Array.isArray(resp)) {
-        var f = resp.file;
-        if (f && typeof f.content === 'string') {
-          var start = typeof f.startLine === 'number' ? f.startLine : 1;
-          var lines = f.content.split('\n');
-          if (lines.length && lines[lines.length - 1] === '') lines.pop();
-          var rows = [];
-          for (var i = 0; i < lines.length; i++) {
-            rows.push({ n: String(start + i), text: lines[i] });
-          }
-          return {
-            rows: rows,
-            totalLines: typeof f.totalLines === 'number' ? f.totalLines : rows.length,
-            startLine: start,
-          };
-        }
-        var unwrapped = unwrapMcpText(resp);
-        if (unwrapped !== null) {
-          try { return parseReadContent(JSON.parse(unwrapped)); }
-          catch (e) { return parseReadTextLines(unwrapped); }
-        }
-      }
-      if (typeof resp === 'string') return parseReadTextLines(resp);
-      return { rows: [], totalLines: 0, startLine: 1 };
-    }
-
-    // Fallback for the cat -n string shape, or raw text with no line
-    // prefixes at all — synthesise 1-based numbering.
-    function parseReadTextLines(text) {
-      if (!text) return { rows: [], totalLines: 0, startLine: 1 };
-      var lines = text.split('\n');
-      if (lines.length && lines[lines.length - 1] === '') lines.pop();
-      var rows = [];
-      var rx = /^\s*(\d+)\t(.*)$/;
-      var start = null;
-      for (var i = 0; i < lines.length; i++) {
-        var m = lines[i].match(rx);
-        if (m) {
-          if (start === null) start = Number(m[1]);
-          rows.push({ n: m[1], text: m[2] });
-        } else {
-          rows.push({ n: String(i + 1), text: lines[i] });
-        }
-      }
-      return {
-        rows: rows,
-        totalLines: rows.length,
-        startLine: start || 1,
-      };
-    }
-
-    // Defensive extractor for list_agents / list_teams responses.
-    // MCP tool responses arrive as an array (or { content: [...] }) of
-    // { type: 'text', text: '<JSON>' } blocks — unwrap those, then
-    // JSON-parse the joined text, before looking for the list.
-    function extractCnList(resp, key) {
-      var text = unwrapMcpText(resp);
-      if (text !== null) {
-        try { return extractCnList(JSON.parse(text), key); } catch (e) { /* not JSON */ }
-      }
-      if (Array.isArray(resp)) return resp;
-      if (resp && typeof resp === 'object') {
-        if (Array.isArray(resp[key])) return resp[key];
-        if (Array.isArray(resp.items)) return resp.items;
-      }
-      if (typeof resp === 'string') {
-        try {
-          var parsed = JSON.parse(resp);
-          return extractCnList(parsed, key);
-        } catch (e) { /* not JSON */ }
-      }
-      return [];
-    }
-
-    // If `resp` looks like an MCP text-content envelope, join the text
-    // blocks and return the concatenated string. Returns null if this
-    // wasn't an envelope. Callers JSON.parse if they expect JSON —
-    // WebSearch etc. use the raw string as-is.
-    function unwrapMcpText(resp) {
-      var blocks = null;
-      if (Array.isArray(resp)) blocks = resp;
-      else if (resp && typeof resp === 'object' && Array.isArray(resp.content)) blocks = resp.content;
-      if (!blocks || blocks.length === 0) return null;
-      for (var i = 0; i < blocks.length; i++) {
-        if (!blocks[i] || typeof blocks[i].text !== 'string') return null;
-      }
-      return blocks.map(function(b) { return b.text; }).join('');
-    }
-
-    // Pull tool names out of a ToolSearch response. The tool returns a
-    // <functions>...</functions> block with one <function>{...}</function>
-    // per match; the JSON carries a top-level "name" field per tool.
-    function extractToolSearchNames(text) {
-      var names = [];
-      if (!text) return names;
-      var rx = /"name"\s*:\s*"([^"]+)"/g;
-      var m;
-      while ((m = rx.exec(text))) {
-        names.push(m[1]);
-        if (names.length >= 100) break;
-      }
-      return names;
-    }
-
-    // Pull a best-effort [{ title, url, snippet }] list out of the many
-    // shapes WebSearch responses can take. The tool returns either a
-    // plain string (the canonical "Web search results for query: ...\n\n
-    // Links: [...]\n\n...snippets...") or a structured object; be
-    // defensive so one format change doesn't silently blank the view.
-    function extractWebSearchResults(resp) {
-      var out = [];
-      if (!resp) return out;
-      var unwrapped = unwrapMcpText(resp);
-      if (unwrapped !== null) {
-        try { return extractWebSearchResults(JSON.parse(unwrapped)); }
-        catch (e) { return extractWebSearchResults(unwrapped); }
-      }
-      // Claude Code's native WebSearch shape:
-      //   { query, results: [ {tool_use_id, content: [{title,url},…]}, "<AI summary>", … ] }
-      // The `results` array is heterogeneous — objects with a nested
-      // content list, plus plain strings for the prose summary.
-      if (typeof resp === 'object' && !Array.isArray(resp) && Array.isArray(resp.results)) {
-        for (var ri = 0; ri < resp.results.length; ri++) {
-          var entry = resp.results[ri];
-          if (entry && typeof entry === 'object' && Array.isArray(entry.content)) {
-            for (var ci = 0; ci < entry.content.length; ci++) {
-              var c = entry.content[ci];
-              if (c && (c.url || c.link)) {
-                out.push({
-                  title: c.title || '',
-                  url: c.url || c.link,
-                  snippet: c.snippet || c.description || '',
-                });
-              }
-            }
-          } else if (entry && typeof entry === 'object' && (entry.url || entry.link)) {
-            out.push({
-              title: entry.title || '',
-              url: entry.url || entry.link,
-              snippet: entry.snippet || entry.description || '',
-            });
-          }
-        }
-        if (out.length) return out;
-      }
-      // Fall-through envelopes.
-      if (typeof resp === 'object' && !Array.isArray(resp)) {
-        if (typeof resp.output === 'string') return extractWebSearchResults(resp.output);
-        if (typeof resp.text === 'string') return extractWebSearchResults(resp.text);
-        var arr = Array.isArray(resp.links) ? resp.links : null;
-        if (arr) {
-          for (var i = 0; i < arr.length; i++) {
-            var r = arr[i] || {};
-            if (r.url || r.link) {
-              out.push({
-                title: r.title || r.name || '',
-                url: r.url || r.link,
-                snippet: r.snippet || r.description || r.summary || '',
-              });
-            }
-          }
-          if (out.length) return out;
-        }
-      }
-      if (Array.isArray(resp)) {
-        for (var j = 0; j < resp.length; j++) {
-          var rr = resp[j] || {};
-          if (rr.url || rr.link) {
-            out.push({
-              title: rr.title || '',
-              url: rr.url || rr.link,
-              snippet: rr.snippet || rr.description || '',
-            });
-          }
-        }
-        if (out.length) return out;
-      }
-      // Fall through: parse the string form.
-      var text = typeof resp === 'string' ? resp : '';
-      if (!text) return out;
-      // Pull the JSON array that follows "Links:".
-      var m = text.match(/Links:\s*(\[[\s\S]*?\])\s*\n/);
-      if (m) {
-        try {
-          var links = JSON.parse(m[1]);
-          if (Array.isArray(links)) {
-            for (var k = 0; k < links.length; k++) {
-              var l = links[k] || {};
-              if (l.url) {
-                out.push({ title: l.title || '', url: l.url, snippet: '' });
-              }
-            }
-          }
-        } catch (e) { /* ignore */ }
-      }
-      return out;
-    }
-
-    function hostFromUrl(u) {
-      if (!u) return '';
-      try { return new URL(u).host; } catch (e) { return u; }
-    }
-
-    // Collapse WebSearch's possibly-wrapped response into a single text
-    // string. Handles plain strings, MCP envelopes, { output } / { text }
-    // objects, and falls back to JSON.stringify for anything else.
-    function toWebSearchText(resp) {
-      if (typeof resp === 'string') return resp;
-      var unwrapped = unwrapMcpText(resp);
-      if (unwrapped !== null) return unwrapped;
-      if (resp && typeof resp === 'object') {
-        if (typeof resp.output === 'string') return resp.output;
-        if (typeof resp.text === 'string') return resp.text;
-      }
-      return tryJson(resp);
-    }
-
-    // Pull the AI-generated summary out of a WebSearch response. The
-    // native shape puts one or more prose strings inside resp.results
-    // alongside the link objects; the legacy string shape had the
-    // prose follow a "Links: [...]" line. Trailing "REMINDER: ..."
-    // sentinel text gets trimmed in either case.
-    function extractWebSearchSummary(resp) {
-      if (!resp) return '';
-      var raw = '';
-      if (typeof resp === 'object' && !Array.isArray(resp) && Array.isArray(resp.results)) {
-        var chunks = [];
-        for (var i = 0; i < resp.results.length; i++) {
-          var r = resp.results[i];
-          if (typeof r === 'string') chunks.push(r);
-        }
-        raw = chunks.join('\n\n');
-      } else if (typeof resp === 'string') {
-        var m = resp.match(/Links:\s*\[[\s\S]*?\]\s*\n+([\s\S]*)$/);
-        raw = m ? m[1] : resp;
-      }
-      return raw.replace(/\n+REMINDER:[\s\S]*$/i, '').trim();
-    }
+    // Bridges to the extracted parsers module served at /dashboard/parsers.js.
+    // The <script type="module"> in <head> assigns them to window.Parsers.
+    function parseReadContent(resp)       { return window.Parsers.parseReadContent(resp); }
+    function parseReadTextLines(text)     { return window.Parsers.parseReadTextLines(text); }
+    function extractCnList(resp, key)     { return window.Parsers.extractCnList(resp, key); }
+    function unwrapMcpText(resp)          { return window.Parsers.unwrapMcpText(resp); }
+    function extractToolSearchNames(text) { return window.Parsers.extractToolSearchNames(text); }
+    function extractWebSearchResults(resp){ return window.Parsers.extractWebSearchResults(resp); }
+    function hostFromUrl(u)               { return window.Parsers.hostFromUrl(u); }
+    function toWebSearchText(resp)        { return window.Parsers.toWebSearchText(resp); }
+    function extractWebSearchSummary(resp){ return window.Parsers.extractWebSearchSummary(resp); }
 
     // Render an unknown tool with a clear "no custom view yet" note.
     function renderUnknownToolCall(payload, el) {
@@ -4019,7 +3406,7 @@
     function sendInject(text) {
       if (!text || !text.trim()) return;
       var errEl = document.getElementById('mirror-compose-err');
-      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject?t=' + encodeURIComponent(token), {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, watcher: 'web-button' })
@@ -4065,7 +3452,6 @@
       renderThinking();
     }
 
-    var isOwner = false;
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
@@ -4074,13 +3460,6 @@
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
       }
-      isOwner = msg.token_type === 'owner';
-      var shareBtn = document.getElementById('mirror-share-btn');
-      if (shareBtn) shareBtn.style.display = isOwner ? '' : 'none';
-      var stopBtn = document.getElementById('mirror-stop-btn');
-      if (stopBtn) stopBtn.style.display = isOwner ? '' : 'none';
-      var compose = document.getElementById('mirror-compose');
-      if (compose && !isOwner) compose.classList.add('compose-hidden');
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       userScrolledUp = false;  // fresh init → start at bottom
@@ -4094,9 +3473,11 @@
 
     var mws = null;
     var mReconnectTimer = null;
+    var teardownCalled = false;
     function mConnect() {
+      if (teardownCalled) return;
       var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      var url = proto + '//' + location.host + '/ws/mirror/' + encodeURIComponent(sid) + '?t=' + encodeURIComponent(token);
+      var url = proto + '//' + location.host + '/ws/mirror/' + encodeURIComponent(sid);
       try {
         mws = new WebSocket(url);
       } catch (e) {
@@ -4107,6 +3488,8 @@
       }
       mws.onopen = function() { setConnState('live'); statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
       mws.onmessage = function(e) {
+        // Guard against late frames from a prior attach.
+        if (activeAgentSid !== sid) return;
         var msg;
         try { msg = JSON.parse(e.data); } catch { return; }
         if (msg.event === 'mirror:init') applyInit(msg);
@@ -4119,12 +3502,26 @@
       };
       mws.onclose = function() {
         setConnState('offline');
+        if (teardownCalled) return;
         if (mReconnectTimer) return;
         mReconnectTimer = setTimeout(function() { mReconnectTimer = null; mConnect(); }, 3000);
       };
       mws.onerror = function() { /* close will follow */ };
     }
     mConnect();
+
+    // Wire up the teardown closure so a subsequent attach (or detach) can
+    // shut this session down cleanly.
+    mirrorTeardown = function() {
+      teardownCalled = true;
+      if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
+      if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
+      try { if (mws) mws.close(); } catch (e) { /* ignore */ }
+      mws = null;
+      if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
+      if (transcriptEl) transcriptEl.innerHTML = '';
+      if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
+    };
 
     // Compose box (remote inject). Shown because we have an owner token —
     // reader-token UX lands in Phase M3.
@@ -4167,7 +3564,7 @@
       composeErr.textContent = '';
       var useLargeBlobPath = size > injectMaxBytes;
       var endpoint = useLargeBlobPath ? '/paste' : '/inject';
-      fetch('/api/mirror/' + encodeURIComponent(sid) + endpoint + '?t=' + encodeURIComponent(token), {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, watcher: 'web' })
@@ -4232,7 +3629,7 @@
     var slashFiltered = [];        // current filtered view
     var slashActiveIdx = 0;
     var slashOpen = false;
-    fetch('/api/mirror/' + encodeURIComponent(sid) + '/commands?t=' + encodeURIComponent(token))
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/commands')
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(j) {
         if (j && Array.isArray(j.commands)) slashCommands = j.commands;
@@ -4397,7 +3794,7 @@
     if (stopBtn) {
       stopBtn.addEventListener('click', function() {
         stopBtn.disabled = true;
-        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop?t=' + encodeURIComponent(token), { method: 'POST' })
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', { method: 'POST' })
           .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
           .then(function(r) {
             stopBtn.disabled = false;
@@ -4410,35 +3807,6 @@
       });
     }
 
-    var shareBtn = document.getElementById('mirror-share-btn');
-    if (shareBtn) {
-      shareBtn.addEventListener('click', function() {
-        shareBtn.disabled = true;
-        fetch('/api/mirror/' + encodeURIComponent(sid) + '/share?t=' + encodeURIComponent(token), { method: 'POST' })
-          .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
-          .then(function(r) {
-            shareBtn.disabled = false;
-            if (r.status >= 400) {
-              statusEl.className = 'mirror-status error';
-              statusEl.textContent = (r.body && r.body.error) || 'share failed';
-              return;
-            }
-            var url = r.body.mirror_url;
-            if (url) {
-              if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(url).catch(function() { /* ignore */ });
-              }
-              statusEl.className = 'mirror-status';
-              statusEl.textContent = 'reader link copied: ' + url;
-            }
-          })
-          .catch(function(err) {
-            shareBtn.disabled = false;
-            statusEl.className = 'mirror-status error';
-            statusEl.textContent = 'share failed: ' + (err && err.message ? err.message : err);
-          });
-      });
-    }
   }
 
   function tryJson(v) {

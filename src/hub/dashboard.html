@@ -2653,21 +2653,16 @@
       Read: {
         call: function(p, el) {
           var fp = p.input && p.input.file_path;
-          var offset = p.input && p.input.offset;
-          var limit = p.input && p.input.limit;
-          var range = (typeof offset === 'number' || typeof limit === 'number')
-            ? 'lines ' + (offset || 1) + '–' + ((offset || 1) + (limit || 0) - 1)
-            : null;
           el.innerHTML = makeHeadline('Read',
-            '<span title="' + escapeAttr(fp || '') + '">' + escapeHtml(shortPath(fp || '')) + '</span>',
-            range);
+            '<span title="' + escapeAttr(fp || '') + '">' + escapeHtml(shortPath(fp || '')) + '</span>');
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'read'); }
-          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
-          var text = String(resp || '');
-          var rows = parseReadRows(text);
-          var totalLines = rows.length || (text ? text.split('\n').length : 0);
+          var parsed = parseReadContent(p.response);
+          var rows = parsed.rows;
+          var total = parsed.totalLines || rows.length;
+          var start = parsed.startLine;
+          var end = rows.length ? Number(rows[rows.length - 1].n) : start;
           var MAX = 60;
           var shown = rows.slice(0, MAX);
           var body = '<div class="m-diff-v2 m-read-body">';
@@ -2687,8 +2682,15 @@
               '</div>';
           }
           body += '</div>';
-          appendDetails(el, totalLines + ' line' + (totalLines === 1 ? '' : 's'),
-            body);
+          var summary;
+          if (rows.length === 0) {
+            summary = '(empty)';
+          } else if (rows.length < total) {
+            summary = 'lines ' + start + '–' + end + ' of ' + total;
+          } else {
+            summary = total + ' line' + (total === 1 ? '' : 's');
+          }
+          appendDetails(el, summary, body);
         },
       },
       Bash: {
@@ -3537,26 +3539,61 @@
       };
     }
 
-    // Parse `cat -n` style Read output: "    N\tcontent" per line.
-    // Falls back to synthetic 1-based numbering if the format isn't seen.
-    function parseReadRows(text) {
-      if (!text) return [];
+    // Read's PostToolUse payload ships a structured object:
+    //   { type: 'text', file: { filePath, content, startLine, numLines, totalLines } }
+    // but the older cat -n string form still turns up in orphan-result
+    // paths and redacted fallbacks. Normalise to { rows, totalLines,
+    // startLine } and let callers render.
+    function parseReadContent(resp) {
+      if (resp && typeof resp === 'object' && !Array.isArray(resp)) {
+        var f = resp.file;
+        if (f && typeof f.content === 'string') {
+          var start = typeof f.startLine === 'number' ? f.startLine : 1;
+          var lines = f.content.split('\n');
+          if (lines.length && lines[lines.length - 1] === '') lines.pop();
+          var rows = [];
+          for (var i = 0; i < lines.length; i++) {
+            rows.push({ n: String(start + i), text: lines[i] });
+          }
+          return {
+            rows: rows,
+            totalLines: typeof f.totalLines === 'number' ? f.totalLines : rows.length,
+            startLine: start,
+          };
+        }
+        var unwrapped = unwrapMcpText(resp);
+        if (unwrapped !== null) {
+          try { return parseReadContent(JSON.parse(unwrapped)); }
+          catch (e) { return parseReadTextLines(unwrapped); }
+        }
+      }
+      if (typeof resp === 'string') return parseReadTextLines(resp);
+      return { rows: [], totalLines: 0, startLine: 1 };
+    }
+
+    // Fallback for the cat -n string shape, or raw text with no line
+    // prefixes at all — synthesise 1-based numbering.
+    function parseReadTextLines(text) {
+      if (!text) return { rows: [], totalLines: 0, startLine: 1 };
       var lines = text.split('\n');
-      // Drop the trailing empty from a file ending in newline.
       if (lines.length && lines[lines.length - 1] === '') lines.pop();
       var rows = [];
       var rx = /^\s*(\d+)\t(.*)$/;
-      var matched = 0;
+      var start = null;
       for (var i = 0; i < lines.length; i++) {
         var m = lines[i].match(rx);
         if (m) {
-          matched++;
+          if (start === null) start = Number(m[1]);
           rows.push({ n: m[1], text: m[2] });
         } else {
           rows.push({ n: String(i + 1), text: lines[i] });
         }
       }
-      return rows;
+      return {
+        rows: rows,
+        totalLines: rows.length,
+        startLine: start || 1,
+      };
     }
 
     // Defensive extractor for list_agents / list_teams responses.

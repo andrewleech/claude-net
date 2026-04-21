@@ -2144,47 +2144,81 @@
     return m ? m[1] : null;
   }
 
+  // Rows are keyed off mirror sessions (one row per sid). MCP agents
+  // that have no mirror session (messaging-only registrations) get an
+  // extra row at the end of their host group. This handles the case
+  // where several claude processes in the same cwd share one
+  // owner_agent — each session gets its own row regardless.
   function renderAgents() {
-    // Bucket sessions by host.
-    var byHost = new Map();
-    var orphans = [];
-    agents.forEach(function(ag) {
-      var hid = hostIdForAgent(ag.fullName);
-      if (hid && hosts.has(hid)) {
-        if (!byHost.has(hid)) byHost.set(hid, []);
-        byHost.get(hid).push(ag);
+    // Bucket mirror sessions by host (derived from owner_agent's user@host
+    // suffix). Skip closed sessions.
+    var sessionsByHost = new Map();
+    var sessionOrphans = [];
+    mirrorBySid.forEach(function(sess) {
+      if (sess.closed_at) return;
+      var hid = hostIdForAgent(sess.owner_agent);
+      var target = hid && hosts.has(hid) ? sessionsByHost : null;
+      if (target) {
+        if (!sessionsByHost.has(hid)) sessionsByHost.set(hid, []);
+        sessionsByHost.get(hid).push(sess);
       } else {
-        orphans.push(ag);
+        sessionOrphans.push(sess);
       }
     });
 
-    // Sort each host's sessions by last_event_at DESC then name.
-    var agentSort = function(a, b) {
-      if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
-      var ma = a.mirrorSid ? 0 : 1, mb = b.mirrorSid ? 0 : 1;
-      if (ma !== mb) return ma - mb;
-      if (a.mirrorSid && b.mirrorSid) {
-        var ea = (mirrorBySid.get(a.mirrorSid) || {}).last_event_at || '';
-        var eb = (mirrorBySid.get(b.mirrorSid) || {}).last_event_at || '';
-        if (ea !== eb) return eb.localeCompare(ea);
+    // MCP agents that aren't the owner of any live mirror session —
+    // these are messaging-only registrations. Render at the tail of
+    // their host group (or the Other group if host unknown).
+    var agentsWithMirror = new Set();
+    mirrorBySid.forEach(function(sess) {
+      if (!sess.closed_at) agentsWithMirror.add(sess.owner_agent);
+    });
+    var mcpByHost = new Map();
+    var mcpOrphans = [];
+    agents.forEach(function(ag) {
+      if (agentsWithMirror.has(ag.fullName)) return;
+      var hid = hostIdForAgent(ag.fullName);
+      if (hid && hosts.has(hid)) {
+        if (!mcpByHost.has(hid)) mcpByHost.set(hid, []);
+        mcpByHost.get(hid).push(ag);
+      } else {
+        mcpOrphans.push(ag);
       }
+    });
+
+    // Within each host, sort sessions by last_event_at DESC (busiest first),
+    // then by sid so ordering is stable.
+    var sessionSort = function(a, b) {
+      var ea = a.last_event_at || '', eb = b.last_event_at || '';
+      if (ea !== eb) return eb.localeCompare(ea);
+      return (a.sid || '').localeCompare(b.sid || '');
+    };
+    sessionsByHost.forEach(function(list) { list.sort(sessionSort); });
+    sessionOrphans.sort(sessionSort);
+    var mcpSort = function(a, b) {
+      if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
       return a.fullName.localeCompare(b.fullName);
     };
-    byHost.forEach(function(list) { list.sort(agentSort); });
-    orphans.sort(agentSort);
+    mcpByHost.forEach(function(list) { list.sort(mcpSort); });
+    mcpOrphans.sort(mcpSort);
 
-    // Sort hosts: online first, then by most-recent session activity, then by name.
+    // Host ordering: online first, then by their busiest session's
+    // last_event_at DESC, then alphabetical.
     var hostIds = Array.from(hosts.keys()).sort(function(a, b) {
       var ha = hosts.get(a), hb = hosts.get(b);
       if (ha.online !== hb.online) return ha.online ? -1 : 1;
-      var la = (byHost.get(a) || []).map(function(ag) {
-        return (mirrorBySid.get(ag.mirrorSid) || {}).last_event_at || '';
-      }).sort().pop() || '';
-      var lb = (byHost.get(b) || []).map(function(ag) {
-        return (mirrorBySid.get(ag.mirrorSid) || {}).last_event_at || '';
-      }).sort().pop() || '';
+      var la = ((sessionsByHost.get(a) || [])[0] || {}).last_event_at || '';
+      var lb = ((sessionsByHost.get(b) || [])[0] || {}).last_event_at || '';
       if (la !== lb) return lb.localeCompare(la);
       return a.localeCompare(b);
+    });
+
+    // Count sessions per owner_agent — when > 1, labels get a sid-suffix
+    // for disambiguation (e.g. "claude-net · ab12cd").
+    var ownerCounts = {};
+    mirrorBySid.forEach(function(sess) {
+      if (sess.closed_at) return;
+      ownerCounts[sess.owner_agent] = (ownerCounts[sess.owner_agent] || 0) + 1;
     });
 
     var homeActive = activeAgentSid ? '' : ' active';
@@ -2195,16 +2229,18 @@
       + '<span class="agent-name">Message log</span>'
       + '</a>';
 
-    // Hosts + their sessions
     for (var h = 0; h < hostIds.length; h++) {
       var hid = hostIds[h];
       var host = hosts.get(hid);
       html += renderHostRow(host);
-      var sessions = byHost.get(hid) || [];
+      var sessions = sessionsByHost.get(hid) || [];
       for (var s = 0; s < sessions.length; s++) {
-        html += renderAgentRow(sessions[s]);
+        html += renderSessionRow(sessions[s], ownerCounts);
       }
-      // Ghost rows for launches still waiting on mirror:session_started
+      var extras = mcpByHost.get(hid) || [];
+      for (var e = 0; e < extras.length; e++) {
+        html += renderMcpOnlyRow(extras[e]);
+      }
       for (var p = 0; p < pendingLaunches.length; p++) {
         if (pendingLaunches[p].hostId === hid) {
           html += renderGhostLaunch(pendingLaunches[p]);
@@ -2212,11 +2248,14 @@
       }
     }
 
-    // Orphan sessions (no host registered)
-    if (orphans.length > 0) {
+    // Orphan sessions/agents (no host registered).
+    if (sessionOrphans.length + mcpOrphans.length > 0) {
       html += '<div class="cn-host-header">Other</div>';
-      for (var o = 0; o < orphans.length; o++) {
-        html += renderAgentRow(orphans[o]);
+      for (var o = 0; o < sessionOrphans.length; o++) {
+        html += renderSessionRow(sessionOrphans[o], ownerCounts);
+      }
+      for (var k = 0; k < mcpOrphans.length; k++) {
+        html += renderMcpOnlyRow(mcpOrphans[k]);
       }
     }
 
@@ -2237,34 +2276,46 @@
     );
   }
 
-  function renderAgentRow(ag) {
-    var clickable = !!ag.mirrorSid;
-    var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
-    var inactiveCls = clickable ? '' : ' is-inactive';
-    var dotState = ag.status === 'offline'
-      ? 'offline'
-      : (clickable ? 'online' : 'no-mirror');
-    var hint = '';
-    if (!clickable && ag.status !== 'offline') {
-      hint = '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
-    } else if (ag.status === 'offline') {
-      hint = '<span class="row-hint">offline</span>';
+  // Row for a mirror session (clickable, opens the mirror view).
+  // Label = owner_agent's short name, suffixed with sid-tail when
+  // multiple sessions share an owner so the user can tell them apart.
+  function renderSessionRow(sess, ownerCounts) {
+    var activeCls = sess.sid === activeAgentSid ? ' active' : '';
+    var shortMatch = String(sess.owner_agent || '').match(/^([^:]+):/);
+    var label = shortMatch ? shortMatch[1] : sess.owner_agent;
+    var suffix = '';
+    if ((ownerCounts[sess.owner_agent] || 0) > 1) {
+      suffix = ' · ' + String(sess.sid || '').slice(0, 6);
     }
-    var tag = clickable ? 'a' : 'div';
-    var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
-    // Session label = short name (the bit before :user@host) for legibility
-    // under a host row; falls back to fullName when no : is present.
-    var m = String(ag.fullName || '').match(/^([^:]+):/);
-    var label = m ? m[1] : ag.fullName;
     return (
-      '<' + tag + ' class="list-group-item list-group-item-action agent-item cn-host-child' + activeCls + inactiveCls + '"'
-      + href
-      + ' data-sid="' + escapeAttr(ag.mirrorSid || '') + '"'
+      '<a class="list-group-item list-group-item-action agent-item cn-host-child' + activeCls + '"'
+      + ' href="#agent=' + encodeURIComponent(sess.sid) + '"'
+      + ' data-sid="' + escapeAttr(sess.sid) + '"'
+      + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
+      + '<span class="agent-dot online"></span>'
+      + '<span class="agent-name">' + escapeHtml(label + suffix) + '</span>'
+      + '</a>'
+    );
+  }
+
+  // Row for an MCP agent that has no live mirror session — messaging-
+  // only registration. Not clickable; dim text so the user can see why
+  // the row exists but doesn't interact.
+  function renderMcpOnlyRow(ag) {
+    var offline = ag.status === 'offline';
+    var shortMatch = String(ag.fullName || '').match(/^([^:]+):/);
+    var label = shortMatch ? shortMatch[1] : ag.fullName;
+    var hint = offline
+      ? '<span class="row-hint">offline</span>'
+      : '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
+    return (
+      '<div class="list-group-item agent-item cn-host-child is-inactive"'
+      + ' data-sid=""'
       + ' data-name="' + escapeAttr(ag.fullName) + '">'
-      + '<span class="agent-dot ' + dotState + '"></span>'
+      + '<span class="agent-dot ' + (offline ? 'offline' : 'no-mirror') + '"></span>'
       + '<span class="agent-name">' + escapeHtml(label) + '</span>'
       + hint
-      + '</' + tag + '>'
+      + '</div>'
     );
   }
 

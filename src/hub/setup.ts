@@ -44,7 +44,7 @@ SETTINGS="\$HOME/.claude/settings.json"
 
 mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude"
 
-echo "[1/4] Downloading claude-channels + mirror binaries from \$HUB…"
+echo "[1/4] Downloading claude-channels + mirror binaries from \${HUB}…"
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
          patch-binary.py mirror-agent.bundle.js; do
     curl -fsSL "\$HUB/bin/\$f" -o "\$INSTALL_DIR/\$f"
@@ -73,7 +73,7 @@ claude mcp add \\
     claude-net -- bash -c 'P=\$(mktemp /tmp/claude-net-plugin.XXXXXX.ts) && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"' \\
     2>&1 | grep -v "already configured" || true
 
-echo "[3/4] Merging mirror hooks into \$SETTINGS…"
+echo "[3/4] Merging mirror hooks into \${SETTINGS}…"
 if [ ! -f "\$SETTINGS" ]; then
     echo '{}' > "\$SETTINGS"
 fi

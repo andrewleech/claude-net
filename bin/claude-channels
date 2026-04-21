@@ -133,6 +133,24 @@ if [ ! -f "$PATCHED_VERSIONED" ]; then
         fi
     fi
 
+    # On macOS, the in-place byte patches invalidate Apple's code
+    # signature; AMFI then silently kills the binary at exec ("zsh:
+    # killed" with no other output). Ad-hoc re-sign with preserved
+    # entitlements so Bun's JIT / dylib loading still works.
+    if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ] && [ -f "$PATCHED_VERSIONED" ] \
+        && [ "$(uname -s)" = "Darwin" ] \
+        && command -v codesign >/dev/null 2>&1; then
+        if ! codesign --force \
+            --preserve-metadata=entitlements,requirements,flags,runtime \
+            --sign - "$PATCHED_VERSIONED" 2>/dev/null; then
+            # Some binaries don't have enough metadata to preserve —
+            # fall back to a bare ad-hoc sign.
+            codesign --force --sign - "$PATCHED_VERSIONED" 2>/dev/null || {
+                echo "WARN: codesign failed — macOS AMFI may kill the patched binary at exec." >&2
+            }
+        fi
+    fi
+
     # Clean up old versioned files (keep current + any fallback target)
     if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ]; then
         find "$CACHE_DIR" -name 'claude-patched-*' \

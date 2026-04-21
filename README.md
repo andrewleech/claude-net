@@ -174,6 +174,35 @@ curl -fsSL <hub>/setup | bash
 
 The installer retires the stale daemon (`pkill` + remove `/tmp/claude-net/mirror-agent-*.port`) and the next `claude-channels` launch respawns against the new bundle. If you can't rerun the installer, the manual equivalent is `pkill -f claude-net-mirror-agent && rm -f /tmp/claude-net/mirror-agent-*.port` followed by a fresh `claude-channels` launch.
 
+**Orphan sessions.** Mirror sessions don't auto-close when a claude process exits without a clean `session_end`, or when `/clear` starts a fresh session_id and leaves the previous one behind. The hub runs a sweep every minute that closes sessions whose daemon-agent WS has been unbound AND whose last event is older than `orphanCloseMs` (default 30 min). Still-live sessions are never touched.
+
+## Launching sessions from the web
+
+Every host running `claude-channels` opens a long-lived control socket to the hub (`/ws/host`) separate from the per-session mirror sockets. The dashboard sidebar groups sessions under their host and exposes a **`+ launch`** button per host. Clicking it opens a modal with:
+
+- A text input with live autocomplete. As you type, the hub fetches `GET /api/host/<id>/ls?path=<parent>` and the dashboard filters results by the trailing segment. Tab completes to the common prefix; arrow-keys + Enter pick; tap-to-drill on mobile (tapping a directory auto-appends `/` and re-fetches).
+- A "recent" section at the top with the host's last-used cwds when the input is empty.
+- A `+ create "<path>"` row when the typed path doesn't exist — picks it, mkdir's via `POST /api/host/<id>/mkdir`, then launches.
+- A `Skip permission prompts` checkbox (default checked). When checked, the launched `claude-channels` runs with `--dangerously-skip-permissions`.
+
+Picking Launch POSTs `/api/host/<id>/launch`. The daemon runs `tmux new-session -d -s claude-channels-<uuid> -c <cwd> -- claude-channels [--dangerously-skip-permissions]` as the current user. The new session's first hook registers a mirror with the hub and the dashboard replaces its "launching…" ghost row with the real session within a second or two.
+
+Config lives in `~/.claude/settings.json` under `claudeNet.workspaces` (which paths the daemon allows ls/mkdir/launch inside) and `claudeNet.launch` (whether web launches may include the dangerous skip flag):
+
+```json
+{
+  "claudeNet": {
+    "workspaces": { "roots": ["~/projects"] },
+    "launch":     { "allow_dangerous_skip": true }
+  }
+}
+```
+
+- `workspaces.roots` defaults to `["~/projects"]` when unset. Every roots-path is realpath'd on load; `ls` / `mkdir` / `launch` reject any request whose resolved path isn't inside one of the realpath-roots. Symlink escape is blocked by realpath containment; `..` escape is blocked by `path.resolve`. Paths are passed as argv to `tmux` (never shell-interpolated), so there's no command-injection surface through the cwd.
+- `launch.allow_dangerous_skip` defaults to `true`. Setting it to `false` makes the daemon strip `--dangerously-skip-permissions` from web-launched sessions and reject launch requests that asked for it. The dashboard hides the checkbox for hosts advertising `false` during `host_register`.
+
+**Trust-model note.** Launching from the web is a larger capability than streaming transcripts — the hub can cause new processes on your machine. Two gates keep this tractable under the existing trusted-network assumption: (1) the allowlist prevents launches anywhere outside your configured roots, and (2) launch requests are rate-limited to 1 per 5 s + 10 per hour per host. The hub itself must remain behind IP-whitelisted Traefik / LAN-only exposure / Tailscale — a public hub would let anyone reach `/api/host/<id>/launch`.
+
 ## How it works
 
 The hub is a single Bun process running Elysia. It holds an in-memory registry of connected agents and team memberships, resolves names, and forwards messages. Each Claude Code session runs a plugin (`src/plugin/plugin.ts`) as an MCP stdio subprocess — it opens a WebSocket to the hub, exposes messaging tools to Claude, and pushes inbound messages in as `<channel>` notifications.

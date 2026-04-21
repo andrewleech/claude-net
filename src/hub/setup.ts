@@ -84,7 +84,7 @@ claude mcp add \\
     claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"' \\
     2>&1 | grep -v "already configured" || true
 
-echo "[3/4] Merging mirror hooks into \${SETTINGS}…"
+echo "[3/4] Merging mirror hooks + launch config into \${SETTINGS}…"
 if [ ! -f "\$SETTINGS" ]; then
     echo '{}' > "\$SETTINGS"
 fi
@@ -108,6 +108,17 @@ for ev in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
             existing.append(entry)
     else:
         d["hooks"][ev] = [entry]
+
+# Seed claudeNet.workspaces + claudeNet.launch when absent so users
+# can discover + edit them from settings.json. Don't overwrite existing
+# user configuration.
+d.setdefault("claudeNet", {})
+cn = d["claudeNet"]
+if "workspaces" not in cn:
+    cn["workspaces"] = {"roots": ["~/projects"]}
+if "launch" not in cn:
+    cn["launch"] = {"allow_dangerous_skip": True}
+
 tmp = settings_path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(d, f, indent=2)

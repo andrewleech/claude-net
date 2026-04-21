@@ -335,6 +335,49 @@ export interface HostRegisterFrame {
   allow_dangerous_skip: boolean;
 }
 
+// Hub → daemon RPC requests, all replied to by the matching _done frame.
+export interface HostLsRequest {
+  action: "host_ls";
+  request_id: string;
+  path: string;
+}
+
+export interface HostMkdirRequest {
+  action: "host_mkdir";
+  request_id: string;
+  path: string;
+}
+
+export interface HostLaunchRequest {
+  action: "host_launch";
+  request_id: string;
+  cwd: string;
+  create_if_missing?: boolean;
+  skip_permissions?: boolean;
+}
+
+export interface HostLsDoneFrame {
+  action: "host_ls_done";
+  request_id: string;
+  entries?: Array<{ name: string; is_dir: boolean }>;
+  error?: string;
+}
+
+export interface HostMkdirDoneFrame {
+  action: "host_mkdir_done";
+  request_id: string;
+  ok?: boolean;
+  error?: string;
+}
+
+export interface HostLaunchDoneFrame {
+  action: "host_launch_done";
+  request_id: string;
+  ok?: boolean;
+  tmux_session?: string;
+  error?: string;
+}
+
 export interface HostConnectedEvent {
   event: "host:connected";
   host_id: string;

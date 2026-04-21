@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
 import { binServerPlugin } from "./bin-server";
+import { hostPlugin } from "./host";
 import { HostRegistry } from "./host-registry";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
@@ -84,6 +85,7 @@ let app = new Elysia()
   })
   .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
   .use(mirrorPlugin({ mirrorRegistry }))
+  .use(hostPlugin({ hostRegistry }))
   .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));
 

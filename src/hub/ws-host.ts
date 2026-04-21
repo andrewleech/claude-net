@@ -94,8 +94,21 @@ export function wsHostPlugin(app: Elysia, hostRegistry: HostRegistry): Elysia {
         return;
       }
 
-      // Phase B will handle host_ls_done / host_mkdir_done / host_launch_done
-      // responses. For now, unknown frames are ignored.
+      // RPC responses from the daemon — forward to pending resolvers.
+      if (
+        frame.action === "host_ls_done" ||
+        frame.action === "host_mkdir_done" ||
+        frame.action === "host_launch_done"
+      ) {
+        const meta = connMeta.get(ws.raw);
+        if (meta && typeof frame.request_id === "string") {
+          // biome-ignore lint/suspicious/noExplicitAny: validated at runtime by resolveRpc's key check
+          hostRegistry.resolveRpc(meta.hostId, frame as any);
+        }
+        return;
+      }
+
+      // Unknown frames from the daemon are ignored — tolerates version skew.
     },
 
     close(ws: HostWs) {

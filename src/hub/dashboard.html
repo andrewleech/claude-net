@@ -1548,6 +1548,164 @@
   }
   .cn-home-glyph { color: var(--text-dim); font-size: 11px; }
 
+  /* Host grouping — host row + indented session rows + ghost launches. */
+  .cn-host-header {
+    padding: 10px 14px 4px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border-dim);
+  }
+  .cn-host-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    color: var(--text);
+    border-top: 1px solid var(--border-dim);
+  }
+  .cn-host-row.is-offline { color: var(--text-muted); }
+  .cn-host-row .cn-host-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-launch-btn {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+  }
+  .cn-launch-btn:hover { background: var(--accent-ink); }
+  .cn-launch-btn:disabled { opacity: 0.4; cursor: default; }
+  .cn-host-child { padding-left: 22px !important; }
+  .cn-ghost-launch {
+    color: var(--text-dim);
+    font-style: italic;
+    animation: event-flash 1.6s ease-in-out infinite;
+  }
+
+  /* Launch modal — custom (not Bootstrap's) so we can keep the popover
+     interaction compact on mobile. */
+  .cn-launch-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 1060;
+    padding-top: 10vh;
+  }
+  .cn-launch-modal.is-open { display: flex; }
+  .cn-launch-panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    width: min(560px, calc(100vw - 24px));
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .cn-launch-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cn-launch-head .cn-launch-title { flex: 1; font-weight: 600; color: var(--text); letter-spacing: 0.4px; }
+  .cn-launch-close {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 14px;
+    padding: 0 8px;
+    cursor: pointer;
+  }
+  .cn-launch-close:hover { color: var(--accent); border-color: var(--accent); }
+  .cn-launch-body { padding: 10px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .cn-launch-input {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    outline: none;
+  }
+  .cn-launch-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .cn-launch-suggestions {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--border-dim);
+  }
+  .cn-launch-sugg-section {
+    padding: 4px 12px;
+    font-size: 9px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: var(--bg-code);
+  }
+  .cn-launch-sugg-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    cursor: pointer;
+    color: var(--text);
+    border-bottom: 1px solid var(--border-dim);
+  }
+  .cn-launch-sugg-item:hover,
+  .cn-launch-sugg-item.is-active { background: var(--accent-ink); }
+  .cn-launch-sugg-item .sugg-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-launch-sugg-item .sugg-hint { color: var(--text-muted); font-size: 10px; margin-left: 8px; }
+  .cn-launch-sugg-item.cn-launch-create { color: var(--accent); }
+  .cn-launch-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .cn-launch-skip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .cn-launch-submit {
+    background: var(--accent);
+    color: var(--on-accent);
+    border: none;
+    padding: 8px 20px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    margin-left: auto;
+  }
+  .cn-launch-submit:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
+  .cn-launch-error { color: var(--red); font-size: 11px; min-height: 1em; }
+  @media (max-width: 767.98px) {
+    .cn-launch-panel { width: 100vw; max-height: 90vh; }
+    .cn-launch-modal { padding-top: 4vh; }
+    .cn-launch-sugg-item { padding: 12px; min-height: 44px; }
+  }
+
   /* Mirror view inside #main-view. */
   #mirror-view .mirror-transcript {
     flex: 1 1 auto;
@@ -1686,6 +1844,30 @@
   </main>
 </div>
 
+<!-- Launch modal — hidden by default. Opened by clicking a host's "+ launch" -->
+<div class="cn-launch-modal" id="launch-modal" role="dialog" aria-modal="true" aria-label="Launch new Claude session">
+  <div class="cn-launch-panel">
+    <div class="cn-launch-head">
+      <span class="cn-launch-title" id="launch-title">Launch</span>
+      <button type="button" class="cn-launch-close" data-launch-close title="Close">×</button>
+    </div>
+    <div class="cn-launch-body">
+      <input type="text" class="cn-launch-input" id="launch-input"
+             placeholder="~/projects/…"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <div class="cn-launch-suggestions" id="launch-suggestions"></div>
+      <div class="cn-launch-controls">
+        <label class="cn-launch-skip" id="launch-skip-wrap">
+          <input type="checkbox" id="launch-skip" checked>
+          <span>Skip permission prompts</span>
+        </label>
+        <button type="button" class="cn-launch-submit" id="launch-submit" disabled>Launch</button>
+      </div>
+      <div class="cn-launch-error" id="launch-error"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -1711,11 +1893,12 @@
   syncThemeLabel();
 
   // --- Dashboard state ---
-  // Unified sidebar: one row per agent, with a `mirrorSid` field set
-  // when that agent has an active mirror session. Selection drives the
-  // main pane via window.location.hash (#agent=<sid>).
+  // Unified sidebar: sessions are grouped under the host they run on.
+  // Selection drives the main pane via window.location.hash (#agent=<sid>).
   const agents = new Map(); // fullName -> { name, fullName, status, mirrorSid, cwd }
   const mirrorBySid = new Map(); // sid -> { sid, owner_agent, cwd, last_event_at, ... }
+  const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at }
+  const pendingLaunches = []; // { hostId, launchKey, startedAt } — ghost rows replaced by real sessions
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
@@ -1816,6 +1999,27 @@
         break;
       }
 
+      case 'host:connected': {
+        hosts.set(event.host_id, {
+          host_id: event.host_id,
+          user: event.user,
+          hostname: event.hostname,
+          home: event.home,
+          recent_cwds: Array.isArray(event.recent_cwds) ? event.recent_cwds : [],
+          allow_dangerous_skip: !!event.allow_dangerous_skip,
+          online: true,
+          connected_at: event.connected_at,
+        });
+        renderAgents();
+        break;
+      }
+
+      case 'host:disconnected': {
+        var h = hosts.get(event.host_id);
+        if (h) { h.online = false; renderAgents(); }
+        break;
+      }
+
       case 'mirror:event':
       case 'mirror:activity': {
         // Lightweight ping fired by the hub for every recorded mirror event
@@ -1894,15 +2098,37 @@
       .catch(function() { /* ignore */ });
   }
 
-  // --- Render agents (unified sidebar) ---
+  // --- Render agents (unified sidebar, grouped by host) ---
+  //
+  // Structure:
+  //   - "Message log" home row (always first)
+  //   - For each online host: host-row with + launch button, sessions below
+  //   - Sessions whose host isn't in `hosts` appear under an "Other" group
+  //     (covers dashboard@hub and any agent whose daemon hasn't opened
+  //     its /ws/host channel yet)
+  //   - Offline hosts at the bottom, dimmed, launch button disabled
+  function hostIdForAgent(fullName) {
+    // agent fullName format: session:user@host  →  host_id = user@host
+    var m = String(fullName || '').match(/:(.+@[^@]+)$/);
+    return m ? m[1] : null;
+  }
+
   function renderAgents() {
-    // Sort order:
-    //   1. online agents before offline;
-    //   2. agents with an active mirror before those without;
-    //   3. among mirrored agents, most-recent last_event_at first (so the
-    //      busiest session floats to the top and reorders as events arrive);
-    //   4. fall back to alphabetical by fullName for stable ordering.
-    var sorted = Array.from(agents.values()).sort(function(a, b) {
+    // Bucket sessions by host.
+    var byHost = new Map();
+    var orphans = [];
+    agents.forEach(function(ag) {
+      var hid = hostIdForAgent(ag.fullName);
+      if (hid && hosts.has(hid)) {
+        if (!byHost.has(hid)) byHost.set(hid, []);
+        byHost.get(hid).push(ag);
+      } else {
+        orphans.push(ag);
+      }
+    });
+
+    // Sort each host's sessions by last_event_at DESC then name.
+    var agentSort = function(a, b) {
       if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
       var ma = a.mirrorSid ? 0 : 1, mb = b.mirrorSid ? 0 : 1;
       if (ma !== mb) return ma - mb;
@@ -1912,48 +2138,114 @@
         if (ea !== eb) return eb.localeCompare(ea);
       }
       return a.fullName.localeCompare(b.fullName);
+    };
+    byHost.forEach(function(list) { list.sort(agentSort); });
+    orphans.sort(agentSort);
+
+    // Sort hosts: online first, then by most-recent session activity, then by name.
+    var hostIds = Array.from(hosts.keys()).sort(function(a, b) {
+      var ha = hosts.get(a), hb = hosts.get(b);
+      if (ha.online !== hb.online) return ha.online ? -1 : 1;
+      var la = (byHost.get(a) || []).map(function(ag) {
+        return (mirrorBySid.get(ag.mirrorSid) || {}).last_event_at || '';
+      }).sort().pop() || '';
+      var lb = (byHost.get(b) || []).map(function(ag) {
+        return (mirrorBySid.get(ag.mirrorSid) || {}).last_event_at || '';
+      }).sort().pop() || '';
+      if (la !== lb) return lb.localeCompare(la);
+      return a.localeCompare(b);
     });
 
-    // "Home" entry — message log. Highlighted when no agent is selected.
     var homeActive = activeAgentSid ? '' : ' active';
     var html =
-      '<a class="list-group-item list-group-item-action cn-home-row' + homeActive + '"' +
-        ' href="#"' +
-        ' data-sid=""' +
-        ' data-name="__home__">' +
-        '<span class="cn-home-glyph">&gt;</span>' +
-        '<span class="agent-name">Message log</span>' +
-      '</a>';
-    for (var i = 0; i < sorted.length; i++) {
-      var ag = sorted[i];
-      var clickable = !!ag.mirrorSid;
-      var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
-      var inactiveCls = clickable ? '' : ' is-inactive';
-      // Dot state:
-      //   online + mirror   → .online
-      //   online, no mirror → .no-mirror (hollow)
-      //   offline           → .offline
-      var dotState = ag.status === 'offline'
-        ? 'offline'
-        : (clickable ? 'online' : 'no-mirror');
-      var hint = '';
-      if (!clickable && ag.status !== 'offline') {
-        hint = '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
-      } else if (ag.status === 'offline') {
-        hint = '<span class="row-hint">offline</span>';
+      '<a class="list-group-item list-group-item-action cn-home-row' + homeActive + '"'
+      + ' href="#" data-sid="" data-name="__home__">'
+      + '<span class="cn-home-glyph">&gt;</span>'
+      + '<span class="agent-name">Message log</span>'
+      + '</a>';
+
+    // Hosts + their sessions
+    for (var h = 0; h < hostIds.length; h++) {
+      var hid = hostIds[h];
+      var host = hosts.get(hid);
+      html += renderHostRow(host);
+      var sessions = byHost.get(hid) || [];
+      for (var s = 0; s < sessions.length; s++) {
+        html += renderAgentRow(sessions[s]);
       }
-      var tag = clickable ? 'a' : 'div';
-      var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
-      html += '<' + tag + ' class="list-group-item list-group-item-action agent-item' + activeCls + inactiveCls + '"'
-        + href
-        + ' data-sid="' + escapeAttr(ag.mirrorSid || '') + '"'
-        + ' data-name="' + escapeAttr(ag.fullName) + '">'
-        + '<span class="agent-dot ' + dotState + '"></span>'
-        + '<span class="agent-name">' + escapeHtml(ag.fullName) + '</span>'
-        + hint
-        + '</' + tag + '>';
+      // Ghost rows for launches still waiting on mirror:session_started
+      for (var p = 0; p < pendingLaunches.length; p++) {
+        if (pendingLaunches[p].hostId === hid) {
+          html += renderGhostLaunch(pendingLaunches[p]);
+        }
+      }
     }
+
+    // Orphan sessions (no host registered)
+    if (orphans.length > 0) {
+      html += '<div class="cn-host-header">Other</div>';
+      for (var o = 0; o < orphans.length; o++) {
+        html += renderAgentRow(orphans[o]);
+      }
+    }
+
     agentListEl.innerHTML = html;
+  }
+
+  function renderHostRow(host) {
+    var offlineCls = host.online ? '' : ' is-offline';
+    var launchBtn = host.online
+      ? '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" type="button" title="Launch a new claude-channels session on this host">+ launch</button>'
+      : '<span class="row-hint">offline</span>';
+    return (
+      '<div class="cn-host-row' + offlineCls + '">'
+      + '<span class="agent-dot ' + (host.online ? 'online' : 'offline') + '"></span>'
+      + '<span class="cn-host-name">' + escapeHtml(host.user + '@' + host.hostname) + '</span>'
+      + launchBtn
+      + '</div>'
+    );
+  }
+
+  function renderAgentRow(ag) {
+    var clickable = !!ag.mirrorSid;
+    var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
+    var inactiveCls = clickable ? '' : ' is-inactive';
+    var dotState = ag.status === 'offline'
+      ? 'offline'
+      : (clickable ? 'online' : 'no-mirror');
+    var hint = '';
+    if (!clickable && ag.status !== 'offline') {
+      hint = '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
+    } else if (ag.status === 'offline') {
+      hint = '<span class="row-hint">offline</span>';
+    }
+    var tag = clickable ? 'a' : 'div';
+    var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
+    // Session label = short name (the bit before :user@host) for legibility
+    // under a host row; falls back to fullName when no : is present.
+    var m = String(ag.fullName || '').match(/^([^:]+):/);
+    var label = m ? m[1] : ag.fullName;
+    return (
+      '<' + tag + ' class="list-group-item list-group-item-action agent-item cn-host-child' + activeCls + inactiveCls + '"'
+      + href
+      + ' data-sid="' + escapeAttr(ag.mirrorSid || '') + '"'
+      + ' data-name="' + escapeAttr(ag.fullName) + '">'
+      + '<span class="agent-dot ' + dotState + '"></span>'
+      + '<span class="agent-name">' + escapeHtml(label) + '</span>'
+      + hint
+      + '</' + tag + '>'
+    );
+  }
+
+  function renderGhostLaunch(entry) {
+    var ageSec = Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000));
+    return (
+      '<div class="list-group-item cn-host-child cn-ghost-launch">'
+      + '<span class="agent-dot no-mirror"></span>'
+      + '<span class="agent-name">launching — ' + escapeHtml(entry.cwdShort) + '</span>'
+      + '<span class="row-hint">' + ageSec + 's</span>'
+      + '</div>'
+    );
   }
 
   // --- Message log (live tail, ring buffer) ---
@@ -2150,6 +2442,281 @@
       }
     });
   }
+
+  // ── Launch modal wiring (Phase C) ─────────────────────────────────
+  // Click "+ launch" on any host row → open the modal scoped to that host.
+  // Autocomplete fetches /api/host/:id/ls?path=<parent-of-typed-segment>
+  // on every keystroke (debounced), filters by trailing-segment prefix.
+  // Tap / click / Enter picks a suggestion; Tab completes to the common
+  // prefix (desktop only). Submit POSTs /api/host/:id/launch.
+  var launchModal = document.getElementById('launch-modal');
+  var launchInput = document.getElementById('launch-input');
+  var launchSuggEl = document.getElementById('launch-suggestions');
+  var launchSubmitBtn = document.getElementById('launch-submit');
+  var launchSkipChk = document.getElementById('launch-skip');
+  var launchSkipWrap = document.getElementById('launch-skip-wrap');
+  var launchTitleEl = document.getElementById('launch-title');
+  var launchErrorEl = document.getElementById('launch-error');
+  var launchState = {
+    hostId: null,
+    lsCache: {},       // parent-path → [{name, is_dir}]
+    lsCacheExpiry: 0,
+    entries: [],        // currently-displayed suggestion entries
+    activeIdx: -1,
+    fetchInFlight: false,
+    debounceTimer: null,
+    touchMode: false,
+  };
+
+  function openLaunchModal(hostId) {
+    var host = hosts.get(hostId);
+    if (!host || !host.online) return;
+    launchState.hostId = hostId;
+    launchState.lsCache = {};
+    launchTitleEl.textContent = 'Launch in ' + host.user + '@' + host.hostname;
+    launchErrorEl.textContent = '';
+    // Initial input: the most-recent cwd, if any, else ~/projects/
+    var initial = (host.recent_cwds && host.recent_cwds[0]) || '~/projects/';
+    // Expand ~ using the host's home for a full path the user can trim.
+    if (initial.startsWith('~/')) initial = host.home + initial.slice(1);
+    launchInput.value = initial;
+    if (host.allow_dangerous_skip) {
+      launchSkipWrap.style.display = '';
+      launchSkipChk.checked = true;
+    } else {
+      launchSkipWrap.style.display = 'none';
+      launchSkipChk.checked = false;
+    }
+    launchSubmitBtn.disabled = false;
+    launchState.touchMode = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+    launchModal.classList.add('is-open');
+    renderLaunchSuggestions();
+    // Focus the input; on desktop the user can type over the initial value.
+    setTimeout(function() { launchInput.focus(); launchInput.select(); }, 0);
+  }
+
+  function closeLaunchModal() {
+    launchModal.classList.remove('is-open');
+    launchState.hostId = null;
+    if (launchState.debounceTimer) {
+      clearTimeout(launchState.debounceTimer);
+      launchState.debounceTimer = null;
+    }
+  }
+
+  function splitPath(p) {
+    var i = p.lastIndexOf('/');
+    if (i < 0) return { parent: '', tail: p };
+    return { parent: p.slice(0, i + 1), tail: p.slice(i + 1) };
+  }
+
+  function fetchLs(parent) {
+    if (!launchState.hostId) return Promise.resolve([]);
+    var cached = launchState.lsCache[parent];
+    if (cached && Date.now() < launchState.lsCacheExpiry) return Promise.resolve(cached);
+    // Expand ~/ to the host's home for the actual API call.
+    var host = hosts.get(launchState.hostId);
+    var p = parent;
+    if (host && p.startsWith('~/')) p = host.home + p.slice(1);
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    var url = '/api/host/' + encodeURIComponent(launchState.hostId)
+      + '/ls?path=' + encodeURIComponent(p);
+    return fetch(url).then(function(r) {
+      return r.json().then(function(body) {
+        if (r.ok && Array.isArray(body.entries)) {
+          launchState.lsCache[parent] = body.entries;
+          launchState.lsCacheExpiry = Date.now() + 5000;
+          return body.entries;
+        }
+        if (!r.ok && body.error) throw new Error(body.error);
+        return [];
+      });
+    });
+  }
+
+  function renderLaunchSuggestions() {
+    var host = hosts.get(launchState.hostId);
+    var value = launchInput.value || '';
+    var parts = splitPath(value);
+    var parent = parts.parent || '/';
+    launchState.entries = [];
+    launchErrorEl.textContent = '';
+
+    if (launchState.debounceTimer) clearTimeout(launchState.debounceTimer);
+    launchState.debounceTimer = setTimeout(function() {
+      // Start with recent cwds as a static section (when input is empty
+      // or matches a recent entry).
+      var recentSection = '';
+      if (host && host.recent_cwds && host.recent_cwds.length > 0 && (!value || value.length < 3)) {
+        recentSection = '<div class="cn-launch-sugg-section">Recent</div>';
+        for (var i = 0; i < host.recent_cwds.length; i++) {
+          var cwd = host.recent_cwds[i];
+          recentSection +=
+            '<div class="cn-launch-sugg-item" data-launch-pick="' + escapeAttr(cwd) + '">'
+            + '<span class="sugg-path">' + escapeHtml(cwd) + '</span>'
+            + '</div>';
+          launchState.entries.push({ type: 'recent', path: cwd });
+        }
+      }
+
+      fetchLs(parent).then(function(entries) {
+        var filtered = entries.filter(function(e) {
+          return !parts.tail || e.name.toLowerCase().indexOf(parts.tail.toLowerCase()) === 0;
+        });
+        filtered.sort(function(a, b) { return a.name.localeCompare(b.name); });
+
+        var foldersSection = '';
+        if (filtered.length > 0) {
+          foldersSection = '<div class="cn-launch-sugg-section">In ' + escapeHtml(parent) + '</div>';
+          for (var j = 0; j < filtered.length; j++) {
+            var full = parent + filtered[j].name + (filtered[j].is_dir ? '/' : '');
+            foldersSection +=
+              '<div class="cn-launch-sugg-item" data-launch-pick="' + escapeAttr(full) + '">'
+              + '<span class="sugg-path">' + escapeHtml(filtered[j].name) + (filtered[j].is_dir ? '/' : '') + '</span>'
+              + '</div>';
+            launchState.entries.push({ type: 'dir', path: full });
+          }
+        }
+
+        // Create-if-missing row — when typed path looks like a non-empty
+        // dir that doesn't match any suggestion.
+        var createSection = '';
+        var typedLooksLikeNewPath = parts.tail.length > 0 && !entries.some(function(e) {
+          return e.name === parts.tail;
+        });
+        if (typedLooksLikeNewPath && value.length > parent.length) {
+          createSection =
+            '<div class="cn-launch-sugg-item cn-launch-create" data-launch-create="' + escapeAttr(value) + '">'
+            + '<span class="sugg-path">+ create ' + escapeHtml(value) + '</span>'
+            + '<span class="sugg-hint">directory doesn\'t exist yet</span>'
+            + '</div>';
+          launchState.entries.push({ type: 'create', path: value });
+        }
+
+        launchSuggEl.innerHTML = recentSection + foldersSection + createSection;
+        launchState.activeIdx = -1;
+      }).catch(function(err) {
+        launchSuggEl.innerHTML = recentSection;
+        launchErrorEl.textContent = err.message || 'ls failed';
+      });
+    }, 100);
+  }
+
+  function launchSubmit() {
+    if (!launchState.hostId || !launchInput.value) return;
+    var hostId = launchState.hostId;
+    var cwd = launchInput.value.trim();
+    var host = hosts.get(hostId);
+    // Tilde-expand for the server-side call using the host's home.
+    if (host && cwd.startsWith('~/')) cwd = host.home + cwd.slice(1);
+    // Strip trailing / to keep tmux -c happy.
+    if (cwd.length > 1 && cwd.endsWith('/')) cwd = cwd.slice(0, -1);
+
+    launchSubmitBtn.disabled = true;
+    launchErrorEl.textContent = '';
+    fetch('/api/host/' + encodeURIComponent(hostId) + '/launch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        cwd: cwd,
+        create_if_missing: true,
+        skip_permissions: launchSkipChk.checked && host.allow_dangerous_skip,
+      }),
+    })
+      .then(function(r) {
+        return r.json().then(function(body) { return { status: r.status, body: body }; });
+      })
+      .then(function(res) {
+        launchSubmitBtn.disabled = false;
+        if (res.status >= 400) {
+          launchErrorEl.textContent = (res.body && res.body.error) || ('HTTP ' + res.status);
+          return;
+        }
+        // Ghost row will show under the host until mirror:session_started
+        // replaces it with the real session. Auto-expire after 20s.
+        var launchKey = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+        var cwdParts = cwd.split('/');
+        pendingLaunches.push({
+          hostId: hostId,
+          launchKey: launchKey,
+          startedAt: Date.now(),
+          cwdShort: cwdParts.slice(-2).join('/') || cwd,
+        });
+        setTimeout(function() {
+          var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
+          if (i >= 0) { pendingLaunches.splice(i, 1); renderAgents(); }
+        }, 20_000);
+        renderAgents();
+        closeLaunchModal();
+      })
+      .catch(function(err) {
+        launchSubmitBtn.disabled = false;
+        launchErrorEl.textContent = 'Launch failed: ' + (err && err.message ? err.message : err);
+      });
+  }
+
+  // Wire sidebar click → open modal, modal controls.
+  document.addEventListener('click', function(e) {
+    var launchBtn = e.target.closest && e.target.closest('[data-launch-host]');
+    if (launchBtn) {
+      e.preventDefault();
+      openLaunchModal(launchBtn.getAttribute('data-launch-host'));
+      return;
+    }
+    if (e.target.closest && e.target.closest('[data-launch-close]')) {
+      closeLaunchModal();
+      return;
+    }
+    if (e.target === launchModal) {
+      closeLaunchModal();
+      return;
+    }
+    var sugg = e.target.closest && e.target.closest('[data-launch-pick]');
+    if (sugg) {
+      var pick = sugg.getAttribute('data-launch-pick');
+      launchInput.value = pick;
+      // On touch mode, if the pick is a directory (ends with /), refresh
+      // suggestions for that directory — tap-to-drill.
+      if (launchState.touchMode && pick.endsWith('/')) {
+        renderLaunchSuggestions();
+      } else if (pick.endsWith('/')) {
+        renderLaunchSuggestions();
+      }
+      launchInput.focus();
+      return;
+    }
+    var createRow = e.target.closest && e.target.closest('[data-launch-create]');
+    if (createRow) {
+      // The user explicitly wants to create — just submit with the typed path.
+      launchSubmit();
+      return;
+    }
+  });
+  if (launchInput) {
+    launchInput.addEventListener('input', renderLaunchSuggestions);
+    launchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { e.preventDefault(); closeLaunchModal(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); launchSubmit(); return; }
+      if (e.key === 'Tab') {
+        // Complete to the common prefix of the currently-filtered directory suggestions.
+        var dirs = launchState.entries.filter(function(x) { return x.type === 'dir'; });
+        if (dirs.length === 0) return;
+        var common = dirs[0].path;
+        for (var i = 1; i < dirs.length; i++) {
+          var p = dirs[i].path;
+          var j = 0;
+          while (j < common.length && j < p.length && common[j] === p[j]) j++;
+          common = common.slice(0, j);
+        }
+        if (common.length > launchInput.value.length) {
+          e.preventDefault();
+          launchInput.value = common;
+          renderLaunchSuggestions();
+        }
+      }
+    });
+  }
+  if (launchSubmitBtn) launchSubmitBtn.addEventListener('click', launchSubmit);
 
   // --- Init ---
   connect();

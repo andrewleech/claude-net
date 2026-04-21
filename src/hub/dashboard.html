@@ -3260,10 +3260,9 @@
             results.length + ' result' + (results.length === 1 ? '' : 's') +
               ' across ' + hostCount + ' site' + (hostCount === 1 ? '' : 's'),
             body, { open: true });
-          // AI-generated summary text arrives after the "Links: [...]" line.
-          // Stash it as a collapsed details so the card offers the narrative
-          // without cluttering the link list.
-          var summary = extractWebSearchSummary(rawText || '');
+          // Stash the AI-generated summary as a collapsed details so the
+          // card offers the narrative without cluttering the link list.
+          var summary = extractWebSearchSummary(p.response);
           if (summary) {
             appendDetails(el, 'summary',
               '<div class="md-body m-web-summary">' + renderMarkdown(summary) + '</div>');
@@ -3658,18 +3657,43 @@
       var out = [];
       if (!resp) return out;
       var unwrapped = unwrapMcpText(resp);
-      if (unwrapped !== null) return extractWebSearchResults(unwrapped);
-      // Tool-result envelope from the Anthropic SDK sometimes lands here
-      // with a `.output` or `.text` field in place of `.content`.
+      if (unwrapped !== null) {
+        try { return extractWebSearchResults(JSON.parse(unwrapped)); }
+        catch (e) { return extractWebSearchResults(unwrapped); }
+      }
+      // Claude Code's native WebSearch shape:
+      //   { query, results: [ {tool_use_id, content: [{title,url},…]}, "<AI summary>", … ] }
+      // The `results` array is heterogeneous — objects with a nested
+      // content list, plus plain strings for the prose summary.
+      if (typeof resp === 'object' && !Array.isArray(resp) && Array.isArray(resp.results)) {
+        for (var ri = 0; ri < resp.results.length; ri++) {
+          var entry = resp.results[ri];
+          if (entry && typeof entry === 'object' && Array.isArray(entry.content)) {
+            for (var ci = 0; ci < entry.content.length; ci++) {
+              var c = entry.content[ci];
+              if (c && (c.url || c.link)) {
+                out.push({
+                  title: c.title || '',
+                  url: c.url || c.link,
+                  snippet: c.snippet || c.description || '',
+                });
+              }
+            }
+          } else if (entry && typeof entry === 'object' && (entry.url || entry.link)) {
+            out.push({
+              title: entry.title || '',
+              url: entry.url || entry.link,
+              snippet: entry.snippet || entry.description || '',
+            });
+          }
+        }
+        if (out.length) return out;
+      }
+      // Fall-through envelopes.
       if (typeof resp === 'object' && !Array.isArray(resp)) {
         if (typeof resp.output === 'string') return extractWebSearchResults(resp.output);
         if (typeof resp.text === 'string') return extractWebSearchResults(resp.text);
-      }
-      // Structured shapes first.
-      if (typeof resp === 'object' && !Array.isArray(resp)) {
-        var arr = Array.isArray(resp.results) ? resp.results
-          : Array.isArray(resp.links) ? resp.links
-          : null;
+        var arr = Array.isArray(resp.links) ? resp.links : null;
         if (arr) {
           for (var i = 0; i < arr.length; i++) {
             var r = arr[i] || {};
@@ -3737,15 +3761,26 @@
       return tryJson(resp);
     }
 
-    // Pull the prose that follows the "Links: [...]" line. That's the
-    // small-model summary with per-site context the user actually wants
-    // to read. Trailing "REMINDER: ..." sentinel lines get trimmed.
-    function extractWebSearchSummary(text) {
-      if (!text) return '';
-      var m = text.match(/Links:\s*\[[\s\S]*?\]\s*\n+([\s\S]*)$/);
-      var tail = m ? m[1] : text;
-      tail = tail.replace(/\n+REMINDER:[\s\S]*$/i, '').trim();
-      return tail;
+    // Pull the AI-generated summary out of a WebSearch response. The
+    // native shape puts one or more prose strings inside resp.results
+    // alongside the link objects; the legacy string shape had the
+    // prose follow a "Links: [...]" line. Trailing "REMINDER: ..."
+    // sentinel text gets trimmed in either case.
+    function extractWebSearchSummary(resp) {
+      if (!resp) return '';
+      var raw = '';
+      if (typeof resp === 'object' && !Array.isArray(resp) && Array.isArray(resp.results)) {
+        var chunks = [];
+        for (var i = 0; i < resp.results.length; i++) {
+          var r = resp.results[i];
+          if (typeof r === 'string') chunks.push(r);
+        }
+        raw = chunks.join('\n\n');
+      } else if (typeof resp === 'string') {
+        var m = resp.match(/Links:\s*\[[\s\S]*?\]\s*\n+([\s\S]*)$/);
+        raw = m ? m[1] : resp;
+      }
+      return raw.replace(/\n+REMINDER:[\s\S]*$/i, '').trim();
     }
 
     // Render an unknown tool with a clear "no custom view yet" note.

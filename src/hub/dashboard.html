@@ -883,6 +883,39 @@
     margin-top: 8px;
   }
 
+  /* ── WEB (Search / Fetch) ── */
+  .m-web-query {
+    font-family: var(--font-mono); color: var(--cyan);
+  }
+  .m-web-target-link {
+    font-family: var(--font-mono); color: var(--cyan);
+    text-decoration: none; word-break: break-all;
+  }
+  .m-web-target-link:hover { text-decoration: underline; }
+  .m-web-results {
+    list-style: none; margin: 4px 0 0; padding: 0;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .m-web-result {
+    padding: 6px 8px;
+    background: var(--bg-code);
+    border: 1px solid var(--border-dim);
+  }
+  .m-web-title {
+    font-size: 13px; font-weight: 600; color: var(--cyan);
+    text-decoration: none; display: block;
+    word-break: break-word;
+  }
+  .m-web-title:hover { text-decoration: underline; }
+  .m-web-host {
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-muted); margin-top: 2px;
+  }
+  .m-web-snippet {
+    font-size: 12px; color: var(--text-dim); margin-top: 4px;
+    line-height: 1.45;
+  }
+
   /* ── GREP — ripgrep teletype output. ── */
   .m-grep {
     font-family: var(--font-mono);
@@ -3111,7 +3144,153 @@
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'stopped');
         },
       },
+      WebSearch: {
+        call: function(p, el) {
+          var query = (p.input && p.input.query) || '';
+          var allowed = (p.input && p.input.allowed_domains) || [];
+          var blocked = (p.input && p.input.blocked_domains) || [];
+          el.innerHTML = makeHeadline('WebSearch',
+            '🔎 <span class="m-web-query">' + escapeHtml(query) + '</span>');
+          var subs = [];
+          if (allowed.length) subs.push('only: ' + allowed.join(', '));
+          if (blocked.length) subs.push('blocked: ' + blocked.join(', '));
+          if (subs.length) {
+            var sub = document.createElement('div');
+            sub.className = 'm-tool-sub';
+            sub.textContent = subs.join(' · ');
+            el.appendChild(sub);
+          }
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); return; }
+          var results = extractWebSearchResults(p.response);
+          if (results.length === 0) {
+            setStatusOk(el, 'no results');
+            var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+            appendDetails(el, 'raw response',
+              '<pre>' + escapeHtml(truncateLines(resp || '', 40)) + '</pre>');
+            return;
+          }
+          setStatusOk(el, results.length + ' result' + (results.length === 1 ? '' : 's'));
+          var body = '<ul class="m-web-results">';
+          for (var i = 0; i < results.length; i++) {
+            var r = results[i];
+            var host = hostFromUrl(r.url);
+            body +=
+              '<li class="m-web-result">' +
+                '<a class="m-web-title" href="' + escapeAttr(r.url) + '" target="_blank" rel="noopener noreferrer">' +
+                  escapeHtml(r.title || r.url) +
+                '</a>' +
+                '<div class="m-web-host">' + escapeHtml(host) + '</div>' +
+                (r.snippet ? '<div class="m-web-snippet">' + escapeHtml(r.snippet) + '</div>' : '') +
+              '</li>';
+          }
+          body += '</ul>';
+          appendDetails(el, results.length + ' result' + (results.length === 1 ? '' : 's'),
+            body, { open: true });
+        },
+      },
+      WebFetch: {
+        call: function(p, el) {
+          var url = (p.input && p.input.url) || '';
+          var prompt = (p.input && p.input.prompt) || '';
+          var host = hostFromUrl(url);
+          el.innerHTML = makeHeadline('WebFetch',
+            '🌐 <a class="m-web-target-link" href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer" title="' + escapeAttr(url) + '">' +
+              escapeHtml(host || url) +
+            '</a>');
+          if (prompt) {
+            var sub = document.createElement('div');
+            sub.className = 'm-tool-sub';
+            sub.textContent = prompt.length > 160 ? prompt.slice(0, 157) + '…' : prompt;
+            el.appendChild(sub);
+          }
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); }
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          var text = String(resp || '');
+          var lineCount = text ? text.split('\n').length : 0;
+          var byteCount = text.length;
+          if (!p.is_error) {
+            setStatusOk(el,
+              byteCount >= 1024
+                ? (byteCount / 1024).toFixed(1) + ' KB'
+                : byteCount + ' B');
+          }
+          var summary = lineCount + ' line' + (lineCount === 1 ? '' : 's') + ', ' +
+            byteCount + ' byte' + (byteCount === 1 ? '' : 's');
+          appendDetails(el, summary,
+            '<pre class="m-bash-out">' + escapeHtml(truncateLines(text, 40)) + '</pre>');
+        },
+      },
     };
+
+    // Pull a best-effort [{ title, url, snippet }] list out of the many
+    // shapes WebSearch responses can take. The tool returns either a
+    // plain string (the canonical "Web search results for query: ...\n\n
+    // Links: [...]\n\n...snippets...") or a structured object; be
+    // defensive so one format change doesn't silently blank the view.
+    function extractWebSearchResults(resp) {
+      var out = [];
+      if (!resp) return out;
+      // Structured shapes first.
+      if (typeof resp === 'object' && !Array.isArray(resp)) {
+        var arr = Array.isArray(resp.results) ? resp.results
+          : Array.isArray(resp.links) ? resp.links
+          : null;
+        if (arr) {
+          for (var i = 0; i < arr.length; i++) {
+            var r = arr[i] || {};
+            if (r.url || r.link) {
+              out.push({
+                title: r.title || r.name || '',
+                url: r.url || r.link,
+                snippet: r.snippet || r.description || r.summary || '',
+              });
+            }
+          }
+          if (out.length) return out;
+        }
+      }
+      if (Array.isArray(resp)) {
+        for (var j = 0; j < resp.length; j++) {
+          var rr = resp[j] || {};
+          if (rr.url || rr.link) {
+            out.push({
+              title: rr.title || '',
+              url: rr.url || rr.link,
+              snippet: rr.snippet || rr.description || '',
+            });
+          }
+        }
+        if (out.length) return out;
+      }
+      // Fall through: parse the string form.
+      var text = typeof resp === 'string' ? resp : '';
+      if (!text) return out;
+      // Pull the JSON array that follows "Links:".
+      var m = text.match(/Links:\s*(\[[\s\S]*?\])\s*\n/);
+      if (m) {
+        try {
+          var links = JSON.parse(m[1]);
+          if (Array.isArray(links)) {
+            for (var k = 0; k < links.length; k++) {
+              var l = links[k] || {};
+              if (l.url) {
+                out.push({ title: l.title || '', url: l.url, snippet: '' });
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      return out;
+    }
+
+    function hostFromUrl(u) {
+      if (!u) return '';
+      try { return new URL(u).host; } catch (e) { return u; }
+    }
 
     // Render an unknown tool with a clear "no custom view yet" note.
     function renderUnknownToolCall(payload, el) {

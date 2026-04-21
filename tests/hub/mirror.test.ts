@@ -23,7 +23,11 @@ describe("MirrorRegistry", () => {
   let reg: MirrorRegistry;
 
   beforeEach(() => {
-    reg = new MirrorRegistry({ transcriptRing: 50, retentionMs: 0 });
+    reg = new MirrorRegistry({
+      transcriptRing: 50,
+      retentionMs: 0,
+      orphanCloseMs: 0,
+    });
   });
 
   test("createSession returns an entry with no token in the shape", () => {
@@ -277,6 +281,52 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(Array.isArray(payload.transcript)).toBe(true);
     } finally {
       app.stop();
+    }
+  });
+
+  test("orphan sweep closes sessions that lost their agent + are stale", async () => {
+    // orphanCloseMs: 20 → sessions unbound from agent for >20ms get closed
+    // on the next sweep.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 0,
+      orphanCloseMs: 20,
+    });
+    try {
+      const r = quick.createSession("alice:u@h", "/home/alice");
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      // Back-date last_event_at so it looks stale.
+      r.entry.lastEventAt = new Date(Date.now() - 60_000);
+      // No agent bound → meets the orphan criteria.
+      // Force a sweep by calling the private method via a cast.
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      expect(r.entry.closedAt).not.toBeNull();
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("orphan sweep spares sessions with a bound agent even if stale", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 0,
+      orphanCloseMs: 20,
+    });
+    try {
+      const r = quick.createSession("bob:u@h", "/home/bob");
+      if (!r.ok) return;
+      // Bind a fake agent.
+      r.entry.agent = {
+        ws: { send: () => {} },
+        wsIdentity: {},
+      };
+      r.entry.lastEventAt = new Date(Date.now() - 60_000);
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      expect(r.entry.closedAt).toBeNull();
+    } finally {
+      quick.stop();
     }
   });
 });

@@ -24,6 +24,17 @@ import { RateLimiter } from "./rate-limit";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
+/**
+ * A session is considered "orphaned" when no daemon-agent WS has been
+ * bound AND no events have arrived for this long. The sweeper closes
+ * such sessions so stale entries from ungracefully-exited claude
+ * processes, hub restarts that weren't matched by daemon recovery, and
+ * /clear'd sessions whose underlying tmux was killed don't linger.
+ *
+ * Set to 0 to disable.
+ */
+const DEFAULT_ORPHAN_CLOSE_MS = 30 * 60 * 1000;
+const ORPHAN_SWEEP_INTERVAL_MS = 60 * 1000;
 
 // ── Entry types ───────────────────────────────────────────────────────────
 
@@ -59,6 +70,11 @@ export interface MirrorRegistryOptions {
   retentionMs?: number;
   /** Opt-in durable store. Defaults to NullStore (in-memory only). */
   store?: MirrorStore;
+  /**
+   * Close sessions whose daemon-agent WS has been unbound and which
+   * have seen no events for this long. 0 disables. Default 30 min.
+   */
+  orphanCloseMs?: number;
 }
 
 // ── MirrorRegistry ────────────────────────────────────────────────────────
@@ -79,6 +95,8 @@ export class MirrorRegistry {
   readonly sessions = new Map<string, MirrorSessionEntry>();
   private transcriptRing: number;
   private retentionMs: number;
+  private orphanCloseMs: number;
+  private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
@@ -89,7 +107,47 @@ export class MirrorRegistry {
   constructor(options?: MirrorRegistryOptions) {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
     this.retentionMs = options?.retentionMs ?? DEFAULT_RETENTION_MS;
+    this.orphanCloseMs = options?.orphanCloseMs ?? DEFAULT_ORPHAN_CLOSE_MS;
     this.store = options?.store ?? new NullStore();
+    if (this.orphanCloseMs > 0) {
+      this.orphanSweepTimer = setInterval(
+        () => this.sweepOrphans(),
+        ORPHAN_SWEEP_INTERVAL_MS,
+      );
+      if (
+        this.orphanSweepTimer &&
+        typeof this.orphanSweepTimer === "object" &&
+        "unref" in this.orphanSweepTimer
+      ) {
+        this.orphanSweepTimer.unref();
+      }
+    }
+  }
+
+  /**
+   * Close sessions whose daemon-agent WS is absent AND whose last event
+   * is older than orphanCloseMs. Runs on a timer.
+   */
+  private sweepOrphans(): void {
+    const cutoff = Date.now() - this.orphanCloseMs;
+    const victims: string[] = [];
+    for (const entry of this.sessions.values()) {
+      if (entry.closedAt) continue;
+      if (entry.agent) continue;
+      if (entry.lastEventAt.getTime() > cutoff) continue;
+      victims.push(entry.sid);
+    }
+    for (const sid of victims) {
+      this.closeSession(sid, "agent_timeout");
+    }
+  }
+
+  /** Stop background timers. Only needed when the hub is torn down in tests. */
+  stop(): void {
+    if (this.orphanSweepTimer) {
+      clearInterval(this.orphanSweepTimer);
+      this.orphanSweepTimer = null;
+    }
   }
 
   setDashboardBroadcast(fn: (event: DashboardEvent) => void): void {

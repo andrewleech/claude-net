@@ -174,16 +174,12 @@
     background: var(--bg);
     position: relative;
   }
-  /* Vertical tick rail down the left — the 'broadcast timeline'.
-     X coordinate matches the tick marks on each event row. */
-  .mirror-transcript::before {
-    content: "";
-    position: absolute;
-    left: 104px; top: 0; bottom: 0;
-    width: 1px;
-    background: var(--border-dim);
-    pointer-events: none;
-  }
+  /* The transcript used to draw a global vertical rail at x=104 via
+     ::before ('broadcast timeline'). Removed: it grazed the right
+     edge of the timestamp gutter on some font-load timings, and
+     duplicated the per-assistant indent rule at x=121-122. Per-event
+     tick marks (.m-evt::after) still render and read as standalone
+     dashes without the rail. */
 
   .m-evt {
     position: relative;
@@ -291,8 +287,6 @@
        line above the content, and the vertical rail + tick marks
        are dropped. Assistant messages keep a thin accent left-edge
        as their anchor. */
-    .mirror-transcript::before { display: none; }
-
     .m-evt {
       padding-left: 14px;
       padding-right: 14px;
@@ -1730,7 +1724,12 @@
   #mirror-view .mirror-transcript {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 8px 16px;
+    /* No horizontal padding — events own their own left gutter for
+       the timestamp + tick-rail (.m-evt::before / ::after at
+       left:10/101px). Adding padding here shifts the events but not
+       the .mirror-transcript::before rail, so the rail cuts through
+       the right edge of each timestamp. */
+    padding: 8px 0;
   }
   #mirror-stop-btn {
     font-family: var(--font-mono);

@@ -18,7 +18,8 @@ set -euo pipefail
 # and re-patched automatically when Claude Code updates.
 #
 # Install:
-#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+#   curl -fsSL "$YOUR_HUB/setup" | bash   # remote — follows the deployed hub image
+#   ./bin/install-channels                # from a local repo clone
 #
 # Usage:
 #   claude-channels              # channels enabled, no prompts

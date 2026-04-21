@@ -58,6 +58,13 @@ for f in claude-channels claude-net-mirror-push claude-net-mirror-agent; do
     ln -snf "\$INSTALL_DIR/\$f" "\$BIN_DIR/\$f"
 done
 
+# Retire any running mirror-agent daemon so the next claude-channels launch
+# respawns against the just-installed bundle. The launcher's /health probe
+# only detects liveness, not version, so a stale daemon would otherwise
+# keep running the old code and the dashboard would show "NO MIRROR".
+pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
+rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
+
 echo "[2/4] Registering claude-net MCP server…"
 claude mcp add \\
     --scope user \\

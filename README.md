@@ -108,11 +108,13 @@ If you want channels to _just work_ with no prompts, no flags, no setup dialogs,
 
 The launcher also auto-detects MCP servers configured in `~/.claude.json` and adds the right `--dangerously-load-development-channels` flag for each, so you don't have to. Re-patches automatically when Claude Code updates.
 
-Install:
+Install — pipe the hub's `/setup` endpoint to bash. The hub serves its own launcher + mirror binaries so install follows whichever branch / tag is deployed, and doesn't depend on a GitHub org being reachable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+curl -fsSL "$YOUR_HUB/setup" | bash
 ```
+
+Where `$YOUR_HUB` is the URL you use to reach the dashboard (e.g. `https://cn.internal.example.com` or `http://hub.lan:4815`).
 
 Usage:
 
@@ -120,14 +122,18 @@ Usage:
 claude-channels    # drop-in replacement for `claude`
 ```
 
+`bin/install-channels` in the repo is the local-clone install path (`./bin/install-channels` from a cloned source tree); for every remote host, prefer `$HUB/setup`.
+
 Full technical writeup of how each patch works and how to adapt them to a new Claude Code version: [`docs/CLAUDE_CODE_PATCHING_GUIDE.md`](docs/CLAUDE_CODE_PATCHING_GUIDE.md).
 
 ## Statusline
 
 There's a matching statusline script that shows context window usage, 5-hour rate limit, and your claude-net agent name with a connection indicator.
 
+Install from a local repo clone:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-statusline | bash
+./bin/install-statusline
 ```
 
 Wraps to multiple lines on narrow terminals (reads width via `/dev/tty`).
@@ -159,6 +165,14 @@ Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: 
 **TLS.** Set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
 
 **Rate limits.** `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
+
+**Upgrading.** The mirror-agent daemon is long-lived and the `claude-channels` launcher only probes `/health` (not version) before reusing it. If you update the hub — especially any change under `src/mirror-agent/` — the previously-spawned daemon keeps running the old code and the dashboard shows `NO MIRROR` on every session. Fix with one command:
+
+```bash
+curl -fsSL <hub>/setup | bash
+```
+
+The installer retires the stale daemon (`pkill` + remove `/tmp/claude-net/mirror-agent-*.port`) and the next `claude-channels` launch respawns against the new bundle. If you can't rerun the installer, the manual equivalent is `pkill -f claude-net-mirror-agent && rm -f /tmp/claude-net/mirror-agent-*.port` followed by a fresh `claude-channels` launch.
 
 ## How it works
 

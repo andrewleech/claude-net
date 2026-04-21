@@ -396,6 +396,24 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       url: wsUrl,
       logPrefix: `claude-net/mirror:${sid}`,
       onOpen: () => {
+        // Re-assert the session on the hub every time the WS opens
+        // (first connect and every reconnect). Covers sleep-wake, hub
+        // restart, orphan auto-close — all the states where the WS
+        // handshake succeeds but the hub considers the session dead
+        // or closed and silently drops incoming events. createSession
+        // is idempotent: existing open sessions no-op, closed ones
+        // get reopened, lost ones get re-created with the same sid.
+        fetch(`${hubUrl}/api/mirror/session`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_agent: session.ownerAgent,
+            cwd: session.cwd,
+            sid: session.sid,
+          }),
+        }).catch(() => {
+          // WS onClose will retry; nothing to do here.
+        });
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);

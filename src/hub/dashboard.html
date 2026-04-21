@@ -1285,87 +1285,175 @@
     header h1::before, #mirror-conn::before { animation: none; }
   }
 
-  /* ── Phase 3+4 unified shell ─────────────────────────────────────────
-     Bootstrap provides the heavy lifting (navbar, offcanvas, list-group);
-     these rules bind the theme vars and layout helpers the app needs on
-     top of that. Phase 5 deletes the hand-rolled panel/card/sidebar
-     chrome above. */
-  :root {
+  /* ── Unified shell ────────────────────────────────────────────────
+     Bootstrap's offcanvas + list-group + navbar, rebound to this app's
+     theme vars. Bindings live at :root (dark) and body.theme-light so
+     every Bootstrap surface swaps when the theme toggles. */
+
+  /* Shared bindings — apply at both themes. */
+  :root,
+  body.theme-light {
     --bs-body-bg: var(--bg);
     --bs-body-color: var(--text);
+    --bs-body-font-family: var(--font-sans);
+    --bs-font-monospace: var(--font-mono);
     --bs-border-color: var(--border);
     --bs-border-color-translucent: var(--border);
     --bs-secondary-bg: var(--bg-panel);
     --bs-tertiary-bg: var(--bg-panel);
     --bs-secondary-color: var(--text-dim);
+    --bs-emphasis-color: var(--text);
     --bs-link-color: var(--accent);
     --bs-link-hover-color: var(--accent-dim);
     --bs-offcanvas-bg: var(--bg-panel);
     --bs-offcanvas-color: var(--text);
     --bs-offcanvas-border-color: var(--border);
-    --bs-offcanvas-width: 280px;
+    --bs-offcanvas-width: 260px;
+    --bs-list-group-bg: transparent;
+    --bs-list-group-color: var(--text);
+    --bs-list-group-border-color: var(--border-dim);
+    --bs-list-group-action-color: var(--text);
+    --bs-list-group-action-hover-color: var(--text);
+    --bs-list-group-action-hover-bg: var(--bg-hover);
+    --bs-list-group-action-active-color: var(--text);
+    --bs-list-group-action-active-bg: var(--accent-ink);
+    --bs-navbar-color: var(--text-dim);
+    --bs-navbar-hover-color: var(--text);
+    --bs-navbar-active-color: var(--text);
+    --bs-navbar-brand-color: var(--text);
+    --bs-navbar-brand-hover-color: var(--text);
+    --bs-navbar-toggler-border-color: var(--border);
+    --bs-btn-close-color: var(--text);
+    --bs-btn-close-filter: none;
   }
 
-  /* Restrain Bootstrap's reset so our app shell can go full-viewport. */
+  /* Respect Bootstrap's reset but keep our app full-viewport. */
   html, body { height: 100%; }
   body { overflow: hidden; }
 
-  /* Navbar sits flush at the top; its gap/padding come from Bootstrap. */
+  /* Navbar: panel background, mono chrome type, brand in sans. */
   nav[data-cn-navbar] {
     flex-shrink: 0;
+    background-color: var(--bg-panel) !important;
+    border-bottom: 1px solid var(--border);
     font-family: var(--font-mono);
+    font-size: 12px;
   }
-  nav[data-cn-navbar] .navbar-brand { font-family: var(--font-sans); }
+  nav[data-cn-navbar] .navbar-brand {
+    font-family: var(--font-sans);
+    color: var(--text);
+    font-weight: 700;
+  }
+  nav[data-cn-navbar] .btn-outline-secondary {
+    --bs-btn-color: var(--text-dim);
+    --bs-btn-border-color: var(--border);
+    --bs-btn-hover-color: var(--text);
+    --bs-btn-hover-bg: var(--bg-hover);
+    --bs-btn-hover-border-color: var(--border);
+    --bs-btn-active-color: var(--text);
+    --bs-btn-active-bg: var(--bg-hover);
+    --bs-btn-active-border-color: var(--border);
+  }
+  nav[data-cn-navbar] .badge {
+    background-color: var(--bg-hover);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
 
-  /* Pin the offcanvas below the navbar so the burger stays visible. */
-  .offcanvas.offcanvas-start { top: auto; height: calc(100vh - 56px); }
-
-  /* Main pane: fills the remaining viewport next to the pinned sidebar. */
-  #app-main {
-    margin-left: var(--bs-offcanvas-width);
-    height: calc(100vh - 56px);
+  /* ── App shell layout ──
+     Flex row: sidebar column + main column. On md+ the sidebar is an
+     inline column (offcanvas-md behaviour); below md it's an overlay.
+     Hamburger toggles .sidebar-collapsed on the shell on md+. */
+  .cn-shell {
+    display: flex;
+    flex: 1 1 auto;
     min-height: 0;
+    height: calc(100vh - 48px); /* navbar height */
   }
-  #app-main.sidebar-collapsed { margin-left: 0; }
 
-  /* Contextual header: one row that morphs between log / mirror modes. */
-  .cn-main-header { flex-shrink: 0; background: var(--bg-panel); }
+  #sidebar {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    color: var(--text);
+    width: 260px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  @media (min-width: 768px) {
+    /* Inline column on desktop; offcanvas-md strips overlay chrome. */
+    #sidebar.offcanvas-md { position: static; transform: none; visibility: visible; }
+    .cn-shell.sidebar-collapsed #sidebar { display: none; }
+  }
+  @media (max-width: 767.98px) {
+    /* Below md: behave as offcanvas overlay (Bootstrap handles it). */
+    #sidebar { width: 82vw; max-width: 320px; }
+  }
+
+  .cn-sidebar-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .cn-sidebar-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+
+  #app-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Contextual header — one row per view mode. */
+  .cn-main-header {
+    flex-shrink: 0;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
   .cn-header {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     padding: 8px 16px;
     min-height: 44px;
     font-family: var(--font-mono);
-    font-size: 12px;
-  }
-  .cn-header-title { font-weight: 600; color: var(--text); }
-  .cn-header-sub { color: var(--text-dim); font-size: 11px; }
-  .cn-header-back {
+    font-size: 11px;
+    letter-spacing: 0.6px;
     color: var(--text-dim);
-    text-decoration: none;
-    padding: 3px 8px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
   }
-  .cn-header-back:hover { color: var(--accent); border-color: var(--accent); }
+  .cn-header-title {
+    font-weight: 700;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+  }
+  .cn-header-sub { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
   .cn-header-thinking { color: var(--text-dim); font-style: italic; }
 
-  /* The main-view container stacks the log view and the mirror view; only
-     one is visible at a time (via d-none). Each view fills the pane. */
   .cn-main-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .cn-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
-  /* Message log — bounded live-tail of agent traffic. */
+  /* Message log — live tail. */
   .cn-message-log {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 8px 0;
+    padding: 4px 0 16px;
     font-family: var(--font-mono);
     font-size: 12px;
   }
+  .cn-log-empty { color: var(--text-muted); padding: 14px 18px; font-family: var(--font-mono); font-size: 12px; }
   .cn-log-entry {
-    padding: 6px 16px;
+    padding: 6px 18px;
     border-left: 2px solid transparent;
     border-bottom: 1px solid var(--border-dim);
     animation: event-flash 1.2s ease-out;
@@ -1386,31 +1474,52 @@
   .cn-log-broadcast { border-left-color: var(--gold); }
   .cn-log-team { border-left-color: var(--cyan); }
 
-  /* Sidebar unified agent list — Bootstrap list-group with our dot/badge. */
-  .list-group-item.agent-item {
+  /* Sidebar rows — unified list-group style. */
+  #agent-list .list-group-item {
     background: transparent;
-    border-color: var(--border-dim);
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+    border-bottom: 1px solid var(--border-dim);
+    border-radius: 0;
     color: var(--text);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     font-family: var(--font-mono);
     font-size: 12px;
-    padding: 8px 12px;
+    padding: 8px 14px;
+    line-height: 1.35;
   }
-  .list-group-item.agent-item:hover { background: var(--bg-hover); color: var(--text); }
-  .list-group-item.agent-item.active {
+  #agent-list .list-group-item:hover { background: var(--bg-hover); color: var(--text); }
+  #agent-list .list-group-item.active {
     background: var(--accent-ink);
-    border-color: var(--accent);
+    border-bottom-color: var(--accent);
     color: var(--text);
+    font-weight: 600;
   }
-  .agent-mirror-badge { margin-left: auto; font-size: 14px; line-height: 1; }
+  #agent-list .list-group-item.active::before {
+    content: "";
+    display: block;
+    width: 3px;
+    align-self: stretch;
+    background: var(--accent);
+    margin: -8px 0 -8px -14px;
+    margin-right: 6px;
+  }
+  .cn-home-glyph { color: var(--text-dim); font-size: 11px; }
 
-  /* Mirror transcript inlined into the main pane. */
+  /* Mirror view inside #main-view. */
   #mirror-view .mirror-transcript {
     flex: 1 1 auto;
     overflow-y: auto;
     padding: 8px 16px;
+  }
+  #mirror-stop-btn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
   }
   #mirror-conn {
     font-family: var(--font-mono);
@@ -1421,6 +1530,9 @@
   }
   #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
   #mirror-conn.is-error { color: var(--red); }
+
+  /* Offcanvas overlay (<md) gets a backdrop dimmer. */
+  .offcanvas-backdrop { background-color: rgba(0, 0, 0, 0.55); }
 </style>
 <script src="/bin/bootstrap.bundle.min.js"></script>
 <script src="/bin/marked.umd.min.js"></script>
@@ -1449,76 +1561,77 @@
   })();
 </script>
 
-<nav class="navbar navbar-expand bg-body-tertiary border-bottom" data-cn-navbar>
+<nav class="navbar navbar-expand py-1" data-cn-navbar>
   <div class="container-fluid gap-2">
-    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-controls="sidebar" title="Toggle agents sidebar">☰</button>
+    <button class="btn btn-outline-secondary btn-sm" type="button" id="sidebar-toggle" title="Toggle sidebar">☰</button>
     <a class="navbar-brand mb-0 h1 me-auto" href="#">claude-net</a>
-    <span class="badge text-bg-secondary" id="agent-count">0 agents</span>
+    <span class="badge" id="agent-count">0 agents</span>
     <span class="d-flex align-items-center gap-1 small"><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
     <button type="button" class="btn btn-outline-secondary btn-sm" data-theme-toggle title="Switch theme">◐ DARK</button>
   </div>
 </nav>
 
-<div class="offcanvas offcanvas-start show" data-bs-scroll="true" data-bs-backdrop="false" tabindex="-1" id="sidebar" aria-labelledby="sidebarLabel">
-  <div class="offcanvas-header">
-    <h5 class="offcanvas-title" id="sidebarLabel">Agents</h5>
-    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
-  </div>
-  <div class="offcanvas-body p-0">
-    <div id="agent-list" class="list-group list-group-flush"></div>
-  </div>
-</div>
-
-<main class="container-fluid p-0 d-flex flex-column" id="app-main">
-  <header class="cn-main-header border-bottom" id="main-header">
-    <!-- Message-log mode header -->
-    <div class="cn-header cn-header-log" data-header-mode="log">
-      <span class="cn-header-title">Message log</span>
-      <span class="cn-header-sub"><span id="log-agent-count">0 agents online</span></span>
+<div class="cn-shell" id="app-shell">
+  <aside class="offcanvas-md offcanvas-start" tabindex="-1" id="sidebar" aria-labelledby="sidebarLabel">
+    <div class="cn-sidebar-header d-flex align-items-center justify-content-between">
+      <span id="sidebarLabel">Channels</span>
+      <button type="button" class="btn-close d-md-none" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Close"></button>
     </div>
-    <!-- Mirror-mode header (hidden when no agent selected) -->
-    <div class="cn-header cn-header-mirror d-none" data-header-mode="mirror">
-      <a class="cn-header-back" href="#" title="Back to message log">← log</a>
-      <span class="cn-header-title" id="mirror-owner"></span>
-      <span class="cn-header-sub cwd" id="mirror-cwd"></span>
-      <span id="mirror-conn">connecting…</span>
-      <span class="cn-header-thinking" id="mirror-thinking"></span>
-      <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm ms-auto" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
+    <div class="cn-sidebar-body">
+      <div id="agent-list" class="list-group list-group-flush"></div>
     </div>
-  </header>
+  </aside>
 
-  <div id="main-view" class="cn-main-view">
-    <!-- Default view: Message log -->
-    <section id="message-log-view" class="cn-view">
-      <div class="cn-message-log" id="message-log">
-        <div class="cn-log-empty text-secondary p-3">
-          No agent messages yet. When agents talk to each other via send_message / send_team / broadcast, it'll show up here.
-        </div>
+  <main id="app-main">
+    <header class="cn-main-header" id="main-header">
+      <!-- Message-log mode header -->
+      <div class="cn-header" data-header-mode="log">
+        <span class="cn-header-title">Message log</span>
+        <span class="cn-header-sub"><span id="log-agent-count">0 agents online</span></span>
       </div>
-    </section>
+      <!-- Mirror-mode header (hidden when no agent selected) -->
+      <div class="cn-header d-none" data-header-mode="mirror">
+        <span class="cn-header-title" id="mirror-owner"></span>
+        <span class="cn-header-sub cwd" id="mirror-cwd"></span>
+        <span id="mirror-conn">connecting…</span>
+        <span class="cn-header-thinking" id="mirror-thinking"></span>
+        <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm ms-auto" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
+      </div>
+    </header>
 
-    <!-- Mirror view (hidden until agent selected) -->
-    <section id="mirror-view" class="cn-view d-none">
-      <div class="mirror-status" id="mirror-status"></div>
-      <div class="mirror-transcript" id="mirror-transcript"></div>
-      <div class="mirror-compose compose-hidden" id="mirror-compose">
-        <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
-        <div class="mirror-compose-frame">
-          <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
-          <div class="mirror-compose-actions">
-            <div class="mirror-compose-hint">
-              <kbd>↵</kbd>send
-              <br>
-              <kbd>⇧↵</kbd>newline
-            </div>
-            <button id="mirror-compose-send" type="button">Transmit</button>
+    <div id="main-view" class="cn-main-view">
+      <!-- Default view: Message log -->
+      <section id="message-log-view" class="cn-view">
+        <div class="cn-message-log" id="message-log">
+          <div class="cn-log-empty">
+            No agent messages yet. When agents talk to each other via send_message / send_team / broadcast, it'll show up here.
           </div>
         </div>
-      </div>
-      <div class="mirror-compose-err" id="mirror-compose-err"></div>
-    </section>
-  </div>
-</main>
+      </section>
+
+      <!-- Mirror view (hidden until agent selected) -->
+      <section id="mirror-view" class="cn-view d-none">
+        <div class="mirror-status" id="mirror-status"></div>
+        <div class="mirror-transcript" id="mirror-transcript"></div>
+        <div class="mirror-compose compose-hidden" id="mirror-compose">
+          <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
+          <div class="mirror-compose-frame">
+            <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
+            <div class="mirror-compose-actions">
+              <div class="mirror-compose-hint">
+                <kbd>↵</kbd>send
+                <br>
+                <kbd>⇧↵</kbd>newline
+              </div>
+              <button id="mirror-compose-send" type="button">Transmit</button>
+            </div>
+          </div>
+        </div>
+        <div class="mirror-compose-err" id="mirror-compose-err"></div>
+      </section>
+    </div>
+  </main>
+</div>
 
 <script>
 (function() {
@@ -1732,14 +1845,20 @@
       return a.fullName.localeCompare(b.fullName);
     });
 
-    var html = '';
+    // "Home" entry — message log. Highlighted when no agent is selected.
+    var homeActive = activeAgentSid ? '' : ' active';
+    var html =
+      '<a class="list-group-item list-group-item-action cn-home-row' + homeActive + '"' +
+        ' href="#"' +
+        ' data-sid=""' +
+        ' data-name="__home__">' +
+        '<span class="cn-home-glyph">&gt;</span>' +
+        '<span class="agent-name">Message log</span>' +
+      '</a>';
     for (var i = 0; i < sorted.length; i++) {
       var ag = sorted[i];
       var clickable = !!ag.mirrorSid;
       var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
-      var mirrorBadge = ag.mirrorSid
-        ? '<span class="agent-mirror-badge" title="active mirror">🎥</span>'
-        : '';
       var tag = clickable ? 'a' : 'div';
       var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
       html += '<' + tag + ' class="list-group-item list-group-item-action agent-item' + activeCls + '"'
@@ -1749,7 +1868,6 @@
         + ' data-name="' + escapeAttr(ag.fullName) + '">'
         + '<span class="agent-dot ' + ag.status + '"></span>'
         + '<span class="agent-name">' + escapeHtml(ag.fullName) + '</span>'
-        + mirrorBadge
         + '</' + tag + '>';
     }
     agentListEl.innerHTML = html;
@@ -1907,15 +2025,48 @@
 
   window.addEventListener('hashchange', applyHashRoute);
 
-  // Navbar brand + header "back to log" link return to the message log.
+  // Navbar brand and the "Message log" home row both return to the log.
   document.addEventListener('click', function(e) {
-    var back = e.target.closest && e.target.closest('.cn-header-back');
-    if (back) {
+    var brand = e.target.closest && e.target.closest('.navbar-brand');
+    var home = e.target.closest && e.target.closest('.cn-home-row');
+    if (brand || home) {
       e.preventDefault();
       if (window.location.hash) window.location.hash = '';
       else applyHashRoute();
+      dismissMobileSidebar();
+    }
+    var agentRow = e.target.closest && e.target.closest('#agent-list .list-group-item.agent-item');
+    if (agentRow && agentRow.getAttribute('href')) {
+      // Let the href change the hash; then close the mobile offcanvas.
+      dismissMobileSidebar();
     }
   });
+
+  // ── Sidebar toggle ──
+  // Below md: hamburger opens the Bootstrap offcanvas (overlay).
+  // md+: hamburger toggles a `.sidebar-collapsed` class on the shell so
+  // the inline column hides and the main pane reclaims space.
+  var appShell = document.getElementById('app-shell');
+  var sidebarEl = document.getElementById('sidebar');
+  var sidebarToggleBtn = document.getElementById('sidebar-toggle');
+  function isDesktop() {
+    return window.matchMedia('(min-width: 768px)').matches;
+  }
+  function dismissMobileSidebar() {
+    if (isDesktop() || !window.bootstrap) return;
+    var inst = window.bootstrap.Offcanvas.getInstance(sidebarEl);
+    if (inst) inst.hide();
+  }
+  if (sidebarToggleBtn) {
+    sidebarToggleBtn.addEventListener('click', function() {
+      if (isDesktop()) {
+        appShell.classList.toggle('sidebar-collapsed');
+      } else if (window.bootstrap) {
+        var inst = window.bootstrap.Offcanvas.getOrCreateInstance(sidebarEl);
+        inst.toggle();
+      }
+    });
+  }
 
   // --- Init ---
   connect();

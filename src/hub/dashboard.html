@@ -1988,8 +1988,29 @@
 
       case 'mirror:session_ended': {
         mirrorBySid.delete(event.sid);
+        // An agent can own multiple mirror sessions (fork-sessions in
+        // the same cwd). If the one that ended was just the last-wins
+        // binding, re-attach to whichever of their remaining sessions
+        // has the most recent activity rather than nulling the agent.
         for (const ag of agents.values()) {
-          if (ag.mirrorSid === event.sid) { ag.mirrorSid = null; ag.cwd = null; }
+          if (ag.mirrorSid !== event.sid) continue;
+          var replacement = null;
+          var replacementTs = '';
+          for (var m of mirrorBySid.values()) {
+            if (m.owner_agent !== ag.fullName) continue;
+            var ts = m.last_event_at || '';
+            if (!replacement || ts > replacementTs) {
+              replacement = m;
+              replacementTs = ts;
+            }
+          }
+          if (replacement) {
+            ag.mirrorSid = replacement.sid;
+            ag.cwd = replacement.cwd;
+          } else {
+            ag.mirrorSid = null;
+            ag.cwd = null;
+          }
         }
         renderAgents();
         if (activeAgentSid === event.sid) {
@@ -2069,30 +2090,40 @@
   }
 
   // --- Mirror sessions (feed sidebar state) ---
+  // When an agent owns more than one mirror (fork-sessions), bind to the
+  // one with the most recent activity — closed sessions have old or
+  // null last_event_at so they lose the tie-break.
   function refreshMirrorSessions() {
     fetch('/api/mirror/sessions/all')
       .then(function(r) { return r.ok ? r.json() : []; })
       .then(function(list) {
         mirrorBySid.clear();
-        // Drop any prior mirror association so dead sessions are cleared.
         for (const ag of agents.values()) { ag.mirrorSid = null; ag.cwd = null; }
-        if (Array.isArray(list)) {
-          for (var i = 0; i < list.length; i++) {
-            var e = list[i];
-            mirrorBySid.set(e.sid, e);
-            if (!agents.has(e.owner_agent)) {
-              // Register placeholder so a mirror that started before the
-              // dashboard loaded still shows its owner.
-              upsertAgent({
-                name: e.owner_agent,
-                fullName: e.owner_agent,
-                status: 'online',
-              });
-            }
-            var ag = agents.get(e.owner_agent);
-            if (ag) { ag.mirrorSid = e.sid; ag.cwd = e.cwd; }
+        if (!Array.isArray(list)) { renderAgents(); return; }
+        // Index mirrors into mirrorBySid + register placeholder agents.
+        // Skip closed sessions — they're retained briefly on the hub
+        // but shouldn't occupy a sidebar slot.
+        var liveByOwner = new Map();
+        for (var i = 0; i < list.length; i++) {
+          var e = list[i];
+          mirrorBySid.set(e.sid, e);
+          if (e.closed_at) continue;
+          if (!agents.has(e.owner_agent)) {
+            upsertAgent({
+              name: e.owner_agent,
+              fullName: e.owner_agent,
+              status: 'online',
+            });
           }
+          var existing = liveByOwner.get(e.owner_agent);
+          var existingTs = existing ? (existing.last_event_at || '') : '';
+          var candTs = e.last_event_at || '';
+          if (!existing || candTs > existingTs) liveByOwner.set(e.owner_agent, e);
         }
+        liveByOwner.forEach(function(e, ownerAgent) {
+          var ag = agents.get(ownerAgent);
+          if (ag) { ag.mirrorSid = e.sid; ag.cwd = e.cwd; }
+        });
         renderAgents();
       })
       .catch(function() { /* ignore */ });

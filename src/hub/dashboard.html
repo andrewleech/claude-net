@@ -3221,13 +3221,10 @@
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); return; }
-          // Work off the raw text for the "AI summary" detail; parsed
-          // results come from the same string.
-          var rawText = typeof p.response === 'string'
-            ? p.response
-            : (unwrapMcpText(p.response) != null
-                ? String(unwrapMcpText(p.response))
-                : tryJson(p.response));
+          // Flatten whatever envelope the hook delivered into a single
+          // text string for the AI-summary pane. Parsed results run off
+          // the same string.
+          var rawText = toWebSearchText(p.response);
           var results = extractWebSearchResults(p.response);
           if (results.length === 0) {
             setStatusOk(el, 'no results');
@@ -3564,11 +3561,13 @@
 
     // Defensive extractor for list_agents / list_teams responses.
     // MCP tool responses arrive as an array (or { content: [...] }) of
-    // { type: 'text', text: '<JSON>' } blocks — unwrap those before
-    // looking for the list.
+    // { type: 'text', text: '<JSON>' } blocks — unwrap those, then
+    // JSON-parse the joined text, before looking for the list.
     function extractCnList(resp, key) {
-      var unwrapped = unwrapMcpText(resp);
-      if (unwrapped !== null) return extractCnList(unwrapped, key);
+      var text = unwrapMcpText(resp);
+      if (text !== null) {
+        try { return extractCnList(JSON.parse(text), key); } catch (e) { /* not JSON */ }
+      }
       if (Array.isArray(resp)) return resp;
       if (resp && typeof resp === 'object') {
         if (Array.isArray(resp[key])) return resp[key];
@@ -3584,19 +3583,18 @@
     }
 
     // If `resp` looks like an MCP text-content envelope, join the text
-    // blocks and JSON.parse them. Returns the parsed value on success,
-    // or null if this wasn't an envelope.
+    // blocks and return the concatenated string. Returns null if this
+    // wasn't an envelope. Callers JSON.parse if they expect JSON —
+    // WebSearch etc. use the raw string as-is.
     function unwrapMcpText(resp) {
       var blocks = null;
       if (Array.isArray(resp)) blocks = resp;
       else if (resp && typeof resp === 'object' && Array.isArray(resp.content)) blocks = resp.content;
       if (!blocks || blocks.length === 0) return null;
-      // Only treat as MCP envelope when every block carries a string `text`.
       for (var i = 0; i < blocks.length; i++) {
         if (!blocks[i] || typeof blocks[i].text !== 'string') return null;
       }
-      var joined = blocks.map(function(b) { return b.text; }).join('');
-      try { return JSON.parse(joined); } catch (e) { return null; }
+      return blocks.map(function(b) { return b.text; }).join('');
     }
 
     // Pull tool names out of a ToolSearch response. The tool returns a
@@ -3624,6 +3622,12 @@
       if (!resp) return out;
       var unwrapped = unwrapMcpText(resp);
       if (unwrapped !== null) return extractWebSearchResults(unwrapped);
+      // Tool-result envelope from the Anthropic SDK sometimes lands here
+      // with a `.output` or `.text` field in place of `.content`.
+      if (typeof resp === 'object' && !Array.isArray(resp)) {
+        if (typeof resp.output === 'string') return extractWebSearchResults(resp.output);
+        if (typeof resp.text === 'string') return extractWebSearchResults(resp.text);
+      }
       // Structured shapes first.
       if (typeof resp === 'object' && !Array.isArray(resp)) {
         var arr = Array.isArray(resp.results) ? resp.results
@@ -3680,6 +3684,20 @@
     function hostFromUrl(u) {
       if (!u) return '';
       try { return new URL(u).host; } catch (e) { return u; }
+    }
+
+    // Collapse WebSearch's possibly-wrapped response into a single text
+    // string. Handles plain strings, MCP envelopes, { output } / { text }
+    // objects, and falls back to JSON.stringify for anything else.
+    function toWebSearchText(resp) {
+      if (typeof resp === 'string') return resp;
+      var unwrapped = unwrapMcpText(resp);
+      if (unwrapped !== null) return unwrapped;
+      if (resp && typeof resp === 'object') {
+        if (typeof resp.output === 'string') return resp.output;
+        if (typeof resp.text === 'string') return resp.text;
+      }
+      return tryJson(resp);
     }
 
     // Pull the prose that follows the "Links: [...]" line. That's the

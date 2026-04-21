@@ -1463,7 +1463,18 @@
     letter-spacing: 1.2px;
   }
   .cn-header-sub { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
-  .cn-header-thinking { color: var(--text-dim); font-style: italic; }
+  /* Thinking indicator in the mirror header — ✻ line sourced from the
+     TUI's "Brewed for Ns" scrape. Auto-hides when empty; pulses accent
+     red when active so the state is obvious at a glance. */
+  .cn-header-thinking {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    animation: live-pulse 2.4s ease-in-out infinite;
+  }
+  .cn-header-thinking:empty { display: none; }
 
   .cn-main-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .cn-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }

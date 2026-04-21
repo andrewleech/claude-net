@@ -526,6 +526,8 @@ export interface MirrorSessionSummary {
   cwd: string;
   created_at: string;
   last_event_at: string;
+  /** ISO string if the session has been closed, null otherwise. */
+  closed_at: string | null;
   watcher_count: number;
   transcript_len: number;
 }

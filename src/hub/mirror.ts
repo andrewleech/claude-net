@@ -690,6 +690,7 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     cwd: entry.cwd,
     created_at: entry.createdAt.toISOString(),
     last_event_at: entry.lastEventAt.toISOString(),
+    closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
     watcher_count: entry.watchers.size,
     transcript_len: entry.transcript.length,
   };

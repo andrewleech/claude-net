@@ -318,6 +318,49 @@ export interface MirrorActivityEvent {
   ts: number;
 }
 
+// ── Host channel (daemon → hub long-lived WS at /ws/host) ────────────────
+
+/**
+ * First frame the daemon sends on /ws/host after opening. Identifies the
+ * host + advertises its launch policy so the dashboard knows which RPCs
+ * to expose for it.
+ */
+export interface HostRegisterFrame {
+  action: "host_register";
+  host_id: string;
+  user: string;
+  hostname: string;
+  home: string;
+  recent_cwds: string[];
+  allow_dangerous_skip: boolean;
+}
+
+export interface HostConnectedEvent {
+  event: "host:connected";
+  host_id: string;
+  user: string;
+  hostname: string;
+  home: string;
+  recent_cwds: string[];
+  allow_dangerous_skip: boolean;
+  connected_at: string;
+}
+
+export interface HostDisconnectedEvent {
+  event: "host:disconnected";
+  host_id: string;
+}
+
+export interface HostSummary {
+  host_id: string;
+  user: string;
+  hostname: string;
+  home: string;
+  recent_cwds: string[];
+  allow_dangerous_skip: boolean;
+  connected_at: string;
+}
+
 export type DashboardEvent =
   | AgentConnectedEvent
   | AgentDisconnectedEvent
@@ -328,7 +371,9 @@ export type DashboardEvent =
   | MirrorEventBroadcastEvent
   | MirrorWatcherJoinedEvent
   | MirrorWatcherLeftEvent
-  | MirrorActivityEvent;
+  | MirrorActivityEvent
+  | HostConnectedEvent
+  | HostDisconnectedEvent;
 
 // ── Data model types ──────────────────────────────────────────────────────
 

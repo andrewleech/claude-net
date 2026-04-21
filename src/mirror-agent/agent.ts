@@ -15,6 +15,7 @@ import * as path from "node:path";
 import type { MirrorEventFrame } from "@/shared/types";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
+import { type HostChannelHandle, startHostChannel } from "./host-channel";
 import { HubClient } from "./hub-client";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
 import { Redactor, defaultConfigPaths } from "./redactor";
@@ -158,6 +159,18 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   log(
     `mirror-agent listening on http://${bindHost}:${server.port} (hub=${hubUrl})`,
   );
+
+  // Host control channel — advertises this host to the hub's sidebar and
+  // (in Phase B) accepts ls/mkdir/launch RPCs. Phase A is fire-and-forget:
+  // the channel re-connects on its own; failures don't block the daemon.
+  const hostChannel: HostChannelHandle = startHostChannel({
+    hubUrl,
+    getRecentCwds: () =>
+      [...sessions.values()]
+        .filter((s) => s.cwd)
+        .sort((a, b) => b.lastEventAt - a.lastEventAt)
+        .map((s) => s.cwd),
+  });
 
   // Idle-shutdown watchdog.
   const idleTimer = setInterval(() => {
@@ -877,6 +890,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 
   async function stop(): Promise<void> {
     clearInterval(idleTimer);
+    hostChannel.stop();
     for (const s of [...sessions.values()]) {
       closeSession(s, "shutdown");
     }

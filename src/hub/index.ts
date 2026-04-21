@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
 import { binServerPlugin } from "./bin-server";
+import { HostRegistry } from "./host-registry";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
 import { Registry } from "./registry";
@@ -8,6 +9,7 @@ import { Router } from "./router";
 import { setupPlugin } from "./setup";
 import { Teams } from "./teams";
 import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
+import { wsHostPlugin } from "./ws-host";
 import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
 const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
@@ -18,6 +20,7 @@ const teams = new Teams(registry);
 const router = new Router(registry, teams);
 const mirrorStore = createStoreFromEnv();
 const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
+const hostRegistry = new HostRegistry();
 
 // Wire up disconnect timeout to clean up team memberships
 registry.setTimeoutCleanup((fullName, agentTeams) => {
@@ -29,6 +32,7 @@ registry.setTimeoutCleanup((fullName, agentTeams) => {
 // Wire dashboard broadcast into ws-plugin and mirror-registry
 setDashboardBroadcast(broadcastToDashboards);
 mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
+hostRegistry.setDashboardBroadcast(broadcastToDashboards);
 
 // Resolve plugin.ts path relative to hub source directory
 const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
@@ -78,14 +82,15 @@ let app = new Elysia()
     set.headers["content-type"] = "application/javascript";
     return await getDashboardParsersJs();
   })
-  .use(apiPlugin({ registry, teams, router, startedAt }))
+  .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
   .use(mirrorPlugin({ mirrorRegistry }))
   .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));
 
 app = wsPlugin(app, registry, teams, router);
-app = wsDashboardPlugin(app, registry, teams);
+app = wsDashboardPlugin(app, registry, teams, hostRegistry);
 app = wsMirrorPlugin(app, mirrorRegistry);
+app = wsHostPlugin(app, hostRegistry);
 
 // Optional TLS. If CLAUDE_NET_TLS_CERT and CLAUDE_NET_TLS_KEY are both set,
 // bind HTTPS/WSS. The existing message-bus endpoints (/ws, /api/*) work
@@ -108,4 +113,12 @@ if (tlsCert && tlsKey) {
   console.log(`claude-net hub listening on port ${port}`);
 }
 
-export { app, registry, teams, router, mirrorRegistry, startedAt };
+export {
+  app,
+  registry,
+  teams,
+  router,
+  mirrorRegistry,
+  hostRegistry,
+  startedAt,
+};

@@ -7,6 +7,7 @@
     "test": "bun test",
     "lint": "biome check .",
     "fmt": "biome format --write .",
+    "capture-fixtures": "bun run scripts/capture-tool-fixtures.ts",
     "docker:build": "docker build -t claude-net .",
     "docker:run": "docker run -p 4815:4815 claude-net"
   },

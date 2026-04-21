@@ -1,0 +1,13 @@
+{
+  "tool_name": "mcp__claude-net__list_agents",
+  "input": {},
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"agents\":[{\"name\":\"claude-net:andrew@laptop\",\"status\":\"online\"},{\"name\":\"reviewer:bob@desktop\",\"status\":\"online\"}]}"
+      }
+    ]
+  },
+  "captured_at": "2026-04-21T12:00:00.000Z"
+}

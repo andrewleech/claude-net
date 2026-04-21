@@ -1589,6 +1589,26 @@
   .cn-launch-btn:hover { background: var(--accent-ink); }
   .cn-launch-btn:disabled { opacity: 0.4; cursor: default; }
   .cn-host-child { padding-left: 22px !important; }
+  .cn-session-row {
+    align-items: flex-start !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+  }
+  .cn-session-row .agent-dot { margin-top: 4px; }
+  .cn-session-body { flex: 1; min-width: 0; line-height: 1.3; }
+  .cn-session-title { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cn-session-title .mli-sid { color: var(--text-muted); font-weight: 400; }
+  .cn-session-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0.2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cn-session-cwd { color: var(--text-dim); }
+  .cn-session-age { color: var(--text-muted); }
   .cn-ghost-launch {
     color: var(--text-dim);
     font-style: italic;
@@ -2276,26 +2296,49 @@
     );
   }
 
-  // Row for a mirror session (clickable, opens the mirror view).
-  // Label = owner_agent's short name, suffixed with sid-tail when
-  // multiple sessions share an owner so the user can tell them apart.
+  // Two-line row for a mirror session:
+  //   line 1: short name (+ sid-tail if owner collides with another session)
+  //   line 2: cwd's last two segments · "2m ago" style age
+  // Clickable, opens the mirror view on select.
   function renderSessionRow(sess, ownerCounts) {
     var activeCls = sess.sid === activeAgentSid ? ' active' : '';
     var shortMatch = String(sess.owner_agent || '').match(/^([^:]+):/);
     var label = shortMatch ? shortMatch[1] : sess.owner_agent;
     var suffix = '';
     if ((ownerCounts[sess.owner_agent] || 0) > 1) {
-      suffix = ' · ' + String(sess.sid || '').slice(0, 6);
+      suffix = ' <span class="mli-sid">· ' + escapeHtml(String(sess.sid || '').slice(0, 6)) + '</span>';
     }
+    var cwd = String(sess.cwd || '');
+    var parts = cwd.split('/').filter(Boolean);
+    var cwdShort = parts.length <= 2 ? cwd : '…/' + parts.slice(-2).join('/');
+    var age = relativeTime(sess.last_event_at);
     return (
-      '<a class="list-group-item list-group-item-action agent-item cn-host-child' + activeCls + '"'
+      '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + '"'
       + ' href="#agent=' + encodeURIComponent(sess.sid) + '"'
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
       + '<span class="agent-dot online"></span>'
-      + '<span class="agent-name">' + escapeHtml(label + suffix) + '</span>'
+      + '<div class="cn-session-body">'
+      +   '<div class="cn-session-title">' + escapeHtml(label) + suffix + '</div>'
+      +   '<div class="cn-session-sub">'
+      +     '<span class="cn-session-cwd">' + escapeHtml(cwdShort) + '</span>'
+      +     (age ? ' <span class="cn-session-age">· ' + escapeHtml(age) + '</span>' : '')
+      +   '</div>'
+      + '</div>'
       + '</a>'
     );
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return '';
+    var t = new Date(iso).getTime();
+    if (!isFinite(t)) return '';
+    var dt = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (dt < 10) return 'just now';
+    if (dt < 60) return dt + 's ago';
+    if (dt < 3600) return Math.floor(dt / 60) + 'm ago';
+    if (dt < 86400) return Math.floor(dt / 3600) + 'h ago';
+    return Math.floor(dt / 86400) + 'd ago';
   }
 
   // Row for an MCP agent that has no live mirror session — messaging-

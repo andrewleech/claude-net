@@ -788,7 +788,7 @@ export class MirrorRegistry {
    *  watchers. Not stored in the transcript; purely live-view signal. */
   broadcastThinking(
     sid: string,
-    payload: { active: boolean; status?: string },
+    payload: { active: boolean; startedAt?: number; tool?: string | null },
   ): void {
     const entry = this.sessions.get(sid);
     if (!entry) return;
@@ -796,7 +796,10 @@ export class MirrorRegistry {
       event: "mirror:thinking",
       sid,
       active: payload.active,
-      ...(payload.status ? { status: payload.status } : {}),
+      ...(typeof payload.startedAt === "number"
+        ? { startedAt: payload.startedAt }
+        : {}),
+      ...(payload.tool !== undefined ? { tool: payload.tool } : {}),
     });
     for (const w of entry.watchers) {
       try {
@@ -1453,7 +1456,9 @@ export function wsMirrorPlugin(
       } else if (frame.action === "mirror_thinking" && frame.sid === meta.sid) {
         mirrorRegistry.broadcastThinking(meta.sid, {
           active: Boolean(frame.active),
-          status: typeof frame.status === "string" ? frame.status : undefined,
+          startedAt:
+            typeof frame.startedAt === "number" ? frame.startedAt : undefined,
+          tool: typeof frame.tool === "string" ? frame.tool : null,
         });
       }
     },

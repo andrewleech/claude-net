@@ -81,50 +81,6 @@ const RECOVERY_INITIAL_DELAY_MS = 1_000;
 const RECOVERY_MAX_DELAY_MS = 30_000;
 const RECOVERY_MAX_ATTEMPTS = 20;
 
-/** Thinking-indicator poller: tmux capture cadence, and how long a
- *  session can go without matching the `✻` line before we assume the
- *  turn is over. */
-const THINKING_POLL_MS = 2_000;
-const THINKING_IDLE_MS = 8_000;
-
-function extractThinkingStatus(paneText: string): string | null {
-  // Claude Code's TUI ends each turn by leaving a `✻ Brewed for Ns`
-  // footer in the content area, so scrollback is full of them. We only
-  // want the CURRENTLY-active one: the last non-empty line of the
-  // content area (i.e. the line immediately above the input-box top
-  // separator `────────`). If that line starts with ✻, Claude is
-  // actively thinking; anything else means the turn is done.
-  const lines = paneText.split("\n");
-  const sepRx = /^─{20,}$/;
-  // Scan bottom-up. The tail of the pane looks like:
-  //   [content area]
-  //   ────────        ← top-of-input separator (second match up)
-  //   ❯ …             ← input lines (any count)
-  //   ────────        ← bottom-of-input separator (first match up)
-  //   statusline
-  // Find the second separator going up; the content area ends on the
-  // line immediately above it.
-  let topSepIdx = -1;
-  let sepsSeen = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (sepRx.test((lines[i] ?? "").trim())) {
-      sepsSeen++;
-      if (sepsSeen === 2) {
-        topSepIdx = i;
-        break;
-      }
-    }
-  }
-  if (topSepIdx <= 0) return null;
-  // Find the last non-empty line above the separator.
-  for (let i = topSepIdx - 1; i >= 0; i--) {
-    const trimmed = (lines[i] ?? "").trim();
-    if (!trimmed) continue;
-    return trimmed.startsWith("✻") ? trimmed : null;
-  }
-  return null;
-}
-
 /** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
 const PASTE_DIR = "/tmp/claude-net/pastes";
 /** Delete paste files older than this on agent startup. */
@@ -395,9 +351,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // session we already emit every text block (including the final
     // one), so suppress the hook-sourced duplicate. The hook's arrival
     // is still our "turn ended" signal for the thinking indicator —
-    // stop the poller before returning.
+    // Stop / SubagentStop ends the turn. The hook's arrival is still
+    // the definitive turn-ended signal for the thinking indicator even
+    // when we're about to suppress its event (because the JSONL tail
+    // already emitted the final text).
     if (ingested.frame.kind === "assistant_message" && session.tail !== null) {
-      stopThinkingPoller(session, "turn-end");
+      onTurnEnd(session);
       return new Response("suppressed-tail-active", { status: 202 });
     }
 
@@ -405,15 +364,21 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
 
-    // Thinking-indicator: a turn starts on user_prompt and ends on
-    // assistant_message (the final text) or session_end.
+    // Drive the thinking indicator purely off hook transitions.
     if (ingested.frame.kind === "user_prompt") {
-      startThinkingPoller(session);
+      onTurnStart(session);
+    } else if (ingested.frame.kind === "tool_call") {
+      const payload = ingested.frame.payload as { tool_name?: string };
+      const toolName =
+        typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
+      onToolStart(session, toolName);
+    } else if (ingested.frame.kind === "tool_result") {
+      onToolEnd(session);
     } else if (
       ingested.frame.kind === "assistant_message" ||
       ingested.frame.kind === "session_end"
     ) {
-      stopThinkingPoller(session, "turn-end");
+      onTurnEnd(session);
     }
 
     // Close on session_end.
@@ -931,74 +896,73 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   // ── Thinking indicator ──────────────────────────────────────────────
-  // Starts on user_prompt, stops on assistant_message or session_end.
-  // While active, polls the tmux pane every THINKING_POLL_MS and emits
-  // a `mirror_thinking` frame (ephemeral; not stored on hub) whenever
-  // the scraped status line changes. Auto-stops if no status line
-  // matches for THINKING_IDLE_MS (Claude landed at an idle prompt).
-  const thinkingPolls = new Map<
+  // Hook-driven. A turn begins on UserPromptSubmit (→ user_prompt),
+  // runs through any number of PreToolUse/PostToolUse pairs
+  // (→ tool_call / tool_result), and ends on Stop/SubagentStop
+  // (→ assistant_message hook) or session_end. We emit a
+  // `mirror_thinking` frame on each state transition carrying the
+  // turn's start timestamp and the currently-running tool name (if
+  // any); the dashboard ticks the elapsed-seconds counter client-side.
+  const turnState = new Map<
     string,
-    {
-      timer: ReturnType<typeof setInterval>;
-      lastStatus: string | null;
-      lastMatchAt: number;
-    }
+    { startedAt: number; currentTool: string | null }
   >();
 
-  function startThinkingPoller(session: SessionState): void {
-    if (!session.tmuxPane || session.closed) return;
-    if (thinkingPolls.has(session.sid)) return;
-    const state = {
-      timer: null as unknown as ReturnType<typeof setInterval>,
-      lastStatus: null as string | null,
-      lastMatchAt: Date.now(),
-    };
-    const tick = async (): Promise<void> => {
-      if (session.closed || !session.tmuxPane) {
-        stopThinkingPoller(session, "session-closed");
-        return;
-      }
-      const cap = await injector.capturePane(session.tmuxPane, 20);
-      if (!cap.ok) return;
-      const status = extractThinkingStatus(cap.output);
-      if (status) {
-        state.lastMatchAt = Date.now();
-        if (status !== state.lastStatus) {
-          state.lastStatus = status;
-          emitThinkingFrame(session, { active: true, status });
-        }
-      } else if (Date.now() - state.lastMatchAt > THINKING_IDLE_MS) {
-        stopThinkingPoller(session, "idle");
-      }
-    };
-    state.timer = setInterval(() => {
-      void tick();
-    }, THINKING_POLL_MS);
-    if (typeof state.timer === "object" && "unref" in state.timer) {
-      state.timer.unref();
-    }
-    thinkingPolls.set(session.sid, state);
-    void tick();
+  function onTurnStart(session: SessionState): void {
+    const state = { startedAt: Date.now(), currentTool: null as string | null };
+    turnState.set(session.sid, state);
+    emitThinkingFrame(session, {
+      active: true,
+      startedAt: state.startedAt,
+      tool: null,
+    });
   }
 
-  function stopThinkingPoller(session: SessionState, _reason: string): void {
-    const state = thinkingPolls.get(session.sid);
+  function onToolStart(session: SessionState, toolName: string): void {
+    const state = turnState.get(session.sid);
     if (!state) return;
-    clearInterval(state.timer);
-    thinkingPolls.delete(session.sid);
+    state.currentTool = toolName;
+    emitThinkingFrame(session, {
+      active: true,
+      startedAt: state.startedAt,
+      tool: toolName,
+    });
+  }
+
+  function onToolEnd(session: SessionState): void {
+    const state = turnState.get(session.sid);
+    if (!state) return;
+    state.currentTool = null;
+    emitThinkingFrame(session, {
+      active: true,
+      startedAt: state.startedAt,
+      tool: null,
+    });
+  }
+
+  function onTurnEnd(session: SessionState): void {
+    if (!turnState.has(session.sid)) return;
+    turnState.delete(session.sid);
     emitThinkingFrame(session, { active: false });
   }
 
   function emitThinkingFrame(
     session: SessionState,
-    payload: { active: boolean; status?: string },
+    payload: {
+      active: boolean;
+      startedAt?: number;
+      tool?: string | null;
+    },
   ): void {
     if (!session.ws) return;
     const frame = {
       action: "mirror_thinking" as const,
       sid: session.sid,
       active: payload.active,
-      ...(payload.status ? { status: payload.status } : {}),
+      ...(payload.startedAt !== undefined
+        ? { startedAt: payload.startedAt }
+        : {}),
+      ...(payload.tool !== undefined ? { tool: payload.tool } : {}),
     };
     session.ws.send(JSON.stringify(frame));
   }
@@ -1023,9 +987,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (session.closed) return;
     session.closed = true;
     log(`[${session.sid}] closing (${reason})`);
-    // Stop the thinking poller BEFORE nulling session.ws so its
-    // final "active: false" frame still goes out.
-    stopThinkingPoller(session, "session-close");
+    // Clear any open turn-state BEFORE nulling session.ws so the final
+    // active:false frame can still go out.
+    onTurnEnd(session);
     if (session.tail) {
       session.tail.stop();
       session.tail = null;

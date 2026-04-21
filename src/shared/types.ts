@@ -110,15 +110,24 @@ export interface MirrorCommandsDoneFrame {
 
 /**
  * Ephemeral "is Claude currently working" signal from the agent. Not
- * stored in the transcript — broadcast-only to watchers. Agent scrapes
- * the `✻ Brewed for Ns` line out of the tmux pane every couple of
- * seconds while a turn is in progress, and emits this frame on change.
+ * stored in the transcript — broadcast-only to watchers. Derived from
+ * the Claude Code hook stream:
+ * - UserPromptSubmit → active=true, startedAt=now
+ * - PreToolUse       → active=true, tool=<name>
+ * - PostToolUse      → active=true, tool=null (between tools)
+ * - Stop/SubagentStop / session_end → active=false
+ * The dashboard computes elapsed time client-side from startedAt so the
+ * ghost row's "✻ Thinking for Ns" counter ticks without any further
+ * network traffic.
  */
 export interface MirrorThinkingFrame {
   action: "mirror_thinking";
   sid: string;
   active: boolean;
-  status?: string;
+  /** ISO-ish epoch ms timestamp when the current turn started. */
+  startedAt?: number;
+  /** Tool name if a tool is currently running, else null. */
+  tool?: string | null;
 }
 
 export type PluginFrame =

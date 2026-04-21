@@ -3367,15 +3367,33 @@
     }
 
     var thinkingEl = document.getElementById('mirror-thinking');
-    function updateThinkingIndicator(active, status) {
+    // Turn state is pushed once per transition; the elapsed-seconds
+    // counter is ticked client-side off startedAt so we don't need
+    // per-second network traffic.
+    var thinkingState = { active: false, startedAt: 0, tool: null };
+    var thinkingTicker = null;
+    function renderThinking() {
       if (!thinkingEl) return;
-      if (active && status) {
-        thinkingEl.textContent = status;
-        thinkingEl.classList.add('is-active');
-      } else {
+      if (!thinkingState.active) {
         thinkingEl.classList.remove('is-active');
         thinkingEl.textContent = '';
+        return;
       }
+      var secs = Math.max(0, Math.floor((Date.now() - thinkingState.startedAt) / 1000));
+      var verb = thinkingState.tool ? 'Running ' + thinkingState.tool : 'Thinking';
+      thinkingEl.textContent = '✻ ' + verb + ' for ' + secs + 's';
+      thinkingEl.classList.add('is-active');
+    }
+    function updateThinkingIndicator(active, startedAt, tool) {
+      thinkingState.active = !!active;
+      thinkingState.tool = typeof tool === 'string' ? tool : null;
+      if (active) {
+        if (typeof startedAt === 'number') thinkingState.startedAt = startedAt;
+        if (!thinkingTicker) thinkingTicker = setInterval(renderThinking, 1000);
+      } else {
+        if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
+      }
+      renderThinking();
     }
 
     var isOwner = false;
@@ -3424,7 +3442,7 @@
         try { msg = JSON.parse(e.data); } catch { return; }
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
-        else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.status);
+        else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool);
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';

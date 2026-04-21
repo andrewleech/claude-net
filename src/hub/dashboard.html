@@ -941,6 +941,11 @@
     font-size: 12px; color: var(--text-dim); margin-top: 4px;
     line-height: 1.45;
   }
+  .m-web-summary {
+    padding: 6px 10px;
+    background: var(--bg-code); border: 1px solid var(--border-dim);
+    max-height: 360px; overflow: auto;
+  }
 
   /* ── GREP — ripgrep teletype output. ── */
   .m-grep {
@@ -2683,7 +2688,7 @@
           }
           body += '</div>';
           appendDetails(el, totalLines + ' line' + (totalLines === 1 ? '' : 's'),
-            body, { open: true });
+            body);
         },
       },
       Bash: {
@@ -3216,15 +3221,28 @@
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); return; }
+          // Work off the raw text for the "AI summary" detail; parsed
+          // results come from the same string.
+          var rawText = typeof p.response === 'string'
+            ? p.response
+            : (unwrapMcpText(p.response) != null
+                ? String(unwrapMcpText(p.response))
+                : tryJson(p.response));
           var results = extractWebSearchResults(p.response);
           if (results.length === 0) {
             setStatusOk(el, 'no results');
-            var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
             appendDetails(el, 'raw response',
-              '<pre>' + escapeHtml(truncateLines(resp || '', 40)) + '</pre>');
+              '<pre>' + escapeHtml(truncateLines(rawText || '', 40)) + '</pre>');
             return;
           }
           setStatusOk(el, results.length + ' result' + (results.length === 1 ? '' : 's'));
+          // Unique site count — useful at-a-glance signal.
+          var hosts = {};
+          for (var hi = 0; hi < results.length; hi++) {
+            var h = hostFromUrl(results[hi].url);
+            if (h) hosts[h] = true;
+          }
+          var hostCount = Object.keys(hosts).length;
           var body = '<ul class="m-web-results">';
           for (var i = 0; i < results.length; i++) {
             var r = results[i];
@@ -3239,8 +3257,18 @@
               '</li>';
           }
           body += '</ul>';
-          appendDetails(el, results.length + ' result' + (results.length === 1 ? '' : 's'),
+          appendDetails(el,
+            results.length + ' result' + (results.length === 1 ? '' : 's') +
+              ' across ' + hostCount + ' site' + (hostCount === 1 ? '' : 's'),
             body, { open: true });
+          // AI-generated summary text arrives after the "Links: [...]" line.
+          // Stash it as a collapsed details so the card offers the narrative
+          // without cluttering the link list.
+          var summary = extractWebSearchSummary(rawText || '');
+          if (summary) {
+            appendDetails(el, 'summary',
+              '<div class="md-body m-web-summary">' + renderMarkdown(summary) + '</div>');
+          }
         },
       },
       WebFetch: {
@@ -3282,27 +3310,37 @@
           var query = (p.input && p.input.query) || '';
           var n = p.input && p.input.max_results;
           el.innerHTML = makeHeadline('ToolSearch',
-            '🧰 <span class="m-web-query">' + escapeHtml(query) + '</span>',
+            'load tool schemas matching <code class="m-web-query">' +
+              escapeHtml(query) + '</code>',
             (typeof n === 'number') ? 'max ' + n : null);
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); return; }
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
           var names = extractToolSearchNames(String(resp || ''));
-          setStatusOk(el, names.length + ' tool' + (names.length === 1 ? '' : 's'));
+          setStatusOk(el, names.length + ' loaded');
+          // Show the loaded tool names inline so the card tells the whole
+          // story without needing to expand. Anything > 6 goes into the
+          // details for breathing room.
+          var inline = document.createElement('div');
+          inline.className = 'm-tool-sub m-cn-loaded';
+          if (!names.length) {
+            inline.textContent = '(no matches)';
+          } else if (names.length <= 6) {
+            inline.innerHTML = '→ ' + names.map(function(n) {
+              return '<code>' + escapeHtml(n) + '</code>';
+            }).join(', ');
+          } else {
+            inline.innerHTML = '→ ' + names.slice(0, 6).map(function(n) {
+              return '<code>' + escapeHtml(n) + '</code>';
+            }).join(', ') +
+              ' <span class="m-cn-muted">+' + (names.length - 6) + ' more</span>';
+          }
+          el.appendChild(inline);
           if (!names.length) {
             appendDetails(el, 'raw response',
               '<pre>' + escapeHtml(truncateLines(String(resp || ''), 20)) + '</pre>');
-            return;
           }
-          var body = '<ul class="m-cn-list">';
-          for (var i = 0; i < names.length; i++) {
-            body += '<li><code>' + escapeHtml(names[i]) + '</code></li>';
-          }
-          body += '</ul>';
-          appendDetails(el,
-            names.length + ' tool' + (names.length === 1 ? '' : 's') + ' loaded',
-            body, { open: true });
         },
       },
       Skill: {
@@ -3525,7 +3563,12 @@
     }
 
     // Defensive extractor for list_agents / list_teams responses.
+    // MCP tool responses arrive as an array (or { content: [...] }) of
+    // { type: 'text', text: '<JSON>' } blocks — unwrap those before
+    // looking for the list.
     function extractCnList(resp, key) {
+      var unwrapped = unwrapMcpText(resp);
+      if (unwrapped !== null) return extractCnList(unwrapped, key);
       if (Array.isArray(resp)) return resp;
       if (resp && typeof resp === 'object') {
         if (Array.isArray(resp[key])) return resp[key];
@@ -3538,6 +3581,22 @@
         } catch (e) { /* not JSON */ }
       }
       return [];
+    }
+
+    // If `resp` looks like an MCP text-content envelope, join the text
+    // blocks and JSON.parse them. Returns the parsed value on success,
+    // or null if this wasn't an envelope.
+    function unwrapMcpText(resp) {
+      var blocks = null;
+      if (Array.isArray(resp)) blocks = resp;
+      else if (resp && typeof resp === 'object' && Array.isArray(resp.content)) blocks = resp.content;
+      if (!blocks || blocks.length === 0) return null;
+      // Only treat as MCP envelope when every block carries a string `text`.
+      for (var i = 0; i < blocks.length; i++) {
+        if (!blocks[i] || typeof blocks[i].text !== 'string') return null;
+      }
+      var joined = blocks.map(function(b) { return b.text; }).join('');
+      try { return JSON.parse(joined); } catch (e) { return null; }
     }
 
     // Pull tool names out of a ToolSearch response. The tool returns a
@@ -3563,6 +3622,8 @@
     function extractWebSearchResults(resp) {
       var out = [];
       if (!resp) return out;
+      var unwrapped = unwrapMcpText(resp);
+      if (unwrapped !== null) return extractWebSearchResults(unwrapped);
       // Structured shapes first.
       if (typeof resp === 'object' && !Array.isArray(resp)) {
         var arr = Array.isArray(resp.results) ? resp.results
@@ -3619,6 +3680,17 @@
     function hostFromUrl(u) {
       if (!u) return '';
       try { return new URL(u).host; } catch (e) { return u; }
+    }
+
+    // Pull the prose that follows the "Links: [...]" line. That's the
+    // small-model summary with per-site context the user actually wants
+    // to read. Trailing "REMINDER: ..." sentinel lines get trimmed.
+    function extractWebSearchSummary(text) {
+      if (!text) return '';
+      var m = text.match(/Links:\s*\[[\s\S]*?\]\s*\n+([\s\S]*)$/);
+      var tail = m ? m[1] : text;
+      tail = tail.replace(/\n+REMINDER:[\s\S]*$/i, '').trim();
+      return tail;
     }
 
     // Render an unknown tool with a clear "no custom view yet" note.

@@ -1852,6 +1852,11 @@
     max-height: 33vh;
     overflow-y: auto;
     padding: 0 20px 10px;
+    /* .cn-view is a flex column. Without flex-shrink: 0 the transcript
+       can squeeze the panel below its natural content size on tight
+       mobile viewports — which looks like the panel is half a row tall.
+       Pin it to its content height (up to max-height). */
+    flex-shrink: 0;
   }
   .cn-tasks-panel .cn-tasks-head {
     font-family: var(--font-mono);

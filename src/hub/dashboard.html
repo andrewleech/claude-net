@@ -3130,6 +3130,11 @@
       var key = String(id);
       var cur = taskState.get(key) || {};
       var merged = Object.assign({}, cur, partial);
+      // Stamp when the task transitions INTO completed so the panel can
+      // show the most recently finished ones first.
+      if (merged.status === 'completed' && cur.status !== 'completed') {
+        merged.completedAt = Date.now();
+      }
       taskState.set(key, merged);
       scheduleTaskPanelRefresh();
       return merged;
@@ -3159,22 +3164,37 @@
       return { total: total, inProg: inProg, done: done };
     }
 
+    // How many recently-completed tasks to show at the top of the panel
+    // (after In progress). Matches Claude Code's TUI "last few wins" feel
+    // without letting a long session's completed list push active items
+    // off-screen.
+    var COMPLETED_CAP = 5;
+
     function renderTaskPanelContent() {
       if (!taskPanelList) return;
       var buckets = { in_progress: [], pending: [], completed: [] };
-      var keys = [...taskState.keys()].sort(function(a, b) {
-        var na = Number(a), nb = Number(b);
-        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
-        return String(a).localeCompare(String(b));
-      });
-      keys.forEach(function(id) {
-        var t = taskState.get(id);
+      taskState.forEach(function(t, id) {
         if (!t || t.status === 'deleted') return;
         var bucket = t.status === 'in_progress' ? 'in_progress'
           : t.status === 'completed' ? 'completed'
           : 'pending';
         buckets[bucket].push([id, t]);
       });
+      // In-progress and pending: stable numeric-id order.
+      var byId = function(a, b) {
+        var na = Number(a[0]), nb = Number(b[0]);
+        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+        return String(a[0]).localeCompare(String(b[0]));
+      };
+      buckets.in_progress.sort(byId);
+      buckets.pending.sort(byId);
+      // Completed: most-recent first, trimmed to the cap.
+      buckets.completed.sort(function(a, b) {
+        return (b[1].completedAt || 0) - (a[1].completedAt || 0);
+      });
+      var recentCompleted = buckets.completed.slice(0, COMPLETED_CAP);
+      var hiddenCompleted = buckets.completed.length - recentCompleted.length;
+
       function renderBucket(label, rows) {
         if (!rows.length) return '';
         var html = '<div class="cn-tasks-head">' + escapeHtml(label) + '</div>';
@@ -3183,9 +3203,12 @@
         });
         return html;
       }
+      var completedLabel = hiddenCompleted > 0
+        ? 'Recently completed (+' + hiddenCompleted + ' older)'
+        : 'Recently completed';
       var html = renderBucket('In progress', buckets.in_progress) +
-        renderBucket('Pending', buckets.pending) +
-        renderBucket('Completed', buckets.completed);
+        renderBucket(completedLabel, recentCompleted) +
+        renderBucket('Pending', buckets.pending);
       taskPanelList.innerHTML = html ||
         '<div class="text-muted small text-center py-3">No tasks yet.</div>';
       // Bootstrap Collapse sets an inline `height: XXXpx` during the

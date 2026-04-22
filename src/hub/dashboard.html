@@ -3188,6 +3188,14 @@
         renderBucket('Completed', buckets.completed);
       taskPanelList.innerHTML = html ||
         '<div class="text-muted small text-center py-3">No tasks yet.</div>';
+      // Bootstrap Collapse sets an inline `height: XXXpx` during the
+      // show transition and only clears it on transitionend. If the
+      // content has grown since the last open, that stale measurement
+      // keeps the panel from expanding. Clearing it here lets CSS
+      // (max-height: 33vh + natural content) drive the size.
+      if (taskPanelEl && taskPanelEl.classList.contains('show')) {
+        taskPanelEl.style.height = '';
+      }
     }
 
     function updateTaskPanelBadge() {

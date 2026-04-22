@@ -168,6 +168,11 @@
   .mirror-transcript {
     flex: 1;
     overflow-y: auto;
+    /* Prevent long tool output (bash cmds, URLs) from pushing the
+       viewport sideways on mobile. `clip` would disable panning inside
+       nested horizontal-scroll blocks (diff, code) — use `hidden` here
+       so those keep their own overflow. */
+    overflow-x: hidden;
     padding: 8px 0 16px 0;
     display: flex;
     flex-direction: column;
@@ -377,6 +382,7 @@
     color: var(--text-muted);
     margin-top: 4px;
     letter-spacing: 0.3px;
+    overflow-wrap: anywhere;
   }
   .m-tool-badge {
     display: inline-block;
@@ -1399,7 +1405,16 @@
 
   /* Respect Bootstrap's reset but keep our app full-viewport. */
   html, body { height: 100%; }
-  body { overflow: hidden; }
+  /* Lock horizontal scroll/over-scroll. `overflow-x: clip` hides overflow
+     without creating a scroll container (so children still scroll their
+     own y-axis), and `overscroll-behavior-x` kills the iOS/Chrome rubber-
+     band horizontal pan on mobile. */
+  html, body {
+    overflow-x: clip;
+    overscroll-behavior-x: none;
+    max-width: 100vw;
+  }
+  body { overflow-y: hidden; }
 
   /* Navbar: panel background, mono chrome type, brand in sans. */
   nav[data-cn-navbar] {

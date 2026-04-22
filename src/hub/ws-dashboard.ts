@@ -1,5 +1,6 @@
 import type { DashboardEvent, InboundMessageFrame } from "@/shared/types";
 import type { Elysia } from "elysia";
+import type { HostRegistry } from "./host-registry";
 import type { Registry } from "./registry";
 import type { Teams } from "./teams";
 
@@ -52,6 +53,7 @@ function pushInitialState(
   ws: DashboardWs,
   registry: Registry,
   teams: Teams,
+  hostRegistry?: HostRegistry,
 ): void {
   // Send current agents as agent:connected events
   for (const agent of registry.agents.values()) {
@@ -75,17 +77,26 @@ function pushInitialState(
       }),
     );
   }
+
+  // Send currently-connected hosts so a reloaded dashboard immediately
+  // knows which hosts are online without waiting for a daemon to reconnect.
+  if (hostRegistry) {
+    for (const host of hostRegistry.list()) {
+      ws.send(JSON.stringify({ event: "host:connected", ...host }));
+    }
+  }
 }
 
 export function wsDashboardPlugin(
   app: Elysia,
   registry: Registry,
   teams: Teams,
+  hostRegistry?: HostRegistry,
 ): Elysia {
   return app.ws("/ws/dashboard", {
     open(ws: DashboardWs) {
       dashboardClients.add(ws);
-      pushInitialState(ws, registry, teams);
+      pushInitialState(ws, registry, teams, hostRegistry);
     },
 
     message(_ws: DashboardWs, _data: unknown) {

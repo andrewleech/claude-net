@@ -1829,6 +1829,42 @@
   #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
   #mirror-conn.is-error { color: var(--red); }
 
+  /* ── Task panel ───────────────────────────────────────────────
+     Bootstrap's .collapse handles the show/hide and transition;
+     we only supply the chrome that matches the rest of the mirror
+     UI (panel background, accent border, mono subheader text). */
+  #mirror-tasks-btn {
+    font-family: var(--font-mono);
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+  #mirror-tasks-btn .cn-tasks-running {
+    color: var(--gold);
+    margin-left: 6px;
+  }
+  .cn-tasks-panel {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--accent);
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  .cn-tasks-panel .list-group-item {
+    background: transparent;
+    border-color: var(--border-dim);
+    color: var(--text);
+    padding: 6px 20px;
+  }
+  .cn-tasks-panel .list-group-item.cn-tasks-head {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: transparent;
+    padding-top: 10px;
+    padding-bottom: 4px;
+  }
+
   /* Offcanvas overlay (<md) gets a backdrop dimmer. */
   .offcanvas-backdrop { background-color: rgba(0, 0, 0, 0.55); }
 
@@ -1838,8 +1874,9 @@
      brand, agent count and theme toggle all fit at 375px. */
   @media (max-width: 767.98px) {
     .cn-header { flex-wrap: wrap; row-gap: 4px; padding: 6px 12px; }
-    .cn-header #mirror-stop-btn { order: 1; margin-left: auto; }
-    .cn-header .cwd { flex-basis: 100%; order: 2; font-size: 10px; }
+    .cn-header #mirror-tasks-btn { order: 1; margin-left: auto; }
+    .cn-header #mirror-stop-btn { order: 2; }
+    .cn-header .cwd { flex-basis: 100%; order: 3; font-size: 10px; }
     nav[data-cn-navbar] .container-fluid { gap: 6px; padding-inline: 10px; }
     nav[data-cn-navbar] .navbar-brand { font-size: 15px; }
     nav[data-cn-navbar] .badge { font-size: 10px; }
@@ -1906,7 +1943,11 @@
         <span class="cn-header-title" id="mirror-owner"></span>
         <span class="cn-header-sub cwd" id="mirror-cwd"></span>
         <span id="mirror-conn">connecting…</span>
-        <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm ms-auto" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
+        <button id="mirror-tasks-btn" class="btn btn-outline-secondary btn-sm ms-auto d-none" type="button"
+                data-bs-toggle="collapse" data-bs-target="#mirror-tasks-panel"
+                aria-expanded="false" aria-controls="mirror-tasks-panel"
+                title="Show Claude's task list"></button>
+        <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
       </div>
     </header>
 
@@ -1923,6 +1964,12 @@
       <!-- Mirror view (hidden until agent selected) -->
       <section id="mirror-view" class="cn-view d-none">
         <div class="mirror-status" id="mirror-status"></div>
+        <!-- Task panel: drops from the top of the mirror view when the
+             Tasks button in the header is clicked (or auto-opens on first
+             in_progress task). Bootstrap Collapse handles show/hide. -->
+        <div class="collapse cn-tasks-panel" id="mirror-tasks-panel">
+          <div class="list-group list-group-flush" id="mirror-tasks-list"></div>
+        </div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
         <div class="mirror-thinking" id="mirror-thinking"></div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
@@ -3079,7 +3126,103 @@
       var cur = taskState.get(key) || {};
       var merged = Object.assign({}, cur, partial);
       taskState.set(key, merged);
+      scheduleTaskPanelRefresh();
       return merged;
+    }
+
+    // ── Task panel (header dropdown) ────────────────────────────
+    // Bootstrap's Collapse component owns show/hide state via the
+    // button's data-bs-toggle. We just render content off taskState
+    // on every upsert, coalesced to one rAF tick per batch so a
+    // TaskList response with N rows doesn't re-render N times.
+    // Auto-opens once per session the first time a task goes
+    // in_progress; after that the user's toggle is authoritative.
+    var taskPanelList = document.getElementById('mirror-tasks-list');
+    var taskPanelEl = document.getElementById('mirror-tasks-panel');
+    var taskPanelBtn = document.getElementById('mirror-tasks-btn');
+    var taskPanelRefreshPending = false;
+    var taskPanelAutoOpenFired = false;
+
+    function countTasks() {
+      var total = 0, inProg = 0, done = 0;
+      taskState.forEach(function(t) {
+        if (t.status === 'deleted') return;
+        total++;
+        if (t.status === 'in_progress') inProg++;
+        else if (t.status === 'completed') done++;
+      });
+      return { total: total, inProg: inProg, done: done };
+    }
+
+    function renderTaskPanelContent() {
+      if (!taskPanelList) return;
+      var buckets = { in_progress: [], pending: [], completed: [] };
+      var keys = [...taskState.keys()].sort(function(a, b) {
+        var na = Number(a), nb = Number(b);
+        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+        return String(a).localeCompare(String(b));
+      });
+      keys.forEach(function(id) {
+        var t = taskState.get(id);
+        if (!t || t.status === 'deleted') return;
+        var bucket = t.status === 'in_progress' ? 'in_progress'
+          : t.status === 'completed' ? 'completed'
+          : 'pending';
+        buckets[bucket].push([id, t]);
+      });
+      function renderBucket(label, rows) {
+        if (!rows.length) return '';
+        var html = '<div class="list-group-item cn-tasks-head">' +
+          escapeHtml(label) + '</div>';
+        rows.forEach(function(pair) {
+          html += '<div class="list-group-item">' +
+            renderTaskLine(pair[0], pair[1]) + '</div>';
+        });
+        return html;
+      }
+      var html = renderBucket('In progress', buckets.in_progress) +
+        renderBucket('Pending', buckets.pending) +
+        renderBucket('Completed', buckets.completed);
+      taskPanelList.innerHTML = html ||
+        '<div class="list-group-item text-muted small text-center">No tasks yet.</div>';
+    }
+
+    function updateTaskPanelBadge() {
+      if (!taskPanelBtn) return;
+      var c = countTasks();
+      if (c.total === 0) {
+        taskPanelBtn.classList.add('d-none');
+        return;
+      }
+      taskPanelBtn.classList.remove('d-none');
+      var running = c.inProg > 0
+        ? '<span class="cn-tasks-running">' + c.inProg + ' running</span>'
+        : '';
+      taskPanelBtn.innerHTML = 'Tasks ' + c.total + running;
+      // Auto-open once the first time any task goes in_progress.
+      if (c.inProg > 0 && !taskPanelAutoOpenFired && window.bootstrap) {
+        taskPanelAutoOpenFired = true;
+        bootstrap.Collapse.getOrCreateInstance(taskPanelEl).show();
+      }
+      if (taskPanelEl && taskPanelEl.classList.contains('show')) {
+        renderTaskPanelContent();
+      }
+    }
+
+    function scheduleTaskPanelRefresh() {
+      if (taskPanelRefreshPending) return;
+      taskPanelRefreshPending = true;
+      requestAnimationFrame(function() {
+        taskPanelRefreshPending = false;
+        updateTaskPanelBadge();
+      });
+    }
+
+    // Render content on first open so the panel isn't empty if the
+    // user opens it before any upsert fires.
+    if (taskPanelEl) {
+      taskPanelEl.addEventListener('show.bs.collapse', renderTaskPanelContent,
+        { signal: attachSig });
     }
 
     function taskSummaryLine() {

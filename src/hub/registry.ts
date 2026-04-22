@@ -46,15 +46,41 @@ export class Registry {
    * @param ws - WebSocket-like object with send() method
    * @param wsIdentity - Stable identity reference for same-connection detection.
    *   Defaults to `ws` itself. For Elysia, pass `ws.raw` since the wrapper changes per callback.
+   *
+   * Rename: if this WS identity is already registered under a different
+   * name, that's treated as a rename. The old entry is dropped and its
+   * team memberships are carried forward onto the new name. The caller
+   * gets the dropped name back in `renamedFrom` so it can broadcast an
+   * `agent:disconnected` for it and propagate the rename to other
+   * subsystems (mirror sessions, etc.).
    */
   register(
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
   ):
-    | { ok: true; entry: AgentEntry; restored: boolean }
+    | {
+        ok: true;
+        entry: AgentEntry;
+        restored: boolean;
+        renamedFrom?: string;
+      }
     | { ok: false; error: string } {
     const identity = wsIdentity ?? ws;
+
+    // Detect rename: same wsIdentity, different name. At most one match
+    // is possible because register() maintains the invariant.
+    let renamedFrom: string | undefined;
+    let inheritedTeams: Set<string> | null = null;
+    for (const [existingName, entry] of this.agents) {
+      if (entry.wsIdentity === identity && existingName !== fullName) {
+        renamedFrom = existingName;
+        inheritedTeams = new Set(entry.teams);
+        this.agents.delete(existingName);
+        break;
+      }
+    }
+
     const existing = this.agents.get(fullName);
     if (existing && existing.wsIdentity !== identity) {
       return {
@@ -91,11 +117,12 @@ export class Registry {
       host,
       ws,
       wsIdentity: identity,
-      teams: restoredTeams,
+      // Rename wins over disconnected-restore if both apply (unlikely).
+      teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
     };
     this.agents.set(fullName, entry);
-    return { ok: true, entry, restored };
+    return { ok: true, entry, restored, renamedFrom };
   }
 
   unregister(fullName: string): void {

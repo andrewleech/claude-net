@@ -319,4 +319,52 @@ describe("Registry", () => {
     expect(registry.getByFullName("test:alice@host")).not.toBeNull();
     expect(registry.getByFullName("nope:user@host")).toBeNull();
   });
+
+  // ── rename (same WS re-registers under a new name) ─────────────────────
+
+  test("same WS registering a new name drops the old entry", () => {
+    const ws = mockWs();
+    const identity = {};
+    registry.register("old:alice@host", ws, identity);
+    const result = registry.register("new:alice@host", ws, identity);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.renamedFrom).toBe("old:alice@host");
+    expect(registry.agents.has("old:alice@host")).toBe(false);
+    expect(registry.agents.has("new:alice@host")).toBe(true);
+  });
+
+  test("rename carries forward team memberships", () => {
+    const ws = mockWs();
+    const identity = {};
+    registry.register("old:alice@host", ws, identity);
+    const entry = registry.getByFullName("old:alice@host");
+    entry?.teams.add("alpha");
+    entry?.teams.add("beta");
+
+    const result = registry.register("new:alice@host", ws, identity);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect([...result.entry.teams].sort()).toEqual(["alpha", "beta"]);
+  });
+
+  test("rename does not fire renamedFrom on first register", () => {
+    const ws = mockWs();
+    const result = registry.register("solo:alice@host", ws);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.renamedFrom).toBeUndefined();
+  });
+
+  test("rename to an existing name held by another WS fails", () => {
+    const ws1 = mockWs();
+    const ws2 = mockWs();
+    registry.register("me:alice@host", ws1, {});
+    registry.register("other:alice@host", ws2, {});
+    const result = registry.register("other:alice@host", ws1, {});
+    // ws1 wasn't tracked under an identity we can rename from (because
+    // we passed a fresh {} identity each time), but the new name is
+    // owned by ws2 — must fail.
+    expect(result.ok).toBe(false);
+  });
 });

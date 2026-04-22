@@ -1,0 +1,13 @@
+{
+  "tool_name": "mcp__claude-net__list_teams",
+  "input": {},
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"teams\":[{\"name\":\"engineers\",\"members\":[\"claude-net:andrew@laptop\"]},{\"name\":\"reviewers\",\"members\":[\"reviewer:bob@desktop\",\"reviewer:carol@laptop\"]}]}"
+      }
+    ]
+  },
+  "captured_at": "2026-04-21T12:00:00.000Z"
+}

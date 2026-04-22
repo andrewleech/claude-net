@@ -1,0 +1,27 @@
+{
+  "tool_name": "WebSearch",
+  "input": {
+    "query": "bun runtime documentation"
+  },
+  "response": {
+    "query": "bun runtime documentation",
+    "results": [
+      {
+        "content": [
+          {
+            "title": "Bun — Incredibly fast JavaScript runtime",
+            "url": "https://bun.sh/",
+            "snippet": "Bun is an all-in-one toolkit for JavaScript and TypeScript apps."
+          },
+          {
+            "title": "GitHub - oven-sh/bun",
+            "url": "https://github.com/oven-sh/bun",
+            "snippet": "Bun is a fast all-in-one JavaScript runtime."
+          }
+        ]
+      },
+      "Bun is a JavaScript runtime written in Zig, designed as a drop-in replacement for Node.js. It provides a bundler, test runner, and package manager out of the box.\n\nREMINDER: Sources may be outdated."
+    ]
+  },
+  "captured_at": "2026-04-21T12:00:00.000Z"
+}

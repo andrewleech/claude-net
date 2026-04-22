@@ -1,0 +1,16 @@
+{
+  "tool_name": "ToolSearch",
+  "input": {
+    "query": "select:Read,Edit,Grep",
+    "max_results": 3
+  },
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "<functions>\n<function>{\"description\": \"Reads a file\", \"name\": \"Read\", \"parameters\": {}}</function>\n<function>{\"description\": \"Edits a file\", \"name\": \"Edit\", \"parameters\": {}}</function>\n<function>{\"description\": \"Greps files\", \"name\": \"Grep\", \"parameters\": {}}</function>\n</functions>"
+      }
+    ]
+  },
+  "captured_at": "2026-04-21T12:00:00.000Z"
+}

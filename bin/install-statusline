@@ -5,22 +5,21 @@ set -euo pipefail
 # Copies statusline.py to ~/.claude/ and configures settings.json
 # to use it (with optional refreshInterval for live updates).
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-statusline | bash
-#   # or from a local clone:
+# Usage (local clone only):
 #   ./bin/install-statusline
 
 DEST="$HOME/.claude/statusline.py"
 SETTINGS="$HOME/.claude/settings.json"
 
-# Determine source
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || echo "")"
 
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/statusline.py" ]; then
-    cp "$SCRIPT_DIR/statusline.py" "$DEST"
-else
-    curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/statusline.py -o "$DEST"
+if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/statusline.py" ]; then
+    echo "ERROR: install-statusline must be run from a local repo clone." >&2
+    echo "Clone the repo and run ./bin/install-statusline from there." >&2
+    exit 1
 fi
+
+cp "$SCRIPT_DIR/statusline.py" "$DEST"
 
 chmod +x "$DEST"
 

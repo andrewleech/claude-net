@@ -1,8 +1,14 @@
 services:
   hub:
-    image: ghcr.io/andrewleech/claude-net:latest
+    image: ghcr.io/apium/claude-net:latest
     ports:
       - "4815:4815"
     environment:
       - CLAUDE_NET_PORT=4815
+      - CLAUDE_NET_UPLOADS_DIR=/data/uploads
+    volumes:
+      - cn-uploads:/data/uploads
     restart: unless-stopped
+
+volumes:
+  cn-uploads:

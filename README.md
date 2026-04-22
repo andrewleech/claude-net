@@ -17,6 +17,7 @@ If you run multiple Claude Code sessions at once, across multiple projects or ma
 - **Broadcasts** to every online agent
 - **Teams** — ad-hoc groups that appear on first join and vanish when the last member leaves
 - **A live dashboard** at `http://<hub>:4815/` showing connected agents, teams, and a scrolling message feed. You can send messages from it too.
+- **Mirror sessions** — follow a Claude Code session from any browser on your trust network. Live transcript with tool calls, rich diffs, slash-command autocomplete; type prompts back in, paste arbitrarily large blobs, hit Esc to interrupt the agent. Works well on a phone.
 - **Startup ping** — your agent knows within a second of startup whether the channel round-trip is actually working
 - **One Docker container** — no Redis, no Postgres, nothing else to run
 - **Tailscale / LAN-friendly** — trust is network-level, so there's no login flow to deal with
@@ -27,16 +28,20 @@ The fastest way to see it work. Run the hub and a session on the same box.
 
 ```bash
 # 1. Start the hub
-docker run -d -p 4815:4815 ghcr.io/andrewleech/claude-net
+docker run -d -p 4815:4815 ghcr.io/apium/claude-net
 
-# 2. Register the MCP server (user-wide)
+# 2. Install everything — binaries, MCP server registration, mirror hooks
 curl http://localhost:4815/setup | bash
 
-# 3. Start Claude Code with channels enabled
-claude --dangerously-load-development-channels server:claude-net
+# 3. Start Claude Code (via claude-channels for patched channel support)
+claude-channels
 ```
 
+One `curl` does the whole install: downloads `claude-channels` + mirror binaries from the hub to `~/.local/bin/`, registers the claude-net MCP server with Claude Code, merges mirror hooks into `~/.claude/settings.json` (with a backup). Running it twice is safe — everything is idempotent.
+
 On startup you should see a `<channel>` tag from `hub@claude-net` confirming the round-trip is working. The session auto-registers as `session:user@host` where session is the current folder, user is `$USER`, host is `$HOSTNAME`. Then just talk to it: "send a message to X saying Y" or "list the agents".
+
+Mirror is off by default even after install — enable it by adding `{"claudeNet": {"mirror": {"enabled": true}}}` to `~/.claude/settings.json`, then relaunch `claude-channels`. Details in the Mirror Sessions section below.
 
 ## Team deployment
 
@@ -46,7 +51,7 @@ One hub, many agents across the network. Run the container on a machine everyone
 # On the hub host (example: telie.story-kettle.ts.net)
 docker run -d -p 4815:4815 \
   -e CLAUDE_NET_HOST=telie.story-kettle.ts.net \
-  ghcr.io/andrewleech/claude-net
+  ghcr.io/apium/claude-net
 
 # On each participant's machine
 curl http://telie.story-kettle.ts.net:4815/setup | bash
@@ -103,11 +108,13 @@ If you want channels to _just work_ with no prompts, no flags, no setup dialogs,
 
 The launcher also auto-detects MCP servers configured in `~/.claude.json` and adds the right `--dangerously-load-development-channels` flag for each, so you don't have to. Re-patches automatically when Claude Code updates.
 
-Install:
+Install — pipe the hub's `/setup` endpoint to bash. The hub serves its own launcher + mirror binaries so install follows whichever branch / tag is deployed, and doesn't depend on a GitHub org being reachable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+curl -fsSL "$YOUR_HUB/setup" | bash
 ```
+
+Where `$YOUR_HUB` is the URL you use to reach the dashboard (e.g. `https://cn.internal.example.com` or `http://hub.lan:4815`).
 
 Usage:
 
@@ -115,17 +122,86 @@ Usage:
 claude-channels    # drop-in replacement for `claude`
 ```
 
+`bin/install-channels` in the repo is the local-clone install path (`./bin/install-channels` from a cloned source tree); for every remote host, prefer `$HUB/setup`.
+
 Full technical writeup of how each patch works and how to adapt them to a new Claude Code version: [`docs/CLAUDE_CODE_PATCHING_GUIDE.md`](docs/CLAUDE_CODE_PATCHING_GUIDE.md).
 
 ## Statusline
 
 There's a matching statusline script that shows context window usage, 5-hour rate limit, and your claude-net agent name with a connection indicator.
 
+Install from a local repo clone:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-statusline | bash
+./bin/install-statusline
 ```
 
 Wraps to multiple lines on narrow terminals (reads width via `/dev/tty`).
+
+## Mirror sessions (follow & continue a chat from another device)
+
+Mirror is always on whenever a Claude Code session is launched via `claude-channels`. The session streams its conversation to the hub's web UI, which lives at the hub's home page. Open it in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results), type prompts back in, and interrupt the agent — all from anywhere on your trust network, including a phone.
+
+On `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only). The `/setup` script installs the hooks for you; if you skipped that, the launcher prints the hook block to paste into `~/.claude/settings.json`. Every session auto-appears in the dashboard — no MCP call required.
+
+- The mirror-agent listens on loopback only and sits between claude's hooks and the hub — claude never blocks on the network (hard 50ms hook timeout).
+- The hub is expected to sit on a trusted network (LAN / Tailscale / reverse-proxy with auth). No per-session tokens are issued; anyone who can reach the hub can watch any session.
+- In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence via `CLAUDE_NET_MIRROR_STORE` (see below).
+
+**Remote input.** The dashboard's mirror pane has a compose box: type a prompt, hit Enter (or tap Transmit), and `tmux send-keys` drops it into the live claude REPL. Requires the session to run inside tmux — the launcher auto-wraps `claude` in a detached tmux session when `claudeNet.mirror.injection` is `"tmux"` (default) and you're not already in one. Set `CLAUDE_NET_NO_TMUX_WRAP=1` to opt out of the auto-wrap.
+
+Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: the mirror-agent writes the blob to `/tmp/claude-net/pastes/paste-<uuid>.txt` and the hub auto-injects `@<path>` so Claude reads the file. Caps are tunable with `CLAUDE_NET_MIRROR_INJECT_MAX_KB` (default 512) and `CLAUDE_NET_MIRROR_PASTE_MAX_MB` (default 64).
+
+**Stop button.** The ■ button in the mirror header sends Escape to the tmux pane — same as pressing Esc in the TUI, interrupts the current response without exiting.
+
+**Slash-command autocomplete.** Typing `/` at the start of a prompt opens a popover with every slash command available to this session's Claude Code: built-ins, user commands (`~/.claude/commands/`), project-local commands, and plugin-provided commands. Arrow keys + Enter/Tab on desktop, tap on mobile.
+
+**Theme.** Toggle between dark (broadcast-console) and light (newsprint) via the ◐ button; the choice is remembered per-browser.
+
+**Redaction.** The mirror-agent scrubs a starter list of secret formats (AWS keys, GitHub PATs, Anthropic/OpenAI tokens, PEM headers, JWTs) from every event before it leaves your host. Add project-specific regexes at `~/.claude-net/redact.json` or `<cwd>/.claude-net/redact.json`. Convenience, not a compliance control.
+
+**Persistence.** Default is in-memory. Set `CLAUDE_NET_MIRROR_STORE=/path/to/dir` on the hub and transcripts append to `<sid>.jsonl` files; reach them after a hub restart at `/api/mirror/archive/<sid>`. Retention defaults to 24h (`CLAUDE_NET_MIRROR_RETENTION_HOURS`).
+
+**TLS.** Set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
+
+**Rate limits.** `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
+
+**Upgrading.** The mirror-agent daemon is long-lived and the `claude-channels` launcher only probes `/health` (not version) before reusing it. If you update the hub — especially any change under `src/mirror-agent/` — the previously-spawned daemon keeps running the old code and the dashboard shows `NO MIRROR` on every session. Fix with one command:
+
+```bash
+curl -fsSL <hub>/setup | bash
+```
+
+The installer retires the stale daemon (`pkill` + remove `/tmp/claude-net/mirror-agent-*.port`) and the next `claude-channels` launch respawns against the new bundle. If you can't rerun the installer, the manual equivalent is `pkill -f claude-net-mirror-agent && rm -f /tmp/claude-net/mirror-agent-*.port` followed by a fresh `claude-channels` launch.
+
+**Orphan sessions.** Mirror sessions don't auto-close when a claude process exits without a clean `session_end`, or when `/clear` starts a fresh session_id and leaves the previous one behind. The hub runs a sweep every minute that closes sessions whose daemon-agent WS has been unbound AND whose last event is older than `orphanCloseMs` (default 30 min). Still-live sessions are never touched.
+
+## Launching sessions from the web
+
+Every host running `claude-channels` opens a long-lived control socket to the hub (`/ws/host`) separate from the per-session mirror sockets. The dashboard sidebar groups sessions under their host and exposes a **`+ launch`** button per host. Clicking it opens a modal with:
+
+- A text input with live autocomplete. As you type, the hub fetches `GET /api/host/<id>/ls?path=<parent>` and the dashboard filters results by the trailing segment. Tab completes to the common prefix; arrow-keys + Enter pick; tap-to-drill on mobile (tapping a directory auto-appends `/` and re-fetches).
+- A "recent" section at the top with the host's last-used cwds when the input is empty.
+- A `+ create "<path>"` row when the typed path doesn't exist — picks it, mkdir's via `POST /api/host/<id>/mkdir`, then launches.
+- A `Skip permission prompts` checkbox (default checked). When checked, the launched `claude-channels` runs with `--dangerously-skip-permissions`.
+
+Picking Launch POSTs `/api/host/<id>/launch`. The daemon runs `tmux new-session -d -s claude-channels-<uuid> -c <cwd> -- claude-channels [--dangerously-skip-permissions]` as the current user. The new session's first hook registers a mirror with the hub and the dashboard replaces its "launching…" ghost row with the real session within a second or two.
+
+Config lives in `~/.claude/settings.json` under `claudeNet.workspaces` (which paths the daemon allows ls/mkdir/launch inside) and `claudeNet.launch` (whether web launches may include the dangerous skip flag):
+
+```json
+{
+  "claudeNet": {
+    "workspaces": { "roots": ["~/projects"] },
+    "launch":     { "allow_dangerous_skip": true }
+  }
+}
+```
+
+- `workspaces.roots` defaults to `["~/projects"]` when unset. Every roots-path is realpath'd on load; `ls` / `mkdir` / `launch` reject any request whose resolved path isn't inside one of the realpath-roots. Symlink escape is blocked by realpath containment; `..` escape is blocked by `path.resolve`. Paths are passed as argv to `tmux` (never shell-interpolated), so there's no command-injection surface through the cwd.
+- `launch.allow_dangerous_skip` defaults to `true`. Setting it to `false` makes the daemon strip `--dangerously-skip-permissions` from web-launched sessions and reject launch requests that asked for it. The dashboard hides the checkbox for hosts advertising `false` during `host_register`.
+
+**Trust-model note.** Launching from the web is a larger capability than streaming transcripts — the hub can cause new processes on your machine. Two gates keep this tractable under the existing trusted-network assumption: (1) the allowlist prevents launches anywhere outside your configured roots, and (2) launch requests are rate-limited to 1 per 5 s + 10 per hour per host. The hub itself must remain behind IP-whitelisted Traefik / LAN-only exposure / Tailscale — a public hub would let anyone reach `/api/host/<id>/launch`.
 
 ## How it works
 

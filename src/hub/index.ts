@@ -102,7 +102,7 @@ let app = new Elysia()
   .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));
 
-app = wsPlugin(app, registry, teams, router);
+app = wsPlugin(app, registry, teams, router, mirrorRegistry);
 app = wsDashboardPlugin(app, registry, teams, hostRegistry);
 app = wsMirrorPlugin(app, mirrorRegistry);
 app = wsHostPlugin(app, hostRegistry);

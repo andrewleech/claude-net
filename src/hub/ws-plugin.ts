@@ -7,6 +7,7 @@ import type {
   ResponseFrame,
 } from "@/shared/types";
 import type { Elysia } from "elysia";
+import type { MirrorRegistry } from "./mirror";
 import type { Registry } from "./registry";
 import type { Router } from "./router";
 import type { Teams } from "./teams";
@@ -75,6 +76,7 @@ export function wsPlugin(
   registry: Registry,
   teams: Teams,
   router: Router,
+  mirrorRegistry?: MirrorRegistry,
 ): Elysia {
   return app.ws("/ws", {
     open(_ws: ElysiaWs) {
@@ -132,6 +134,20 @@ export function wsPlugin(
             name: result.entry.shortName,
             full_name: result.entry.fullName,
           });
+
+          // If this was a rename (same WS, new name), tell every
+          // dashboard to drop the old name and propagate the rename
+          // into mirror sessions so sidebar labels update in place.
+          if (result.renamedFrom) {
+            dashboardBroadcastFn({
+              event: "agent:disconnected",
+              full_name: result.renamedFrom,
+            });
+            mirrorRegistry?.renameOwner(
+              result.renamedFrom,
+              result.entry.fullName,
+            );
+          }
 
           dashboardBroadcastFn({
             event: "agent:connected",

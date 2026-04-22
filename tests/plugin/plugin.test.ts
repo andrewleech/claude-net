@@ -6,6 +6,7 @@ import {
   buildDefaultName,
   createChannelNotification,
   mapToolToFrame,
+  withSessionSuffix,
   writeSessionState,
 } from "@/plugin/plugin";
 
@@ -23,6 +24,19 @@ describe("plugin helpers", () => {
       const name = buildDefaultName();
       expect(name).toContain(":");
       expect(name).toContain("@");
+    });
+  });
+
+  describe("withSessionSuffix", () => {
+    test("inserts -N before the colon", () => {
+      expect(withSessionSuffix("claude-net:apium@laptop", 2)).toBe(
+        "claude-net-2:apium@laptop",
+      );
+      expect(withSessionSuffix("foo:bob@host", 7)).toBe("foo-7:bob@host");
+    });
+
+    test("appends when no colon present (legacy name@host)", () => {
+      expect(withSessionSuffix("bob@host", 3)).toBe("bob@host-3");
     });
   });
 

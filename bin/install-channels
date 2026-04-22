@@ -1,38 +1,67 @@
 #!/bin/bash
 set -euo pipefail
-# Install claude-channels launcher to ~/.local/bin/
+# Install claude-channels launcher from a local repo clone.
 #
-# Downloads the two patcher files from the repo (or copies from local clone)
-# and creates a symlink at ~/.local/bin/claude-channels.
+# This script is intentionally local-only. For remote install, use the
+# hub's /setup endpoint:
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
-#   # or from a local clone:
-#   ./bin/install-channels
+#   curl -fsSL "$YOUR_HUB/setup" | bash
+#
+# That path embeds the correct hub URL, downloads binaries from the
+# running hub image (respecting whichever branch / tag is deployed),
+# and registers the MCP server + hooks. It doesn't require any GitHub
+# org / branch to be hardcoded here.
 
 INSTALL_DIR="$HOME/.local/share/claude-channels/bin"
 BIN_DIR="$HOME/.local/bin"
-REPO_RAW="https://raw.githubusercontent.com/andrewleech/claude-net/main/bin"
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-# Determine source: local clone or remote
+# Locate the repo clone this script is running from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || echo "")"
 
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/claude-channels" ] && [ -f "$SCRIPT_DIR/patch-binary.py" ]; then
-    echo "Installing from local clone..."
-    cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
-    cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"
-else
-    echo "Downloading from GitHub..."
-    curl -fsSL "$REPO_RAW/claude-channels" -o "$INSTALL_DIR/claude-channels"
-    curl -fsSL "$REPO_RAW/patch-binary.py" -o "$INSTALL_DIR/patch-binary.py"
+if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/claude-channels" ] || [ ! -f "$SCRIPT_DIR/patch-binary.py" ]; then
+    echo "ERROR: install-channels must be run from a local repo clone." >&2
+    echo "For remote install, point at your hub's /setup endpoint:" >&2
+    echo "    curl -fsSL \"\$YOUR_HUB/setup\" | bash" >&2
+    exit 1
+fi
+
+echo "Installing from local clone: $SCRIPT_DIR"
+cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
+cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"
+if [ -f "$SCRIPT_DIR/claude-net-mirror-push" ]; then
+    cp "$SCRIPT_DIR/claude-net-mirror-push" "$INSTALL_DIR/claude-net-mirror-push"
+fi
+if [ -f "$SCRIPT_DIR/claude-net-mirror-agent" ]; then
+    cp "$SCRIPT_DIR/claude-net-mirror-agent" "$INSTALL_DIR/claude-net-mirror-agent"
+fi
+# Bundle the mirror-agent TS tree so the installed launcher doesn't need
+# the source tree alongside.
+if [ -f "$SCRIPT_DIR/../src/mirror-agent/agent.ts" ] && command -v bun >/dev/null 2>&1; then
+    echo "Bundling mirror-agent..."
+    if ! bun build --target=bun \
+        "$SCRIPT_DIR/../src/mirror-agent/agent.ts" \
+        --outfile "$INSTALL_DIR/mirror-agent.bundle.js" 2>/dev/null; then
+        echo "WARN: mirror-agent bundle failed; mirror feature will only work from the repo clone" >&2
+    fi
 fi
 
 chmod +x "$INSTALL_DIR/claude-channels"
+[ -f "$INSTALL_DIR/claude-net-mirror-push" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-push"
+[ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-agent"
 
 # Symlink to PATH
 ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
+[ -f "$INSTALL_DIR/claude-net-mirror-push" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-push" "$BIN_DIR/claude-net-mirror-push"
+[ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-agent" "$BIN_DIR/claude-net-mirror-agent"
+
+# Retire any running mirror-agent daemon so the next claude-channels launch
+# respawns against the just-installed bundle. The launcher's /health probe
+# only detects liveness, not version, so a stale daemon would otherwise
+# silently keep running the old code.
+pkill -f 'claude-net-mirror-agent|mirror-agent\.bundle\.js' 2>/dev/null || true
+rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
 echo ""
 echo "Installed claude-channels to $BIN_DIR/claude-channels"

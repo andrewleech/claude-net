@@ -1,4 +1,5 @@
 import { Elysia } from "elysia";
+import type { HostRegistry } from "./host-registry";
 import type { Registry } from "./registry";
 import type { Router } from "./router";
 import type { Teams } from "./teams";
@@ -8,15 +9,18 @@ export interface ApiDeps {
   teams: Teams;
   router: Router;
   startedAt: Date;
+  hostRegistry?: HostRegistry;
 }
 
 export function apiPlugin(deps: ApiDeps): Elysia {
-  const { registry, teams, router, startedAt } = deps;
+  const { registry, teams, router, startedAt, hostRegistry } = deps;
 
   return new Elysia({ prefix: "/api" })
     .get("/agents", () => registry.list())
 
     .get("/teams", () => teams.list())
+
+    .get("/hosts", () => (hostRegistry ? hostRegistry.list() : []))
 
     .get("/status", () => {
       const agents = registry.list();

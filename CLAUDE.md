@@ -23,17 +23,25 @@ src/
     ws-dashboard.ts   # WebSocket handler for /ws/dashboard (dashboard live updates + virtual dashboard agent)
     api.ts            # REST API routes under /api/*
     setup.ts          # GET /setup — shell script for MCP registration
-    dashboard.html    # built-in monitoring dashboard
+    dashboard.html    # built-in monitoring dashboard + /mirror/:sid single-session view
+    mirror.ts         # mirror-session registry + /api/mirror/* + /ws/mirror/{sid}
   plugin/
     plugin.ts         # MCP stdio server — bridges Claude Code to hub via WebSocket (single-file, served by hub)
+  mirror-agent/      # local daemon: accepts hook POSTs, streams to hub, handles inject
+    agent.ts          # entry point
+    hook-ingest.ts    # hook JSON → MirrorEventFrame
+    jsonl-tail.ts     # tail Claude Code transcript JSONLs for reconciliation
+    hub-client.ts     # reconnecting WS client per mirror session
   shared/
     types.ts          # shared type definitions (frames, events, data models)
 bin/
-    claude-channels   # launcher — patches Claude Code binary to enable channels without CLI flags
-    patch-binary.py   # same-length binary patcher (5 patches for channel restrictions)
-    install-channels  # installer for claude-channels on other hosts
+    claude-channels   # launcher — patches Claude Code binary, auto-spawns mirror-agent if enabled
+    patch-binary.py   # same-length binary patcher (5 patches for channel restrictions; 6th for IPC inject in Phase M4)
+    install-channels  # installer for claude-channels + mirror binaries on other hosts
     statusline.py     # custom statusline with clock emoji, rate limits, claude-net status
     install-statusline # installer for the statusline script
+    claude-net-mirror-push  # tiny hook forwarder — stdin JSON → loopback POST to mirror-agent
+    claude-net-mirror-agent # entry launcher for the mirror-agent daemon (dev-clone or bundled)
 tests/
   hub/               # unit tests for each hub module
   plugin/            # plugin unit tests

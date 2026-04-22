@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Entry launcher for the mirror-agent daemon.
+#
+# Tries two resolution strategies:
+#   1. Development (running from a git clone): execute src/mirror-agent/agent.ts
+#      via bun, from the sibling src/ tree.
+#   2. Installed: execute an adjacent bundled file named mirror-agent.bundle.js,
+#      which the installer produces via `bun build`.
+#
+# Environment:
+#   CLAUDE_NET_HUB   — hub base URL (default http://localhost:4815)
+set -euo pipefail
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+# Dev path — repo clone.
+DEV_ENTRY="$(dirname "$DIR")/src/mirror-agent/agent.ts"
+if [ -f "$DEV_ENTRY" ]; then
+    exec bun "$DEV_ENTRY" "$@"
+fi
+
+# Installed path — bundled JS next to this launcher.
+BUNDLE="$DIR/mirror-agent.bundle.js"
+if [ -f "$BUNDLE" ]; then
+    exec bun "$BUNDLE" "$@"
+fi
+
+echo "[claude-net/mirror] mirror-agent entry not found. Looked for:" >&2
+echo "  $DEV_ENTRY" >&2
+echo "  $BUNDLE" >&2
+echo "Re-run install-channels to fix." >&2
+exit 1

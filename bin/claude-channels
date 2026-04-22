@@ -18,7 +18,8 @@ set -euo pipefail
 # and re-patched automatically when Claude Code updates.
 #
 # Install:
-#   curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/install-channels | bash
+#   curl -fsSL "$YOUR_HUB/setup" | bash   # remote — follows the deployed hub image
+#   ./bin/install-channels                # from a local repo clone
 #
 # Usage:
 #   claude-channels              # channels enabled, no prompts
@@ -132,6 +133,24 @@ if [ ! -f "$PATCHED_VERSIONED" ]; then
         fi
     fi
 
+    # On macOS, the in-place byte patches invalidate Apple's code
+    # signature; AMFI then silently kills the binary at exec ("zsh:
+    # killed" with no other output). Ad-hoc re-sign with preserved
+    # entitlements so Bun's JIT / dylib loading still works.
+    if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ] && [ -f "$PATCHED_VERSIONED" ] \
+        && [ "$(uname -s)" = "Darwin" ] \
+        && command -v codesign >/dev/null 2>&1; then
+        if ! codesign --force \
+            --preserve-metadata=entitlements,requirements,flags,runtime \
+            --sign - "$PATCHED_VERSIONED" 2>/dev/null; then
+            # Some binaries don't have enough metadata to preserve —
+            # fall back to a bare ad-hoc sign.
+            codesign --force --sign - "$PATCHED_VERSIONED" 2>/dev/null || {
+                echo "WARN: codesign failed — macOS AMFI may kill the patched binary at exec." >&2
+            }
+        fi
+    fi
+
     # Clean up old versioned files (keep current + any fallback target)
     if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ]; then
         find "$CACHE_DIR" -name 'claude-patched-*' \
@@ -157,6 +176,140 @@ if ! $already_has_channels; then
         [ -n "$server" ] && CHANNEL_ARGS+=("$server")
     done < <(find_channel_servers)
     [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
+fi
+
+# ── Mirror-session daemon (always auto-started) ──────────────────────────
+# Starts the mirror-agent daemon in the background (idempotent — the agent
+# itself detects an existing instance via its port file). Mirror is always
+# on; the `claudeNet.mirror.enabled` setting is no longer consulted.
+#
+# Hook installation in ~/.claude/settings.json is handled by the hub's
+# `/setup` endpoint, not by this launcher. If hooks are missing, mirror
+# simply produces no events; the launcher does not mutate settings.json.
+
+mirror_injection_mode() {
+    # Echo the configured injection mode ("tmux" | "none" | "patch"), default "tmux".
+    local config="$HOME/.claude/settings.json"
+    if [ ! -f "$config" ]; then
+        echo "tmux"
+        return
+    fi
+    python3 -c "
+import json
+try:
+    with open('$config') as f:
+        d = json.load(f)
+    v = d.get('claudeNet', {}).get('mirror', {}).get('injection', 'tmux')
+    print(v if v in ('tmux', 'none', 'patch') else 'tmux')
+except Exception:
+    print('tmux')
+" 2>/dev/null
+}
+
+start_mirror_agent() {
+    local uid port_file
+    uid="$(id -u)"
+    port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+
+    # Already running?
+    if [ -f "$port_file" ]; then
+        local port
+        port=$(cat "$port_file" 2>/dev/null || true)
+        if [ -n "$port" ]; then
+            if curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                return 0
+            fi
+            # Stale port file; remove and start fresh.
+            rm -f "$port_file" 2>/dev/null || true
+        fi
+    fi
+
+    local agent_bin
+    agent_bin="$(cd "$(dirname "$SELF")" && pwd)/claude-net-mirror-agent"
+    if [ ! -x "$agent_bin" ]; then
+        # Try the installed location.
+        agent_bin="$HOME/.local/bin/claude-net-mirror-agent"
+    fi
+    if [ ! -x "$agent_bin" ]; then
+        echo "[claude-net/mirror] mirror-agent binary not found; skipping" >&2
+        return 1
+    fi
+
+    # Hub URL resolution:
+    #   1. CLAUDE_NET_HUB env var (explicit override)
+    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
+    #      (this is where the plugin already gets its URL, so the mirror-agent
+    #      ends up pointing at the same hub without extra configuration)
+    #   3. http://localhost:4815 as a last-ditch default
+    local hub_url
+    hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
+        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
+import json, os
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    for scope in [d.get('mcpServers', {}),
+                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
+        cfg = scope.get('claude-net')
+        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
+            print(cfg['env']['CLAUDE_NET_HUB'])
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+    hub_url="${hub_url:-http://localhost:4815}"
+    mkdir -p /tmp/claude-net 2>/dev/null || true
+    local log_file="/tmp/claude-net/mirror-agent-${uid}.log"
+    CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 &
+    disown $! 2>/dev/null || true
+
+    # Wait briefly for the port file to appear.
+    local i=0
+    while [ $i -lt 30 ] && [ ! -f "$port_file" ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+
+start_mirror_agent || true
+
+# Warn if tmux is needed but missing. Without tmux there's no pane for
+# the mirror-agent to send-keys into, so web inject lands as:
+#   "inject rejected: session is not running inside tmux (no pane recorded)"
+# and silently nothing reaches Claude. Visible warning at startup saves
+# the "why isn't my paste landing?" debugging.
+if [ "$(mirror_injection_mode)" = "tmux" ] \
+    && [ -z "${TMUX:-}" ] \
+    && [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
+    && ! command -v tmux >/dev/null 2>&1; then
+    case "$(uname -s)" in
+        Darwin) install_hint="brew install tmux" ;;
+        Linux)  install_hint="sudo apt install tmux  # or your package manager" ;;
+        *)      install_hint="install tmux via your package manager" ;;
+    esac
+    echo "[claude-net/mirror] tmux not found — remote inject from the web will be rejected." >&2
+    echo "[claude-net/mirror] install tmux to enable: $install_hint" >&2
+fi
+
+# Optional: transparent tmux auto-wrap so remote injection has a target.
+# Triggered when mirror.injection == "tmux" AND we're not already in tmux
+# AND we haven't already wrapped once (guard: CLAUDE_NET_IN_TMUX_WRAP).
+if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
+    && [ -z "${CLAUDE_NET_IN_TMUX_WRAP:-}" ] \
+    && [ -z "${TMUX:-}" ] \
+    && [ "$(mirror_injection_mode)" = "tmux" ] \
+    && command -v tmux >/dev/null 2>&1; then
+    export CLAUDE_NET_IN_TMUX_WRAP=1
+    tmux_session_name="claude-channels-$$"
+    echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
+    # new-session replaces the current shell with tmux. When tmux exits
+    # (claude exits), the whole script exits too. This gives the user a
+    # seamless view — they never see the tmux chrome unless they look.
+    exec tmux new-session -s "$tmux_session_name" \
+        -e CLAUDE_NET_IN_TMUX_WRAP=1 \
+        -- "$SELF" "$@"
 fi
 
 exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"

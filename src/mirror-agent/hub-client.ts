@@ -1,0 +1,129 @@
+// Lightweight reconnecting WebSocket client used by the mirror-agent to
+// stream a single session's events to the hub at /ws/mirror/:sid. Mirrors
+// the reconnect backoff (1s → 30s) used by the plugin in src/plugin/plugin.ts.
+//
+// One instance per mirror session. The mirror-agent creates the hub session
+// over REST first (to claim an owner token), then opens the WS with that
+// token.
+
+import WebSocket from "ws";
+
+const RECONNECT_INITIAL_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+
+export interface HubClientOptions {
+  url: string;
+  /** Called on every received text frame. */
+  onMessage?: (raw: string) => void;
+  /** Called once the socket transitions to OPEN. */
+  onOpen?: () => void;
+  /** Called on every close, including the one that triggers reconnect. */
+  onClose?: (code: number, reason: string) => void;
+  /** Called on transport errors (logged; no action required). */
+  onError?: (err: Error) => void;
+  /** Log prefix for stderr messages. Defaults to "claude-net/mirror". */
+  logPrefix?: string;
+}
+
+export class HubClient {
+  private url: string;
+  private ws: WebSocket | null = null;
+  private reconnectDelay = RECONNECT_INITIAL_MS;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private closing = false;
+  private opts: HubClientOptions;
+
+  constructor(opts: HubClientOptions) {
+    this.opts = opts;
+    this.url = opts.url;
+  }
+
+  start(): void {
+    this.closing = false;
+    this.openOnce();
+  }
+
+  stop(): void {
+    this.closing = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+  }
+
+  isOpen(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  send(data: string): boolean {
+    if (!this.isOpen()) return false;
+    try {
+      // biome-ignore lint/style/noNonNullAssertion: checked by isOpen()
+      this.ws!.send(data);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private openOnce(): void {
+    try {
+      this.ws = new WebSocket(this.url);
+    } catch (err) {
+      this.logError(`WebSocket construct failed: ${String(err)}`);
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.ws.on("open", () => {
+      this.reconnectDelay = RECONNECT_INITIAL_MS;
+      this.opts.onOpen?.();
+    });
+
+    this.ws.on("message", (data: Buffer) => {
+      this.opts.onMessage?.(data.toString());
+    });
+
+    this.ws.on("close", (code: number, reason: Buffer) => {
+      const reasonStr = reason?.toString?.() ?? "";
+      this.opts.onClose?.(code, reasonStr);
+      this.ws = null;
+      if (!this.closing) this.scheduleReconnect();
+    });
+
+    this.ws.on("error", (err: Error) => {
+      this.opts.onError?.(err);
+      // close will fire after — reconnect is scheduled there.
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closing) return;
+    const delay = this.reconnectDelay;
+    this.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.openOnce();
+    }, delay);
+    if (
+      this.reconnectTimer &&
+      typeof this.reconnectTimer === "object" &&
+      "unref" in this.reconnectTimer
+    ) {
+      this.reconnectTimer.unref();
+    }
+  }
+
+  private logError(msg: string): void {
+    const prefix = this.opts.logPrefix ?? "claude-net/mirror";
+    process.stderr.write(`[${prefix}] ${msg}\n`);
+  }
+}

@@ -2216,6 +2216,38 @@
         }
         break;
       }
+
+      case 'mirror:owner_renamed': {
+        // MCP plugin renamed itself; rewrite ownerAgent on every affected
+        // mirror session and re-bind the agents Map so the sidebar shows
+        // the new label without a full refresh.
+        var oldOwner = event.old_owner;
+        var newOwner = event.new_owner;
+        if (!oldOwner || !newOwner || oldOwner === newOwner) break;
+        var sids = Array.isArray(event.sids) ? event.sids : [];
+        for (var i = 0; i < sids.length; i++) {
+          var m = mirrorBySid.get(sids[i]);
+          if (m) m.owner_agent = newOwner;
+        }
+        // Re-bind agent→mirror mapping: the old owner loses its binding,
+        // the new one picks up whichever session has the most recent
+        // activity.
+        var oldAg = agents.get(oldOwner);
+        if (oldAg) { oldAg.mirrorSid = null; oldAg.cwd = null; }
+        var newAg = agents.get(newOwner);
+        if (newAg) {
+          var best = null;
+          var bestTs = '';
+          mirrorBySid.forEach(function(sess) {
+            if (sess.owner_agent !== newOwner || sess.closed_at) return;
+            var ts = sess.last_event_at || '';
+            if (!best || ts > bestTs) { best = sess; bestTs = ts; }
+          });
+          if (best) { newAg.mirrorSid = best.sid; newAg.cwd = best.cwd; }
+        }
+        renderAgents();
+        break;
+      }
     }
 
     updateCounts();

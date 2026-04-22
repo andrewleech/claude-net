@@ -12,15 +12,15 @@ describe("resolveCanonicalHubUrl", () => {
       "x-forwarded-host": "public.example",
       "x-forwarded-proto": "https",
     });
-    expect(resolveCanonicalHubUrl(r, "https://cn.tynan.io", 4815)).toBe(
-      "https://cn.tynan.io",
+    expect(resolveCanonicalHubUrl(r, "https://localhost:9443", 4815)).toBe(
+      "https://localhost:9443",
     );
   });
 
   test("CLAUDE_NET_HOST full URL strips trailing slash", () => {
     const r = req("http://localhost:4815/setup");
-    expect(resolveCanonicalHubUrl(r, "https://cn.tynan.io/", 4815)).toBe(
-      "https://cn.tynan.io",
+    expect(resolveCanonicalHubUrl(r, "https://localhost:9443/", 4815)).toBe(
+      "https://localhost:9443",
     );
   });
 
@@ -49,11 +49,11 @@ describe("resolveCanonicalHubUrl", () => {
 
   test("no CLAUDE_NET_HOST honours X-Forwarded-Proto", () => {
     const r = req("http://internal:4815/setup", {
-      host: "cn.tynan.io",
+      host: "localhost",
       "x-forwarded-proto": "https",
     });
     expect(resolveCanonicalHubUrl(r, undefined, 4815)).toBe(
-      "https://cn.tynan.io",
+      "https://localhost",
     );
   });
 

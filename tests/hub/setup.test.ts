@@ -55,22 +55,22 @@ describe("Setup endpoint", () => {
   });
 
   test("GET /setup uses full URL verbatim when CLAUDE_NET_HOST is a URL", async () => {
-    process.env.CLAUDE_NET_HOST = "https://cn.tynan.io";
+    process.env.CLAUDE_NET_HOST = "https://localhost:9443";
     const resp = await fetch(`${baseUrl}/setup`);
     const body = await resp.text();
 
-    expect(body).toContain('HUB="https://cn.tynan.io"');
-    expect(body).not.toContain("https://cn.tynan.io:4815");
+    expect(body).toContain('HUB="https://localhost:9443"');
+    expect(body).not.toContain("https://localhost:9443:4815");
 
     process.env.CLAUDE_NET_HOST = undefined;
   });
 
   test("GET /setup strips trailing slash from full CLAUDE_NET_HOST URL", async () => {
-    process.env.CLAUDE_NET_HOST = "https://cn.tynan.io/";
+    process.env.CLAUDE_NET_HOST = "https://localhost:9443/";
     const resp = await fetch(`${baseUrl}/setup`);
     const body = await resp.text();
 
-    expect(body).toContain('HUB="https://cn.tynan.io"');
+    expect(body).toContain('HUB="https://localhost:9443"');
 
     process.env.CLAUDE_NET_HOST = undefined;
   });

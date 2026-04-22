@@ -3794,8 +3794,19 @@
           var subject = (p.input && p.input.subject) || '';
           var activeForm = p.input && p.input.activeForm;
           var description = p.input && p.input.description;
+          // Upsert under a temp key keyed on tool_use_id so the task
+          // shows in the panel immediately, even if the result hook is
+          // delayed or never arrives. The result handler migrates to
+          // the real task id.
           if (p.tool_use_id) {
+            var tmpKey = 'pending:' + p.tool_use_id;
             pendingTaskCreates.set(p.tool_use_id, {
+              subject: subject,
+              activeForm: activeForm,
+              description: description,
+              tmpKey: tmpKey,
+            });
+            taskUpsert(tmpKey, {
               subject: subject,
               activeForm: activeForm,
               description: description,
@@ -3811,7 +3822,18 @@
           if (id) {
             var pend = pendingTaskCreates.get(p.tool_use_id);
             if (pend) {
-              taskUpsert(id, pend);
+              if (pend.tmpKey) taskState.delete(pend.tmpKey);
+              // Don't overwrite status if a later TaskUpdate already
+              // moved this task (in_progress / completed arriving
+              // before TaskCreate's result hook is a real ordering).
+              var existing = taskState.get(String(id));
+              var data = {
+                subject: pend.subject,
+                activeForm: pend.activeForm,
+                description: pend.description,
+              };
+              if (!existing || !existing.status) data.status = 'pending';
+              taskUpsert(id, data);
               pendingTaskCreates.delete(p.tool_use_id);
             }
           }

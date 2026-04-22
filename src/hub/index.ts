@@ -9,6 +9,7 @@ import { Registry } from "./registry";
 import { Router } from "./router";
 import { setupPlugin } from "./setup";
 import { Teams } from "./teams";
+import { UploadsRegistry, uploadsPlugin } from "./uploads";
 import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
 import { wsHostPlugin } from "./ws-host";
 import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
@@ -22,6 +23,10 @@ const router = new Router(registry, teams);
 const mirrorStore = createStoreFromEnv();
 const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
 const hostRegistry = new HostRegistry();
+const uploadsRegistry = new UploadsRegistry();
+mirrorRegistry.onSessionClosed((sid) => {
+  uploadsRegistry.purgeSession(sid).catch(() => {});
+});
 
 // Wire up disconnect timeout to clean up team memberships
 registry.setTimeoutCleanup((fullName, agentTeams) => {
@@ -85,6 +90,14 @@ let app = new Elysia()
   })
   .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
   .use(mirrorPlugin({ mirrorRegistry }))
+  .use(
+    uploadsPlugin({
+      mirrorRegistry,
+      uploadsRegistry,
+      externalHost: process.env.CLAUDE_NET_HOST,
+      port,
+    }),
+  )
   .use(hostPlugin({ hostRegistry }))
   .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));

@@ -98,6 +98,7 @@ export class MirrorRegistry {
   private orphanCloseMs: number;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
+  private sessionClosedHooks: Array<(sid: string) => void> = [];
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
@@ -152,6 +153,12 @@ export class MirrorRegistry {
 
   setDashboardBroadcast(fn: (event: DashboardEvent) => void): void {
     this.dashboardBroadcast = fn;
+  }
+
+  /** Register a callback to run when any session is closed. Used by the
+   *  uploads registry to purge per-session files. */
+  onSessionClosed(fn: (sid: string) => void): void {
+    this.sessionClosedHooks.push(fn);
   }
 
   /**
@@ -393,6 +400,16 @@ export class MirrorRegistry {
       entry.retentionTimerId = timer;
     } else {
       this.sessions.delete(sid);
+    }
+
+    for (const fn of this.sessionClosedHooks) {
+      try {
+        fn(sid);
+      } catch (err) {
+        process.stderr.write(
+          `[claude-net/mirror] sessionClosed hook threw for ${sid}: ${String(err)}\n`,
+        );
+      }
     }
   }
 

@@ -906,7 +906,7 @@
     .mirror-slash-source { display: none; }
   }
 
-  .mirror-compose button {
+  #mirror-compose-send {
     background: transparent;
     color: var(--accent);
     border: 1px solid var(--accent);
@@ -926,20 +926,20 @@
     gap: 7px;
     transition: background 0.1s, color 0.1s;
   }
-  .mirror-compose button::before {
+  #mirror-compose-send::before {
     content: "↵";
     font-size: 13px;
     font-weight: 400;
     line-height: 1;
   }
-  .mirror-compose button:hover { background: var(--accent); color: var(--on-accent); }
-  .mirror-compose button:active { background: var(--accent-dim); }
-  .mirror-compose button:disabled {
+  #mirror-compose-send:hover { background: var(--accent); color: var(--on-accent); }
+  #mirror-compose-send:active { background: var(--accent-dim); }
+  #mirror-compose-send:disabled {
     color: var(--text-muted);
     border-color: var(--border);
     cursor: default;
   }
-  .mirror-compose button:disabled:hover { background: transparent; color: var(--text-muted); }
+  #mirror-compose-send:disabled:hover { background: transparent; color: var(--text-muted); }
 
   .mirror-compose-err {
     font-family: var(--font-mono);
@@ -953,6 +953,73 @@
   }
   .mirror-compose-err.is-notice { color: var(--green); }
   .mirror-compose-err:empty { display: none; }
+
+  /* ── Attach button inside the compose frame ────────────────────
+     Narrow column between the textarea and the Transmit actions.
+     Stretches to the full frame height so when the textarea grows
+     to multiple rows the button grows with it (single unified
+     instrument — same trick as the `>` left rail). Visible on both
+     desktop and touch. */
+  .mirror-attach-btn {
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-left: 1px solid var(--border);
+    padding: 0;
+    width: 22px;
+    flex-shrink: 0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.1s, background 0.1s;
+  }
+  .mirror-attach-btn:hover {
+    color: var(--accent);
+    background: var(--accent-ink);
+  }
+  .mirror-attach-btn:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .mirror-attach-btn.is-uploading {
+    color: var(--accent);
+    animation: live-pulse 1.4s ease-in-out infinite;
+  }
+  .mirror-attach-btn svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+  }
+  /* Touch: slightly wider for a bigger tap target. */
+  .mirror-compose.is-touch .mirror-attach-btn {
+    width: 28px;
+  }
+  .mirror-compose.is-touch .mirror-attach-btn svg {
+    width: 16px;
+    height: 16px;
+  }
+  /* Drag-over highlight on the compose frame itself. */
+  .mirror-compose-frame.is-dragover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 24px var(--accent-glow);
+  }
+  .mirror-compose-frame.is-dragover::after {
+    content: "Drop to upload";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--bg);
+    opacity: 0.9;
+    pointer-events: none;
+  }
 
   /* Stop button in the mirror header — sized to match Bootstrap's btn-sm. */
   #mirror-stop-btn { font-family: var(--font-mono); letter-spacing: 0.8px; text-transform: uppercase; }
@@ -1847,6 +1914,10 @@
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
           <div class="mirror-compose-frame">
             <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
+            <button class="mirror-attach-btn" id="mirror-attach-btn" type="button" title="Attach file (paste or drop also works)" aria-label="Attach file">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input type="file" id="mirror-attach-input" multiple hidden>
             <div class="mirror-compose-actions">
               <div class="mirror-compose-hint">
                 <kbd>↵</kbd>send
@@ -4532,6 +4603,138 @@
     }
 
     if (composeSend) composeSend.addEventListener('click', doInject, { signal: attachSig });
+
+    // ── File uploads (paste / drop / attach-button) ───────────────
+    // Dropped and pasted files are POSTed to /api/mirror/:sid/upload;
+    // on success the returned URL is inserted at the caret in the
+    // composer. The user still reviews + presses Send — uploads never
+    // fire the prompt implicitly. Works on mobile via the native
+    // file picker that the paperclip triggers.
+    var attachBtn = document.getElementById('mirror-attach-btn');
+    var attachInput = document.getElementById('mirror-attach-input');
+    var composeFrame = composeEl ? composeEl.querySelector('.mirror-compose-frame') : null;
+    var uploadsMaxBytes = 25 * 1024 * 1024;
+    fetch('/api/uploads/config')
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(cfg) {
+        if (cfg && cfg.max_mb) uploadsMaxBytes = cfg.max_mb * 1024 * 1024;
+      })
+      .catch(function() { /* keep fallback */ });
+
+    var pendingUploads = 0;
+    function setAttachBusy(busy) {
+      if (!attachBtn) return;
+      if (busy) attachBtn.classList.add('is-uploading');
+      else attachBtn.classList.remove('is-uploading');
+    }
+
+    function insertAtCursor(text) {
+      if (!composeText) return;
+      var start = composeText.selectionStart;
+      var end = composeText.selectionEnd;
+      if (typeof start !== 'number' || typeof end !== 'number') {
+        composeText.value = (composeText.value ? composeText.value + ' ' : '') + text;
+        return;
+      }
+      var before = composeText.value.substring(0, start);
+      var after = composeText.value.substring(end);
+      var prefix = before && !/\s$/.test(before) ? ' ' : '';
+      var suffix = after && !/^\s/.test(after) ? ' ' : '';
+      composeText.value = before + prefix + text + suffix + after;
+      var pos = before.length + prefix.length + text.length + suffix.length;
+      try { composeText.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+      composeText.focus();
+    }
+
+    function uploadOne(file) {
+      if (!file) return;
+      if (file.size > uploadsMaxBytes) {
+        composeErr.className = 'mirror-compose-err';
+        composeErr.textContent =
+          'Too large: ' + (file.name || 'file') + ' (' + file.size +
+          ' bytes, cap ' + uploadsMaxBytes + ').';
+        return;
+      }
+      pendingUploads++;
+      setAttachBusy(true);
+      composeErr.className = 'mirror-compose-err is-notice';
+      composeErr.textContent = 'Uploading ' + (file.name || '(pasted)') + '…';
+      var fd = new FormData();
+      fd.append('file', file, file.name || 'pasted');
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/upload', {
+        method: 'POST',
+        body: fd
+      })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(r) {
+          pendingUploads = Math.max(0, pendingUploads - 1);
+          if (pendingUploads === 0) setAttachBusy(false);
+          if (r.status >= 400 || !r.body || !r.body.url) {
+            composeErr.className = 'mirror-compose-err';
+            composeErr.textContent = 'Upload failed: ' +
+              ((r.body && r.body.error) || ('HTTP ' + r.status));
+            return;
+          }
+          insertAtCursor(r.body.url);
+          composeErr.className = 'mirror-compose-err is-notice';
+          composeErr.textContent = (file.name || 'file') + ' → ' + r.body.url;
+        })
+        .catch(function(err) {
+          pendingUploads = Math.max(0, pendingUploads - 1);
+          if (pendingUploads === 0) setAttachBusy(false);
+          composeErr.className = 'mirror-compose-err';
+          composeErr.textContent =
+            'Upload failed: ' + (err && err.message ? err.message : err);
+        });
+    }
+
+    function uploadFiles(fileList) {
+      if (!fileList || !fileList.length) return;
+      for (var i = 0; i < fileList.length; i++) uploadOne(fileList[i]);
+    }
+
+    if (attachBtn && attachInput) {
+      attachBtn.addEventListener('click', function() { attachInput.click(); }, { signal: attachSig });
+      attachInput.addEventListener('change', function() {
+        uploadFiles(attachInput.files);
+        attachInput.value = '';  // allow re-picking the same file
+      }, { signal: attachSig });
+    }
+
+    if (composeText) {
+      composeText.addEventListener('paste', function(e) {
+        // Image paste from the system clipboard shows up as e.clipboardData.files.
+        // Plain-text pastes have no files and fall through to the default paste.
+        var files = e.clipboardData && e.clipboardData.files;
+        if (!files || !files.length) return;
+        e.preventDefault();
+        uploadFiles(files);
+      }, { signal: attachSig });
+    }
+
+    if (composeFrame) {
+      composeFrame.addEventListener('dragover', function(e) {
+        if (!e.dataTransfer || !e.dataTransfer.types) return;
+        var hasFiles = false;
+        for (var i = 0; i < e.dataTransfer.types.length; i++) {
+          if (e.dataTransfer.types[i] === 'Files') { hasFiles = true; break; }
+        }
+        if (!hasFiles) return;
+        e.preventDefault();
+        composeFrame.classList.add('is-dragover');
+      }, { signal: attachSig });
+      composeFrame.addEventListener('dragleave', function(e) {
+        // Only clear when leaving the frame itself, not bubbling from children.
+        if (e.target === composeFrame) composeFrame.classList.remove('is-dragover');
+      }, { signal: attachSig });
+      composeFrame.addEventListener('drop', function(e) {
+        composeFrame.classList.remove('is-dragover');
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (!files || !files.length) return;
+        e.preventDefault();
+        uploadFiles(files);
+      }, { signal: attachSig });
+    }
 
     // ── Enter-key mode ───────────────────────────────────────────
     // Touch-primary devices (phones, tablets without a hardware

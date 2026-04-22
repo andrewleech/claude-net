@@ -4632,6 +4632,19 @@
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
       if (transcriptEl) transcriptEl.innerHTML = '';
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
+      // Task panel is shared DOM, but taskState is per-attach. Wipe
+      // the rendered rows + button so the next session doesn't inherit
+      // the previous one's list.
+      if (taskPanelList) taskPanelList.innerHTML = '';
+      if (taskPanelBtn) {
+        taskPanelBtn.classList.add('d-none');
+        taskPanelBtn.innerHTML = '';
+      }
+      if (taskPanelEl && window.bootstrap) {
+        try {
+          bootstrap.Collapse.getOrCreateInstance(taskPanelEl, { toggle: false }).hide();
+        } catch (e) { /* ignore */ }
+      }
     };
 
     // Compose box (remote inject). Shown because we have an owner token —

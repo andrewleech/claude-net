@@ -6,6 +6,7 @@ import {
   expect,
   test,
 } from "bun:test";
+import { MirrorRegistry } from "@/hub/mirror";
 import { Registry } from "@/hub/registry";
 import { Router } from "@/hub/router";
 import { Teams } from "@/hub/teams";
@@ -19,6 +20,7 @@ function createHub() {
   const registry = new Registry({ disconnectTimeoutMs: 200 });
   const teams = new Teams(registry);
   const router = new Router(registry, teams);
+  const mirror = new MirrorRegistry({ orphanCloseMs: 0 });
 
   registry.setTimeoutCleanup((fullName, agentTeams) => {
     for (const teamName of agentTeams) {
@@ -27,10 +29,10 @@ function createHub() {
   });
 
   let app = new Elysia();
-  app = wsPlugin(app, registry, teams, router);
+  app = wsPlugin(app, registry, teams, router, mirror);
   app.listen(0); // random port
 
-  return { app, registry, teams, router };
+  return { app, registry, teams, router, mirror };
 }
 
 function connectWs(port: number): Promise<WebSocket> {
@@ -329,5 +331,44 @@ describe("WebSocket Plugin (integration)", () => {
     expect(resp.ok).toBe(true);
     const teamNames = (resp.data as Msg[]).map((t) => t.name);
     expect(teamNames).toContain("myteam");
+  });
+
+  test("register under a new name renames matching mirror sessions", async () => {
+    const ws = await connectWs(port);
+    openSockets.push(ws);
+
+    // Initial register as "skydeck:alice@host"
+    const p1 = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "register",
+        name: "skydeck:alice@host",
+        requestId: "r1",
+      }),
+    );
+    await p1;
+
+    // Seed a mirror session under that ownerAgent.
+    hub.mirror.createSession("skydeck:alice@host", "/work/skydeck", "sid-1");
+    expect(hub.mirror.sessions.get("sid-1")?.ownerAgent).toBe(
+      "skydeck:alice@host",
+    );
+
+    // Re-register as "thisisnew:alice@host" — rename path.
+    const p2 = collectMessages(ws, 2);
+    ws.send(
+      JSON.stringify({
+        action: "register",
+        name: "thisisnew:alice@host",
+        requestId: "r2",
+      }),
+    );
+    await p2;
+
+    expect(hub.mirror.sessions.get("sid-1")?.ownerAgent).toBe(
+      "thisisnew:alice@host",
+    );
+    expect(hub.registry.agents.has("skydeck:alice@host")).toBe(false);
+    expect(hub.registry.agents.has("thisisnew:alice@host")).toBe(true);
   });
 });

@@ -1313,18 +1313,6 @@
     font-style: italic; margin-top: 2px;
     letter-spacing: 0.2px;
   }
-  .m-task-summary {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-top: 10px;
-    padding-top: 6px;
-    border-top: 1px dashed var(--border);
-  }
-  .m-task-summary strong { color: var(--text); font-weight: 700; }
-
   /* ── ANIMATIONS ─────────────────────────────────────────────── */
 
   /* New-event flash: each event arrives with a brief accent-red
@@ -3225,23 +3213,6 @@
         { signal: attachSig });
     }
 
-    function taskSummaryLine() {
-      var total = 0, pending = 0, inProg = 0, done = 0;
-      taskState.forEach(function(t) {
-        if (t.status === 'deleted') return;
-        total++;
-        if (t.status === 'completed') done++;
-        else if (t.status === 'in_progress') inProg++;
-        else pending++;
-      });
-      if (total === 0) return '';
-      var parts = [done + ' done'];
-      if (inProg > 0) parts.push(inProg + ' in progress');
-      parts.push(pending + ' open');
-      return total + ' task' + (total === 1 ? '' : 's') +
-        ' (' + parts.join(', ') + ')';
-    }
-
     function renderTaskLine(id, task) {
       if (!task) return '';
       var status = task.status || 'pending';
@@ -3259,23 +3230,6 @@
         html += '<div class="m-task-activity">' + escapeHtml(activity) + '…</div>';
       }
       return html;
-    }
-
-    function renderTaskListBlock(ids) {
-      // Render given ids (or all tracked tasks if ids is null) as a checkbox
-      // list. Sorted by id numerically when possible.
-      var keys = ids || [...taskState.keys()];
-      keys.sort(function(a, b) {
-        var na = Number(a), nb = Number(b);
-        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
-        return String(a).localeCompare(String(b));
-      });
-      var out = '';
-      for (var i = 0; i < keys.length; i++) {
-        var t = taskState.get(keys[i]);
-        if (t && t.status !== 'deleted') out += renderTaskLine(keys[i], t);
-      }
-      return out;
     }
 
     /** Best-effort parse of a TaskList tool_response into task records. */
@@ -3807,12 +3761,15 @@
       // the subject (which lives on the earlier TaskCreate) plus a live
       // checkbox line matching the CLI's TaskListV2 rendering.
 
+      // Inline cards are intentionally terse — the persistent task
+      // panel in the header is the source of truth for current state.
+      // These rows just mark "when" something happened.
+
       TaskCreate: {
         call: function(p, el) {
           var subject = (p.input && p.input.subject) || '';
           var activeForm = p.input && p.input.activeForm;
           var description = p.input && p.input.description;
-          // Stash by tool_use_id so we can attach the id when the result lands.
           if (p.tool_use_id) {
             pendingTaskCreates.set(p.tool_use_id, {
               subject: subject,
@@ -3822,11 +3779,6 @@
             });
           }
           el.innerHTML = makeHeadline('TaskCreate', '➕ ' + escapeHtml(subject));
-          if (description) el.querySelector('.m-tool-sub') ||
-            el.insertAdjacentHTML(
-              'beforeend',
-              '<div class="m-tool-sub">' + escapeHtml(description) + '</div>',
-            );
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); return; }
@@ -3838,13 +3790,6 @@
               taskUpsert(id, pend);
               pendingTaskCreates.delete(p.tool_use_id);
             }
-            var line = renderTaskLine(id, taskState.get(String(id)));
-            var summary = taskSummaryLine();
-            el.insertAdjacentHTML(
-              'beforeend',
-              '<div class="m-task-list-block">' + line + '</div>' +
-                (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : ''),
-            );
           }
         },
       },
@@ -3864,17 +3809,11 @@
           if (input.description) patch.description = input.description;
           var task = taskUpsert(id, patch);
           var glyph = TASK_STATUS_GLYPHS[task.status] || TASK_STATUS_GLYPHS.pending;
+          var title = task.subject || ('task ' + id);
           el.innerHTML = makeHeadline(
             'TaskUpdate',
-            glyph + ' task ' + escapeHtml(String(id)) +
+            glyph + ' ' + escapeHtml(title) +
               (input.status ? ' → ' + escapeHtml(input.status) : ''),
-          );
-          var line = renderTaskLine(id, task);
-          var summary = taskSummaryLine();
-          el.insertAdjacentHTML(
-            'beforeend',
-            '<div class="m-task-list-block">' + line + '</div>' +
-              (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : ''),
           );
         },
         result: function(p, el) {
@@ -3888,10 +3827,8 @@
         },
         result: function(p, el) {
           if (p.is_error) { setStatusError(el); return; }
-          setStatusOk(el, 'listed');
           var tasks = parseTaskListResponse(p.response);
-          if (Array.isArray(tasks) && tasks.length > 0) {
-            // Sync state from the authoritative list.
+          if (Array.isArray(tasks)) {
             for (var i = 0; i < tasks.length; i++) {
               var t = tasks[i];
               var id = t.id || t.taskId;
@@ -3903,26 +3840,10 @@
                 status: t.status || 'pending',
               });
             }
+            setStatusOk(el, tasks.length + ' task' + (tasks.length === 1 ? '' : 's'));
+          } else {
+            setStatusOk(el, 'listed');
           }
-          var listHtml = renderTaskListBlock(
-            Array.isArray(tasks)
-              ? tasks.map(function(t) { return String(t.id || t.taskId); }).filter(Boolean)
-              : null,
-          );
-          var summary = taskSummaryLine();
-          if (!listHtml && !summary) {
-            // Fallback — show raw response so the user isn't left blank.
-            appendDetails(el, 'response (raw)',
-              '<pre>' + escapeHtml(typeof p.response === 'string'
-                ? p.response
-                : tryJson(p.response)) + '</pre>');
-            return;
-          }
-          el.insertAdjacentHTML(
-            'beforeend',
-            (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : '') +
-              '<div class="m-task-list-block">' + listHtml + '</div>',
-          );
         },
       },
 

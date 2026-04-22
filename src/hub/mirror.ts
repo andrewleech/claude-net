@@ -476,6 +476,35 @@ export class MirrorRegistry {
   }
 
   /**
+   * Rename exactly one session's owner_agent. Unlike renameOwner this
+   * does NOT touch sibling sessions that share the old name. Used by
+   * the POST /:sid/rename endpoint where the user is being explicit
+   * about which row to relabel.
+   */
+  renameSession(
+    sid: string,
+    newName: string,
+  ):
+    | { ok: true; old_owner: string; new_owner: string }
+    | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    const oldName = entry.ownerAgent;
+    if (oldName === newName) {
+      return { ok: true, old_owner: oldName, new_owner: newName };
+    }
+    entry.ownerAgent = newName;
+    this.dashboardBroadcast({
+      event: "mirror:owner_renamed",
+      old_owner: oldName,
+      new_owner: newName,
+      sids: [sid],
+    });
+    return { ok: true, old_owner: oldName, new_owner: newName };
+  }
+
+  /**
    * Forward an inject frame to the session's mirror-agent. Returns the
    * assigned sequence number on success. Caller must have already
    * validated the token and the text.
@@ -895,6 +924,29 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         }
         mirrorRegistry.closeSession(params.sid, "exit");
         return { closed: true };
+      })
+
+      /**
+       * POST /:sid/rename — explicit rename of a SINGLE session's owner_agent.
+       * Scoped to this sid only. Fork sessions sharing the same cwd
+       * (and thus the same owner_agent) each need their own call —
+       * otherwise renaming one sibling's MCP would misattribute the
+       * others. Broadcasts mirror:owner_renamed so open dashboards
+       * update the row in place.
+       */
+      .post("/:sid/rename", ({ params, body, set }) => {
+        const payload = body as { owner_agent?: string };
+        const next = payload.owner_agent;
+        if (!next || typeof next !== "string" || next.trim().length === 0) {
+          set.status = 400;
+          return { error: "Missing required field: owner_agent" };
+        }
+        const result = mirrorRegistry.renameSession(params.sid, next);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { ok: true, sid: params.sid, owner_agent: next };
       })
 
       .get("/archive/:sid", ({ params, set }) => {

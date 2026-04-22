@@ -336,6 +336,63 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
+  test("POST /:sid/rename renames only the targeted session", async () => {
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+
+    try {
+      // Fork-session case: two mirror sessions share one owner_agent.
+      // Rename must touch only the targeted row so the sibling's MCP
+      // doesn't get misattributed.
+      reg.createSession("skydeck:apium@host", "/skydeck", "sid-a");
+      reg.createSession("skydeck:apium@host", "/skydeck", "sid-b");
+
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/sid-a/rename`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ owner_agent: "yos-docs:apium@host" }),
+        },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.ok).toBe(true);
+      expect(body.owner_agent).toBe("yos-docs:apium@host");
+
+      expect(reg.sessions.get("sid-a")?.ownerAgent).toBe("yos-docs:apium@host");
+      expect(reg.sessions.get("sid-b")?.ownerAgent).toBe("skydeck:apium@host");
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("POST /:sid/rename rejects blank owner_agent", async () => {
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+
+    try {
+      reg.createSession("x:u@h", "/x", "sid-only");
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/sid-only/rename`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ owner_agent: "" }),
+        },
+      );
+      expect(res.status).toBe(400);
+    } finally {
+      app.stop();
+    }
+  });
+
   test("orphan sweep closes sessions that lost their agent + are stale", async () => {
     // orphanCloseMs: 20 → sessions unbound from agent for >20ms get closed
     // on the next sweep.

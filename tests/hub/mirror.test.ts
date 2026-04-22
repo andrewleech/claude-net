@@ -241,6 +241,58 @@ describe("MirrorRegistry", () => {
     expect(names).toContain("mirror:session_started");
     expect(names).toContain("mirror:session_ended");
   });
+
+  test("renameOwner rewrites every matching session and broadcasts", () => {
+    const events: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    const a = reg.createSession("skydeck:alice@host", "/work/skydeck");
+    const b = reg.createSession("skydeck:alice@host", "/work/skydeck");
+    const c = reg.createSession("other:alice@host", "/work/other");
+    expect(a.ok && b.ok && c.ok).toBe(true);
+
+    const affected = reg.renameOwner(
+      "skydeck:alice@host",
+      "thisisnew:alice@host",
+    );
+    expect(affected.length).toBe(2);
+
+    // Both sessions in /work/skydeck got the new owner; the other cwd
+    // is untouched.
+    for (const entry of reg.sessions.values()) {
+      if (entry.cwd === "/work/skydeck") {
+        expect(entry.ownerAgent).toBe("thisisnew:alice@host");
+      } else {
+        expect(entry.ownerAgent).toBe("other:alice@host");
+      }
+    }
+
+    const rename = events.find((e) => e.event === "mirror:owner_renamed");
+    expect(rename).toBeDefined();
+    expect(rename?.old_owner).toBe("skydeck:alice@host");
+    expect(rename?.new_owner).toBe("thisisnew:alice@host");
+    expect((rename?.sids as string[]).length).toBe(2);
+  });
+
+  test("renameOwner is a no-op when no sessions match", () => {
+    const events: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    reg.createSession("other:u@h", "/x");
+    const affected = reg.renameOwner("missing:u@h", "whatever:u@h");
+    expect(affected.length).toBe(0);
+    expect(
+      events.find((e) => e.event === "mirror:owner_renamed"),
+    ).toBeUndefined();
+  });
+
+  test("renameOwner with identical names does nothing", () => {
+    const events: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    reg.createSession("a:u@h", "/x");
+    expect(reg.renameOwner("a:u@h", "a:u@h").length).toBe(0);
+    expect(
+      events.find((e) => e.event === "mirror:owner_renamed"),
+    ).toBeUndefined();
+  });
 });
 
 // Auto-start flow: simulate the mirror-agent POSTing to /api/mirror/session

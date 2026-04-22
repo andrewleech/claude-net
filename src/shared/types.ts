@@ -318,6 +318,18 @@ export interface MirrorActivityEvent {
   ts: number;
 }
 
+/**
+ * Broadcast when an MCP agent renames itself via register(). Every mirror
+ * session whose ownerAgent matched the old name has been rewritten to the
+ * new name; dashboards update their sidebar labels in place.
+ */
+export interface MirrorOwnerRenamedEvent {
+  event: "mirror:owner_renamed";
+  old_owner: string;
+  new_owner: string;
+  sids: string[];
+}
+
 // ── Host channel (daemon → hub long-lived WS at /ws/host) ────────────────
 
 /**
@@ -415,6 +427,7 @@ export type DashboardEvent =
   | MirrorWatcherJoinedEvent
   | MirrorWatcherLeftEvent
   | MirrorActivityEvent
+  | MirrorOwnerRenamedEvent
   | HostConnectedEvent
   | HostDisconnectedEvent;
 

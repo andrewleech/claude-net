@@ -1027,8 +1027,7 @@
     pointer-events: none;
   }
 
-  /* Stop button in the mirror header — sized to match Bootstrap's btn-sm. */
-  #mirror-stop-btn { font-family: var(--font-mono); letter-spacing: 0.8px; text-transform: uppercase; }
+  /* Stop button chrome is shared with #mirror-tasks-btn above. */
   .mirror-status {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -1801,12 +1800,7 @@
        the right edge of each timestamp. */
     padding: 8px 0;
   }
-  #mirror-stop-btn {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-  }
+  /* Mirror-header stop/tasks shared sizing — see shared rule below. */
   #mirror-conn {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -1821,36 +1815,58 @@
      Bootstrap's .collapse handles the show/hide and transition;
      we only supply the chrome that matches the rest of the mirror
      UI (panel background, accent border, mono subheader text). */
-  #mirror-tasks-btn {
+  #mirror-tasks-btn,
+  #mirror-stop-btn {
     font-family: var(--font-mono);
-    letter-spacing: 0.8px;
+    font-size: 10px;
+    letter-spacing: 1px;
     text-transform: uppercase;
+    min-width: 108px;
   }
   #mirror-tasks-btn .cn-tasks-running {
     color: var(--gold);
     margin-left: 6px;
   }
+  /* Chevron indicates expanded/collapsed. Rotates via aria-expanded
+     which Bootstrap's Collapse keeps in sync. */
+  #mirror-tasks-btn::after {
+    content: "";
+    display: inline-block;
+    margin-left: 6px;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    transition: transform 0.18s ease;
+    transform-origin: 50% 40%;
+  }
+  #mirror-tasks-btn[aria-expanded="true"]::after {
+    transform: rotate(180deg);
+  }
   .cn-tasks-panel {
     background: var(--bg-panel);
     border-bottom: 1px solid var(--accent);
+    /* Always at least 1/3 screen when open; caps at 50vh with internal
+       scroll so a huge list doesn't push the composer off screen. */
+    min-height: 33vh;
     max-height: 50vh;
     overflow-y: auto;
+    padding: 0 20px 10px;
   }
-  .cn-tasks-panel .list-group-item {
-    background: transparent;
-    border-color: var(--border-dim);
-    color: var(--text);
-    padding: 6px 20px;
-  }
-  .cn-tasks-panel .list-group-item.cn-tasks-head {
+  .cn-tasks-panel .cn-tasks-head {
     font-family: var(--font-mono);
     font-size: 9px;
     letter-spacing: 1.6px;
     text-transform: uppercase;
     color: var(--text-muted);
-    background: transparent;
-    padding-top: 10px;
-    padding-bottom: 4px;
+    padding: 10px 0 4px;
+    border-bottom: 1px dashed var(--border-dim);
+    margin-bottom: 4px;
+  }
+  .cn-tasks-panel .m-task-line { padding: 3px 0; font-size: 12px; }
+  .cn-tasks-panel .m-task-activity {
+    padding-left: 26px; margin-top: 0; font-size: 10.5px;
   }
 
   /* Offcanvas overlay (<md) gets a backdrop dimmer. */
@@ -1956,7 +1972,7 @@
              Tasks button in the header is clicked (or auto-opens on first
              in_progress task). Bootstrap Collapse handles show/hide. -->
         <div class="collapse cn-tasks-panel" id="mirror-tasks-panel">
-          <div class="list-group list-group-flush" id="mirror-tasks-list"></div>
+          <div id="mirror-tasks-list"></div>
         </div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
         <div class="mirror-thinking" id="mirror-thinking"></div>
@@ -3160,11 +3176,9 @@
       });
       function renderBucket(label, rows) {
         if (!rows.length) return '';
-        var html = '<div class="list-group-item cn-tasks-head">' +
-          escapeHtml(label) + '</div>';
+        var html = '<div class="cn-tasks-head">' + escapeHtml(label) + '</div>';
         rows.forEach(function(pair) {
-          html += '<div class="list-group-item">' +
-            renderTaskLine(pair[0], pair[1]) + '</div>';
+          html += renderTaskLine(pair[0], pair[1]);
         });
         return html;
       }
@@ -3172,7 +3186,7 @@
         renderBucket('Pending', buckets.pending) +
         renderBucket('Completed', buckets.completed);
       taskPanelList.innerHTML = html ||
-        '<div class="list-group-item text-muted small text-center">No tasks yet.</div>';
+        '<div class="text-muted small text-center py-3">No tasks yet.</div>';
     }
 
     function updateTaskPanelBadge() {
@@ -3192,9 +3206,10 @@
         taskPanelAutoOpenFired = true;
         bootstrap.Collapse.getOrCreateInstance(taskPanelEl).show();
       }
-      if (taskPanelEl && taskPanelEl.classList.contains('show')) {
-        renderTaskPanelContent();
-      }
+      // Render unconditionally so the panel content is fresh the moment
+      // the user opens it, not one frame late. Rendering into a hidden
+      // collapse node is cheap (N task rows).
+      renderTaskPanelContent();
     }
 
     function scheduleTaskPanelRefresh() {

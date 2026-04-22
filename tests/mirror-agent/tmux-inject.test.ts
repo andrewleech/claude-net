@@ -72,12 +72,12 @@ describe("TmuxInjector", () => {
     expect(r.code).toBe("too_long");
   });
 
-  test("successful inject runs send-keys -l then Enter", async () => {
+  test("successful inject runs send-keys -l then Enter twice", async () => {
     const inj = new TmuxInjector({ tmuxBin: fakeTmux });
     const r = await inj.inject("s-1", "%12", "hello world");
     expect(r.ok).toBe(true);
     const calls = readLog(logFile);
-    expect(calls.length).toBe(2);
+    expect(calls.length).toBe(3);
     // First call: literal text.
     expect(calls[0]).toEqual([
       "send-keys",
@@ -87,8 +87,10 @@ describe("TmuxInjector", () => {
       "--",
       "hello world",
     ]);
-    // Second: Enter.
+    // Second + third: Enter, Enter. Second Enter is the post-/clear
+    // safety submit — no-op when the first Enter already submitted.
     expect(calls[1]).toEqual(["send-keys", "-t", "%12", "Enter"]);
+    expect(calls[2]).toEqual(["send-keys", "-t", "%12", "Enter"]);
   });
 
   test("rate limit rejects bursts inside the window", async () => {

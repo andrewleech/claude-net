@@ -21,6 +21,7 @@ export const MAX_PROMPT_BYTES = (() => {
 })();
 export const RATE_LIMIT_MS = 250;
 const SEND_KEYS_TIMEOUT_MS = 2_000;
+const POST_ENTER_DELAY_MS = 40;
 
 export type InjectResult =
   | { ok: true }
@@ -87,7 +88,13 @@ export class TmuxInjector {
       return { ok: false, code: "tmux_failed", error: litResult.error };
     }
 
-    // Step 2: press Enter to submit.
+    // Step 2: press Enter to submit. Send twice because the first Enter
+    // right after Claude Code's /clear (and some other TUI redraws) gets
+    // consumed as a newline inside the input box instead of submitting.
+    // When the first already submitted, the second Enter lands on an
+    // empty input — Claude Code's TUI treats that as a no-op. The tiny
+    // gap gives the TUI time to finish processing the first Enter before
+    // the second one arrives.
     const enterResult = await runTmux(this.tmuxBin, [
       "send-keys",
       "-t",
@@ -96,6 +103,16 @@ export class TmuxInjector {
     ]);
     if (!enterResult.ok) {
       return { ok: false, code: "tmux_failed", error: enterResult.error };
+    }
+    await new Promise((resolve) => setTimeout(resolve, POST_ENTER_DELAY_MS));
+    const enterResult2 = await runTmux(this.tmuxBin, [
+      "send-keys",
+      "-t",
+      pane,
+      "Enter",
+    ]);
+    if (!enterResult2.ok) {
+      return { ok: false, code: "tmux_failed", error: enterResult2.error };
     }
 
     return { ok: true };

@@ -400,7 +400,34 @@ export class MirrorRegistry {
   setAgentConnection(sid: string, agent: AgentConnection | null): void {
     const entry = this.sessions.get(sid);
     if (!entry) return;
+    const wasAttached = entry.agent !== null;
     entry.agent = agent;
+    const nowAttached = agent !== null;
+    if (wasAttached !== nowAttached) {
+      this.broadcastAgentState(entry, nowAttached);
+    }
+  }
+
+  /** Fan a mirror:agent_state frame out to the session's watchers.
+   *  Watchers use this to distinguish "no events flowing" (agent gone)
+   *  from "watcher hub-disconnected" — otherwise the top-line LIVE
+   *  indicator would stay on while the source has actually died. */
+  private broadcastAgentState(
+    entry: MirrorSessionEntry,
+    attached: boolean,
+  ): void {
+    const msg = JSON.stringify({
+      event: "mirror:agent_state",
+      sid: entry.sid,
+      attached,
+    });
+    for (const w of entry.watchers) {
+      try {
+        w.ws.send(msg);
+      } catch {
+        // per-watcher send failure — ignore.
+      }
+    }
   }
 
   /**
@@ -503,6 +530,7 @@ export class MirrorRegistry {
     for (const entry of this.sessions.values()) {
       if (entry.agent && entry.agent.wsIdentity === wsIdentity) {
         entry.agent = null;
+        this.broadcastAgentState(entry, false);
       }
     }
   }
@@ -1485,6 +1513,7 @@ export function wsMirrorPlugin(
               ts: f.ts,
               payload: f.payload,
             })),
+          agent_attached: entry.agent !== null,
         }),
       );
     },

@@ -2004,6 +2004,7 @@
     color: var(--text-dim);
   }
   #mirror-conn.is-live { color: var(--text-accent); animation: live-pulse 1.4s ease-in-out infinite; }
+  #mirror-conn.is-warn { color: var(--gold); }
   #mirror-conn.is-error { color: var(--text-accent); }
 
   /* ── Task panel ───────────────────────────────────────────────
@@ -3286,13 +3287,29 @@
     var transcriptEl = document.getElementById('mirror-transcript');
     var jumpBtn = document.getElementById('mirror-jump-btn');
 
-    // Broadcast-style states: CONNECTING / LIVE / OFFLINE / ERROR.
+    // Broadcast-style states:
+    //   CONNECTING — establishing watcher WS to hub
+    //   LIVE       — watcher connected AND source mirror-agent attached
+    //   NO AGENT   — watcher connected but source has no mirror-agent
+    //                (owning Claude Code is offline / mirror-agent gone)
+    //   OFFLINE    — watcher WS closed
+    //   ERROR      — watcher WS error
+    //
+    // Tracked as two independent booleans so either side toggling alone
+    // flips the composite state correctly.
+    var watcherConnected = false;
+    var agentAttached = false;
     function setConnState(state) {
-      connEl.classList.remove('is-live', 'is-error');
+      connEl.classList.remove('is-live', 'is-error', 'is-warn');
       if (state === 'live') { connEl.textContent = 'LIVE'; connEl.classList.add('is-live'); }
+      else if (state === 'no-agent') { connEl.textContent = 'NO AGENT'; connEl.classList.add('is-warn'); }
       else if (state === 'offline') { connEl.textContent = 'OFFLINE'; }
       else if (state === 'connecting') { connEl.textContent = 'CONNECTING'; }
       else if (state === 'error') { connEl.textContent = 'ERROR'; connEl.classList.add('is-error'); }
+    }
+    function refreshConnState() {
+      if (!watcherConnected) return; // leave CONNECTING / OFFLINE / ERROR as-is
+      setConnState(agentAttached ? 'live' : 'no-agent');
     }
     setConnState('connecting');
     if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
@@ -5091,7 +5108,11 @@
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
-      setConnState('live');
+      // `agent_attached` is omitted by pre-rollout hubs — default to true
+      // so we don't falsely show NO AGENT against an old server.
+      agentAttached = msg.agent_attached === undefined ? true : !!msg.agent_attached;
+      watcherConnected = true;
+      refreshConnState();
       if (msg.closed_at) {
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
@@ -5164,7 +5185,12 @@
         statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
         return;
       }
-      mws.onopen = function() { setConnState('live'); statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
+      mws.onopen = function() {
+        watcherConnected = true;
+        refreshConnState();
+        statusEl.textContent = '';
+        statusEl.className = 'mirror-status';
+      };
       mws.onmessage = function(e) {
         // Guard against late frames from a prior attach.
         if (activeAgentSid !== sid) return;
@@ -5185,12 +5211,17 @@
           statusEl.className = 'mirror-status error';
           statusEl.textContent = 'history: ' + (msg.error || 'error');
         }
+        else if (msg.event === 'mirror:agent_state') {
+          agentAttached = !!msg.attached;
+          refreshConnState();
+        }
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
         }
       };
       mws.onclose = function() {
+        watcherConnected = false;
         setConnState('offline');
         if (teardownCalled) return;
         if (mReconnectTimer) return;

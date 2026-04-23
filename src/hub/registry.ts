@@ -18,6 +18,13 @@ export interface AgentEntry {
    * by the hub's ping tick to evict stale half-open connections.
    */
   lastPongAt: Date;
+  /**
+   * Whether this agent's Claude Code binary advertises the experimental
+   * `claude/channel` capability (self-reported by the plugin on register).
+   * When false, the router NAKs direct sends with `reason: "no-channel"`
+   * and silently skips the agent on broadcast / team sends. See FR3/FR4.
+   */
+  channelCapable: boolean;
 }
 
 export interface DisconnectedEntry {
@@ -64,6 +71,7 @@ export class Registry {
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
+    options: { channelCapable?: boolean } = {},
   ):
     | {
         ok: true;
@@ -73,6 +81,7 @@ export class Registry {
       }
     | { ok: false; error: string } {
     const identity = wsIdentity ?? ws;
+    const channelCapable = options.channelCapable ?? false;
 
     // Detect rename: same wsIdentity, different name. At most one match
     // is possible because register() maintains the invariant.
@@ -96,8 +105,14 @@ export class Registry {
     }
 
     if (existing && existing.wsIdentity === identity) {
-      // Update ws reference (Elysia wrapper may change)
+      // Update ws reference (Elysia wrapper may change). Keep
+      // channelCapable coherent — in practice it won't change across a
+      // single plugin process, but a silent plugin restart sharing the
+      // same WS identity (test fixture edge case) should reflect the
+      // newest value. lastPongAt is deliberately NOT reset here —
+      // liveness is a property of the transport, not of a re-register.
       existing.ws = ws;
+      existing.channelCapable = channelCapable;
       return { ok: true, entry: existing, restored: false };
     }
 
@@ -127,6 +142,7 @@ export class Registry {
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
       lastPongAt: new Date(),
+      channelCapable,
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };

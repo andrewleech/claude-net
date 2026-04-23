@@ -26,7 +26,11 @@ function waitMs(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function connectAgent(port: number, name: string): Promise<AgentConn> {
+function connectAgent(
+  port: number,
+  name: string,
+  channel_capable = true,
+): Promise<AgentConn> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
     const messages: Msg[] = [];
@@ -41,7 +45,12 @@ function connectAgent(port: number, name: string): Promise<AgentConn> {
 
     ws.once("open", () => {
       ws.send(
-        JSON.stringify({ action: "register", name, requestId: `r-${name}` }),
+        JSON.stringify({
+          action: "register",
+          name,
+          channel_capable,
+          requestId: `r-${name}`,
+        }),
       );
       const onReg = (raw: WebSocket.RawData) => {
         const msg = JSON.parse(raw.toString()) as Msg;
@@ -208,6 +217,159 @@ describe("channel liveness — hub WS ping/pong", () => {
 
     const advanced = entry.lastPongAt.getTime();
     expect(advanced).toBeGreaterThan(initial);
+  });
+
+  test("L3 — direct send succeeds when both agents are channel-capable", async () => {
+    const a = await connectAgent(port, "l3a:alice@test", true);
+    const b = await connectAgent(port, "l3b:bob@test", true);
+    conns.push(a, b);
+
+    // Wait a moment so both registers settle at the hub.
+    await waitMs(30);
+    a.messages.length = 0;
+    b.messages.length = 0;
+
+    a.ws.send(
+      JSON.stringify({
+        action: "send",
+        to: "l3b:bob@test",
+        content: "hello bob",
+        type: "message",
+        requestId: "l3-send",
+      }),
+    );
+
+    await waitMs(50);
+
+    const resp = a.messages.find(
+      (m) => m.event === "response" && m.requestId === "l3-send",
+    );
+    expect(resp).toBeDefined();
+    expect(resp?.ok).toBe(true);
+    const data = resp?.data as Record<string, unknown> | undefined;
+    expect(data?.outcome).toBe("delivered");
+    expect(data?.message_id).toBeTruthy();
+
+    const inbound = b.messages.find(
+      (m) => m.event === "message" && m.from === "l3a:alice@test",
+    );
+    expect(inbound).toBeDefined();
+    expect(inbound?.content).toBe("hello bob");
+  });
+
+  test("L4 — direct send NAKs with reason=no-channel when recipient incapable", async () => {
+    const a = await connectAgent(port, "l4a:alice@test", true);
+    const b = await connectAgent(port, "l4b:bob@test", false);
+    conns.push(a, b);
+
+    await waitMs(30);
+    a.messages.length = 0;
+    b.messages.length = 0;
+
+    a.ws.send(
+      JSON.stringify({
+        action: "send",
+        to: "l4b:bob@test",
+        content: "should not arrive",
+        type: "message",
+        requestId: "l4-send",
+      }),
+    );
+
+    await waitMs(50);
+
+    const resp = a.messages.find(
+      (m) => m.event === "response" && m.requestId === "l4-send",
+    );
+    expect(resp).toBeDefined();
+    expect(resp?.ok).toBe(false);
+    const data = resp?.data as Record<string, unknown> | undefined;
+    expect(data?.outcome).toBe("nak");
+    expect(data?.reason).toBe("no-channel");
+    expect(typeof resp?.error).toBe("string");
+    expect((resp?.error as string).toLowerCase()).toContain("channel");
+
+    // Recipient must NOT have received an InboundMessageFrame.
+    const inbound = b.messages.find((m) => m.event === "message");
+    expect(inbound).toBeUndefined();
+  });
+
+  test("L5 — broadcast with mixed capability reports skipped_no_channel", async () => {
+    const a = await connectAgent(port, "l5a:alice@test", true);
+    const b = await connectAgent(port, "l5b:bob@test", true);
+    const c = await connectAgent(port, "l5c:carol@test", false);
+    conns.push(a, b, c);
+
+    await waitMs(30);
+    a.messages.length = 0;
+    b.messages.length = 0;
+    c.messages.length = 0;
+
+    a.ws.send(
+      JSON.stringify({
+        action: "broadcast",
+        content: "hello team",
+        requestId: "l5-bcast",
+      }),
+    );
+
+    await waitMs(50);
+
+    const resp = a.messages.find(
+      (m) => m.event === "response" && m.requestId === "l5-bcast",
+    );
+    expect(resp).toBeDefined();
+    expect(resp?.ok).toBe(true);
+    const data = resp?.data as Record<string, unknown> | undefined;
+    // Sender excluded (existing behavior). Bob capable → 1 delivered.
+    // Carol incapable → 1 skipped.
+    expect(data?.delivered_to).toBe(1);
+    expect(data?.skipped_no_channel).toBe(1);
+
+    expect(
+      b.messages.find((m) => m.event === "message" && m.to === "broadcast"),
+    ).toBeDefined();
+    expect(
+      c.messages.find((m) => m.event === "message" && m.to === "broadcast"),
+    ).toBeUndefined();
+  });
+
+  test("L6 — dashboard agent:connected event carries channel_capable", async () => {
+    const dashboard = await connectDashboard(port);
+    conns.push(dashboard);
+    // Drain any initial-state frames.
+    await waitMs(50);
+    dashboard.messages.length = 0;
+
+    const capable = await connectAgent(port, "l6a:alice@test", true);
+    conns.push(capable);
+    await waitMs(50);
+
+    const connected = dashboard.messages.find(
+      (m) => m.event === "agent:connected" && m.full_name === "l6a:alice@test",
+    );
+    expect(connected).toBeDefined();
+    expect(connected?.channel_capable).toBe(true);
+
+    // Disconnect and reconnect with channel_capable=false.
+    capable.close();
+    await waitMs(50);
+    const disconnected = dashboard.messages.find(
+      (m) =>
+        m.event === "agent:disconnected" && m.full_name === "l6a:alice@test",
+    );
+    expect(disconnected).toBeDefined();
+
+    dashboard.messages.length = 0;
+    const incapable = await connectAgent(port, "l6a:alice@test", false);
+    conns.push(incapable);
+    await waitMs(50);
+
+    const reconnected = dashboard.messages.find(
+      (m) => m.event === "agent:connected" && m.full_name === "l6a:alice@test",
+    );
+    expect(reconnected).toBeDefined();
+    expect(reconnected?.channel_capable).toBe(false);
   });
 
   test("L2 — stale WS is evicted via the close handler", async () => {

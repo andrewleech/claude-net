@@ -132,7 +132,12 @@ function drainMessages(ws: WebSocket, settleMs = 100): Promise<Msg[]> {
 async function registerAgent(ws: WebSocket, name: string): Promise<Msg[]> {
   const msgs = collectMessages(ws, 2); // registered + response
   ws.send(
-    JSON.stringify({ action: "register", name, requestId: `reg-${name}` }),
+    JSON.stringify({
+      action: "register",
+      name,
+      channel_capable: true,
+      requestId: `reg-${name}`,
+    }),
   );
   return msgs;
 }

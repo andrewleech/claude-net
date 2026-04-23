@@ -3,8 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
+  detectChannelCapability,
   mapToolToFrame,
   withSessionSuffix,
   writeSessionState,
@@ -117,7 +119,15 @@ describe("plugin helpers", () => {
   describe("mapToolToFrame", () => {
     test("register: maps to register action", () => {
       const frame = mapToolToFrame("register", { name: "myagent" });
-      expect(frame).toEqual({ action: "register", name: "myagent" });
+      // channelCapable is module-local state in plugin.ts; mapToolToFrame
+      // mirrors it into the frame so manual register() calls carry the
+      // same capability flag as the auto-register. The exact value is
+      // irrelevant here — the shape is what matters.
+      expect(frame).toEqual({
+        action: "register",
+        name: "myagent",
+        channel_capable: expect.any(Boolean),
+      });
     });
 
     test("send_message: maps to send action with type message", () => {
@@ -204,6 +214,56 @@ describe("plugin helpers", () => {
     test("unknown tool: returns null", () => {
       const frame = mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();
+    });
+  });
+
+  describe("detectChannelCapability (FR2)", () => {
+    test("true when experimental.claude/channel is an object", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": {} } }),
+      ).toBe(true);
+    });
+
+    test("true when experimental.claude/channel is a truthy boolean", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": true } }),
+      ).toBe(true);
+    });
+
+    test("false when experimental.claude/channel is missing", () => {
+      expect(detectChannelCapability({ experimental: {} })).toBe(false);
+    });
+
+    test("false when experimental is missing", () => {
+      expect(detectChannelCapability({})).toBe(false);
+    });
+
+    test("false when capabilities object is null/undefined", () => {
+      expect(detectChannelCapability(null)).toBe(false);
+      expect(detectChannelCapability(undefined)).toBe(false);
+    });
+
+    test("false when value is falsy (null / false / 0)", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": null } }),
+      ).toBe(false);
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": false } }),
+      ).toBe(false);
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": 0 } }),
+      ).toBe(false);
+    });
+  });
+
+  describe("buildChannelsOffNudge (FR2)", () => {
+    test("mentions install-channels and that inbound is broken", () => {
+      const nudge = buildChannelsOffNudge();
+      expect(nudge).toContain("install-channels");
+      expect(nudge.toLowerCase()).toContain("inbound");
+      // One-shot: the text itself should say it only fires once so the
+      // LLM doesn't repeat it.
+      expect(nudge.toLowerCase()).toContain("once");
     });
   });
 

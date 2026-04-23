@@ -115,9 +115,20 @@ export function wsPlugin(
 
       switch (data.action) {
         case "register": {
+          // FR3: plugin reports its MCP channel capability on register.
+          // Missing field is treated as `false` (NG5) — old plugins that
+          // haven't been updated are visibly broken at send time rather
+          // than silently half-broken.
+          const channelCapable =
+            typeof data.channel_capable === "boolean"
+              ? data.channel_capable
+              : false;
+
           // Use ws itself as the sendable reference — it persists and can send.
           // Use ws.raw for identity comparison in registry.
-          const result = registry.register(data.name, ws, ws.raw);
+          const result = registry.register(data.name, ws, ws.raw, {
+            channelCapable,
+          });
           if (!result.ok) {
             sendResponse(ws, requestId, false, undefined, result.error);
             return;
@@ -139,8 +150,13 @@ export function wsPlugin(
           // dashboard to drop the old name and propagate the rename
           // into mirror sessions so sidebar labels update in place.
           if (result.renamedFrom) {
+            // Parse the shortName out of the old full_name (session portion
+            // before `:`, falling back to the full string for legacy names).
+            const renamedFromShortName =
+              result.renamedFrom.split(":")[0] ?? result.renamedFrom;
             dashboardBroadcastFn({
               event: "agent:disconnected",
+              name: renamedFromShortName,
               full_name: result.renamedFrom,
             });
             mirrorRegistry?.renameOwner(
@@ -153,6 +169,7 @@ export function wsPlugin(
             event: "agent:connected",
             name: result.entry.shortName,
             full_name: result.entry.fullName,
+            channel_capable: result.entry.channelCapable,
           });
           break;
         }
@@ -169,11 +186,25 @@ export function wsPlugin(
             data.reply_to,
           );
           if (!result.ok) {
-            sendResponse(ws, requestId, false, undefined, result.error);
+            // FR5: structured NAK carries `outcome` + `reason` so
+            // tools processing the response programmatically can
+            // distinguish offline / no-channel / unknown / no-dashboard.
+            sendResponse(
+              ws,
+              requestId,
+              false,
+              { outcome: "nak", reason: result.reason },
+              result.error,
+            );
           } else {
+            // Keep `delivered: true` alongside the new `outcome` field
+            // so existing dashboard parsers that only inspect `delivered`
+            // continue to work.
             sendResponse(ws, requestId, true, {
               message_id: result.message_id,
               delivered: true,
+              outcome: "delivered",
+              ...(result.to_dashboard ? { to_dashboard: true } : {}),
             });
             dashboardBroadcastFn({
               event: "message:routed",
@@ -197,6 +228,7 @@ export function wsPlugin(
           sendResponse(ws, requestId, true, {
             message_id: result.message_id,
             delivered_to: result.delivered_to,
+            skipped_no_channel: result.skipped_no_channel,
           });
           dashboardBroadcastFn({
             event: "message:routed",
@@ -227,6 +259,7 @@ export function wsPlugin(
             sendResponse(ws, requestId, true, {
               message_id: result.message_id,
               delivered_to: result.delivered_to,
+              skipped_no_channel: result.skipped_no_channel,
             });
             dashboardBroadcastFn({
               event: "message:routed",

@@ -62,6 +62,7 @@ function pushInitialState(
         event: "agent:connected",
         name: agent.shortName,
         full_name: agent.fullName,
+        channel_capable: agent.channelCapable,
       }),
     );
   }

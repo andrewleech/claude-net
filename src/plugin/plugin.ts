@@ -64,6 +64,12 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+// Single source of truth for the plugin version. Consumed by both the
+// MCP `Server({ version })` declaration below AND the register frame
+// that reports `plugin_version` to the hub (FR8). Must stay in lockstep
+// with the hub's `PLUGIN_VERSION_CURRENT` — which is sourced from
+// package.json — since the /plugin.ts bundle is served by the hub.
+// When bumping the version: change package.json AND this constant.
 const PLUGIN_VERSION = "0.1.0";
 
 const INSTRUCTIONS = `claude-net agent messaging plugin.
@@ -219,6 +225,7 @@ export function mapToolToFrame(
         action: "register",
         name: args.name,
         channel_capable: channelCapable,
+        plugin_version: PLUGIN_VERSION,
       };
     case "send_message":
       return {
@@ -326,6 +333,12 @@ let mcpInitialized = false;
 // the nudge is warning about.
 let pendingChannelsOffNudge: string | null = null;
 
+// FR8: one-shot upgrade-version nudge. Populated when the hub's register
+// response carries `upgrade_hint` (plugin_version != PLUGIN_VERSION_CURRENT).
+// Consumed by `attachUpgradeNudgeIfPending` on the next tool result.
+// Never re-populated mid-lifetime — fires at most once per plugin startup.
+let pendingUpgradeNudge: string | null = null;
+
 const pendingRequests = new Map<
   string,
   {
@@ -423,11 +436,18 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
     const candidate =
       attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
     try {
-      await request({
+      const data = (await request({
         action: "register",
         name: candidate,
         channel_capable: channelCapable,
-      });
+        plugin_version: PLUGIN_VERSION,
+      })) as { upgrade_hint?: string } | undefined;
+      // FR8: the hub returns `upgrade_hint` in the register response
+      // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
+      // Store it for one-shot surfacing on the next tool result.
+      if (data && typeof data.upgrade_hint === "string") {
+        pendingUpgradeNudge = data.upgrade_hint;
+      }
       storedName = candidate;
       registeredName = candidate;
       // Arm a rename nudge if we had to fall back to a suffix.
@@ -720,6 +740,48 @@ function attachChannelsOffNudgeIfPending<
   return result;
 }
 
+/**
+ * FR8: if the hub reported our plugin_version didn't match its
+ * PLUGIN_VERSION_CURRENT (set in `autoRegisterWithRetry`), surface the
+ * hub-supplied upgrade hint as additional text on the next tool result.
+ * Rides tool-result text (not MCP notifications) so it reaches clients
+ * whose Claude Code binary lacks channel support — a stale plugin is
+ * often stale precisely because the host wasn't re-installed after
+ * upstream changes landed. Clears after firing so it shows up exactly
+ * once per plugin startup.
+ *
+ * Exported so tests can exercise the attach-once-then-clear contract
+ * without spinning up a real hub + WS. Tests use `__setPendingUpgradeNudgeForTest`
+ * below to seed the module state.
+ */
+export function attachUpgradeNudgeIfPending<
+  T extends { content: { type: "text"; text: string }[] },
+>(result: T): T {
+  if (!pendingUpgradeNudge) return result;
+  result.content.push({ type: "text", text: pendingUpgradeNudge });
+  pendingUpgradeNudge = null;
+  return result;
+}
+
+/**
+ * Test-only: seed or clear the module-level `pendingUpgradeNudge`. The
+ * production population path is `autoRegisterWithRetry` reading
+ * `data.upgrade_hint` off the register response — unit tests can't easily
+ * run that without a hub, so this hook is the testable surface for the
+ * attach-and-clear behavior. Not part of the public API.
+ */
+export function __setPendingUpgradeNudgeForTest(value: string | null): void {
+  pendingUpgradeNudge = value;
+}
+
+/**
+ * Test-only: read back the module-level `pendingUpgradeNudge` so a test
+ * can assert it was cleared after a firing attach call.
+ */
+export function __getPendingUpgradeNudgeForTest(): string | null {
+  return pendingUpgradeNudge;
+}
+
 async function handleToolCall(
   name: string,
   args: Record<string, string>,
@@ -736,9 +798,13 @@ async function handleToolCall(
     }
     // FR9: expose channel capability via whoami so the LLM can
     // self-inspect without waiting for a tool-level failure.
-    return attachChannelsOffNudgeIfPending(
-      attachRenameNudgeIfPending(
-        toolResult({ name: registeredName, channel_capable: channelCapable }),
+    // Nudge chain order is arbitrary (each clears its own slot) but
+    // kept consistent across whoami and the general-tool path below.
+    return attachUpgradeNudgeIfPending(
+      attachChannelsOffNudgeIfPending(
+        attachRenameNudgeIfPending(
+          toolResult({ name: registeredName, channel_capable: channelCapable }),
+        ),
       ),
     );
   }
@@ -796,8 +862,10 @@ async function handleToolCall(
       });
     }
 
-    return attachChannelsOffNudgeIfPending(
-      attachRenameNudgeIfPending(toolResult(data)),
+    return attachUpgradeNudgeIfPending(
+      attachChannelsOffNudgeIfPending(
+        attachRenameNudgeIfPending(toolResult(data)),
+      ),
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

@@ -3,6 +3,7 @@ import type {
   ErrorFrame,
   InboundMessageFrame,
   PluginFrame,
+  RegisterResponseData,
   RegisteredFrame,
   ResponseFrame,
 } from "@/shared/types";
@@ -11,6 +12,7 @@ import type { MirrorRegistry } from "./mirror";
 import type { Registry } from "./registry";
 import type { Router } from "./router";
 import type { Teams } from "./teams";
+import { PLUGIN_VERSION_CURRENT, buildUpgradeHint } from "./version";
 
 // Elysia WS handler context — the wrapper object changes per callback,
 // but ws.raw (the underlying ServerWebSocket) is stable across open/message/close.
@@ -71,12 +73,37 @@ function requireRegistered(
   return name;
 }
 
+/**
+ * Compute the informational hub URL embedded in the FR8 upgrade hint.
+ * Prefers `CLAUDE_NET_HOST` (the same env var the setup route consults),
+ * falling back to `http://localhost:<port>`. This is *not* authoritative —
+ * a remote user reading the hint can correct the URL locally if needed.
+ *
+ * Kept deliberately simple: the WS register path has no request context,
+ * so `resolveCanonicalHubUrl` (which inspects `Host` / `X-Forwarded-*`
+ * headers) is not applicable here.
+ */
+function resolveHubUrlForHint(port: number): string {
+  const envHost = process.env.CLAUDE_NET_HOST;
+  if (envHost && envHost.length > 0) {
+    if (/^https?:\/\//i.test(envHost)) return envHost.replace(/\/$/, "");
+    return `http://${envHost.replace(/\/$/, "")}`;
+  }
+  return `http://localhost:${port}`;
+}
+
 export function wsPlugin(
   app: Elysia,
   registry: Registry,
   teams: Teams,
   router: Router,
   mirrorRegistry?: MirrorRegistry,
+  /**
+   * Listen port, used only to build the FR8 upgrade-hint URL fallback
+   * when `CLAUDE_NET_HOST` is unset. Defaults to the same value the
+   * setup plugin uses so behavior is consistent across routes.
+   */
+  port: number = Number(process.env.CLAUDE_NET_PORT) || 4815,
 ): Elysia {
   return app.ws("/ws", {
     open(_ws: ElysiaWs) {
@@ -141,10 +168,26 @@ export function wsPlugin(
             full_name: result.entry.fullName,
           };
           sendFrame(ws, registeredFrame);
-          sendResponse(ws, requestId, true, {
+
+          // FR8: compare plugin's self-reported version against the hub's
+          // canonical version (from package.json). On mismatch OR missing
+          // field (old plugin pre-dating FR8), include an upgrade_hint
+          // the plugin will surface on the next tool result.
+          const reportedVersion =
+            typeof data.plugin_version === "string"
+              ? data.plugin_version
+              : undefined;
+          const registerResponse: RegisterResponseData = {
             name: result.entry.shortName,
             full_name: result.entry.fullName,
-          });
+          };
+          if (reportedVersion !== PLUGIN_VERSION_CURRENT) {
+            registerResponse.upgrade_hint = buildUpgradeHint(
+              resolveHubUrlForHint(port),
+              reportedVersion,
+            );
+          }
+          sendResponse(ws, requestId, true, registerResponse);
 
           // If this was a rename (same WS, new name), tell every
           // dashboard to drop the old name and propagate the rename

@@ -9,6 +9,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { type Socket, connect } from "node:net";
 import { type Hub, createHub } from "@/hub/index";
+import { PLUGIN_VERSION_CURRENT } from "@/hub/version";
 import WebSocket from "ws";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -144,6 +145,75 @@ function connectSilentAgent(
       };
       socket.on("data", onHandshake);
     });
+  });
+}
+
+/**
+ * Connect and register, returning the register-response data payload
+ * verbatim. Used by FR8 tests that assert the hub emits/omits
+ * `upgrade_hint` based on the plugin-reported `plugin_version`.
+ *
+ * Pass `plugin_version: null` to simulate an old plugin that predates
+ * FR8 and omits the field entirely (the JSON.stringify below will
+ * drop null values of the shape we set).
+ */
+function connectAgentWithVersion(
+  port: number,
+  name: string,
+  opts: { plugin_version?: string | null; channel_capable?: boolean } = {},
+): Promise<{
+  ws: WebSocket;
+  messages: Msg[];
+  fullName: string;
+  registerResponse: Msg;
+  close: () => void;
+}> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    const messages: Msg[] = [];
+    ws.on("message", (raw) => {
+      try {
+        messages.push(JSON.parse(raw.toString()) as Msg);
+      } catch {
+        // ignore
+      }
+    });
+    ws.once("open", () => {
+      const reqId = `r-${name}`;
+      // Build register frame; omit plugin_version entirely when caller
+      // passes null (L9 missing-field simulation).
+      const frame: Record<string, unknown> = {
+        action: "register",
+        name,
+        channel_capable: opts.channel_capable ?? true,
+        requestId: reqId,
+      };
+      if (opts.plugin_version !== null) {
+        frame.plugin_version = opts.plugin_version ?? PLUGIN_VERSION_CURRENT;
+      }
+      ws.send(JSON.stringify(frame));
+      const onMsg = (raw: WebSocket.RawData) => {
+        const msg = JSON.parse(raw.toString()) as Msg;
+        if (msg.event === "response" && msg.requestId === reqId) {
+          ws.off("message", onMsg);
+          resolve({
+            ws,
+            messages,
+            fullName: name,
+            registerResponse: msg,
+            close: () => {
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+            },
+          });
+        }
+      };
+      ws.on("message", onMsg);
+    });
+    ws.once("error", reject);
   });
 }
 
@@ -370,6 +440,73 @@ describe("channel liveness — hub WS ping/pong", () => {
     );
     expect(reconnected).toBeDefined();
     expect(reconnected?.channel_capable).toBe(false);
+  });
+
+  test("L7 — plugin_version matches: no upgrade_hint in register response", async () => {
+    const conn = await connectAgentWithVersion(port, "l7:alice@test", {
+      plugin_version: PLUGIN_VERSION_CURRENT,
+    });
+    conns.push({
+      ws: conn.ws,
+      messages: conn.messages,
+      fullName: conn.fullName,
+      close: conn.close,
+    });
+
+    expect(conn.registerResponse.ok).toBe(true);
+    const data = conn.registerResponse.data as Record<string, unknown>;
+    expect(data.name).toBeDefined();
+    expect(data.full_name).toBe("l7:alice@test");
+    // Exact match → hub omits the hint entirely.
+    expect(data.upgrade_hint).toBeUndefined();
+  });
+
+  test("L8 — plugin_version mismatch: upgrade_hint present with versions + install URL", async () => {
+    const conn = await connectAgentWithVersion(port, "l8:alice@test", {
+      plugin_version: "0.0.1",
+    });
+    conns.push({
+      ws: conn.ws,
+      messages: conn.messages,
+      fullName: conn.fullName,
+      close: conn.close,
+    });
+
+    expect(conn.registerResponse.ok).toBe(true);
+    const data = conn.registerResponse.data as Record<string, unknown>;
+    const hint = data.upgrade_hint;
+    expect(typeof hint).toBe("string");
+    // Must reference BOTH versions so the user knows what's stale and
+    // what they'd be moving to.
+    expect(hint).toContain("0.0.1");
+    expect(hint).toContain(PLUGIN_VERSION_CURRENT);
+    // Must include the curl install command so the fix is self-serve.
+    expect(hint).toContain("curl -fsSL");
+    expect(hint).toContain("/setup");
+    expect(hint).toContain("bash");
+  });
+
+  test("L9 — missing plugin_version field: upgrade_hint uses 'unknown'", async () => {
+    const conn = await connectAgentWithVersion(port, "l9:alice@test", {
+      plugin_version: null, // omit the field from the register frame entirely
+    });
+    conns.push({
+      ws: conn.ws,
+      messages: conn.messages,
+      fullName: conn.fullName,
+      close: conn.close,
+    });
+
+    expect(conn.registerResponse.ok).toBe(true);
+    const data = conn.registerResponse.data as Record<string, unknown>;
+    const hint = data.upgrade_hint;
+    expect(typeof hint).toBe("string");
+    // The stand-in when the plugin didn't tell us its version.
+    expect(hint).toContain("unknown");
+    expect(hint).toContain(PLUGIN_VERSION_CURRENT);
+    // Rest of the hint is still well-formed.
+    expect(hint).toContain("curl -fsSL");
+    expect(hint).toContain("/setup");
   });
 
   test("L2 — stale WS is evicted via the close handler", async () => {

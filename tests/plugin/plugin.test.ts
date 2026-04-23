@@ -3,6 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  __getPendingUpgradeNudgeForTest,
+  __setPendingUpgradeNudgeForTest,
+  attachUpgradeNudgeIfPending,
   buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
@@ -122,12 +125,26 @@ describe("plugin helpers", () => {
       // channelCapable is module-local state in plugin.ts; mapToolToFrame
       // mirrors it into the frame so manual register() calls carry the
       // same capability flag as the auto-register. The exact value is
-      // irrelevant here — the shape is what matters.
+      // irrelevant here — the shape is what matters. FR8: plugin_version
+      // is also carried so the hub can decide whether to emit an
+      // upgrade_hint; its exact value is asserted below.
       expect(frame).toEqual({
         action: "register",
         name: "myagent",
         channel_capable: expect.any(Boolean),
+        plugin_version: expect.any(String),
       });
+    });
+
+    test("register: plugin_version is non-empty (FR8)", () => {
+      const frame = mapToolToFrame("register", { name: "myagent" }) as {
+        plugin_version: string;
+      };
+      // The MCP `Server({ version })` declaration and the register-frame
+      // plugin_version share a single constant. Non-empty is the
+      // contract the hub relies on.
+      expect(typeof frame.plugin_version).toBe("string");
+      expect(frame.plugin_version.length).toBeGreaterThan(0);
     });
 
     test("send_message: maps to send action with type message", () => {
@@ -253,6 +270,60 @@ describe("plugin helpers", () => {
       expect(
         detectChannelCapability({ experimental: { "claude/channel": 0 } }),
       ).toBe(false);
+    });
+  });
+
+  describe("attachUpgradeNudgeIfPending (FR8)", () => {
+    // Reset the module-level pending slot between tests — this state
+    // persists across the test file since plugin.ts is loaded once per
+    // test run. Every test in this block MUST explicitly set the state
+    // before asserting behavior.
+    afterEach(() => {
+      __setPendingUpgradeNudgeForTest(null);
+    });
+
+    test("returns the result unchanged when no nudge is pending", () => {
+      __setPendingUpgradeNudgeForTest(null);
+      const result = {
+        content: [{ type: "text" as const, text: "original" }],
+      };
+      const out = attachUpgradeNudgeIfPending(result);
+      expect(out.content).toHaveLength(1);
+      expect(out.content[0]?.text).toBe("original");
+    });
+
+    test("appends the nudge text to result.content when pending", () => {
+      __setPendingUpgradeNudgeForTest("please upgrade");
+      const result = {
+        content: [{ type: "text" as const, text: "tool output" }],
+      };
+      const out = attachUpgradeNudgeIfPending(result);
+      expect(out.content).toHaveLength(2);
+      expect(out.content[0]?.text).toBe("tool output");
+      expect(out.content[1]?.text).toBe("please upgrade");
+    });
+
+    test("clears the pending slot after firing — fires exactly once", () => {
+      __setPendingUpgradeNudgeForTest("upgrade hint");
+      expect(__getPendingUpgradeNudgeForTest()).toBe("upgrade hint");
+
+      const first = { content: [{ type: "text" as const, text: "r1" }] };
+      attachUpgradeNudgeIfPending(first);
+      expect(__getPendingUpgradeNudgeForTest()).toBeNull();
+
+      const second = { content: [{ type: "text" as const, text: "r2" }] };
+      attachUpgradeNudgeIfPending(second);
+      // Nudge already consumed; no duplicate emission.
+      expect(second.content).toHaveLength(1);
+      expect(second.content[0]?.text).toBe("r2");
+    });
+
+    test("pending slot starts null by default (no nudge leakage between tests)", () => {
+      // This relies on the afterEach in this block having cleared the
+      // state from prior tests. If a future test in the file forgets to
+      // reset, this test catches the leak.
+      __setPendingUpgradeNudgeForTest(null);
+      expect(__getPendingUpgradeNudgeForTest()).toBeNull();
     });
   });
 

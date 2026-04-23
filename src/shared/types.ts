@@ -24,7 +24,29 @@ export interface RegisterFrame {
    * and silently skips them on broadcast/team sends. See FR2/FR3/FR4.
    */
   channel_capable: boolean;
+  /**
+   * Plugin's self-reported version — sourced from the same value declared
+   * on the MCP `Server({ version })` constructor. The hub compares this
+   * against its own `PLUGIN_VERSION_CURRENT` (from package.json) on
+   * register; on mismatch or missing it returns an `upgrade_hint` in the
+   * register response data. See FR8.
+   */
+  plugin_version: string;
   requestId?: string;
+}
+
+/**
+ * Shape of the `data` payload on the register response frame. Documents
+ * the register-time contract between hub and plugin:
+ *   - `name` / `full_name` mirror the plugin's identity as the hub sees it.
+ *   - `upgrade_hint` (optional) is present iff `plugin_version` did not
+ *     exactly match `PLUGIN_VERSION_CURRENT`; the plugin stores the
+ *     string and surfaces it on the next tool result. See FR8.
+ */
+export interface RegisterResponseData {
+  name: string;
+  full_name: string;
+  upgrade_hint?: string;
 }
 
 export interface SendFrame {

@@ -1278,8 +1278,18 @@
     font-size: 8px;
     letter-spacing: 4px;
   }
+  .md-body .md-table-scroll {
+    /* Per-table horizontal scroll — the page is horizontally clipped
+       (to kill iOS rubber-band), so wide tables need their own scroll
+       container or they'd get cut off with nothing reachable. */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    max-width: 100%;
+    margin: 10px 0;
+    -webkit-overflow-scrolling: touch;
+  }
   .md-body table {
-    border-collapse: collapse; margin: 10px 0;
+    border-collapse: collapse; margin: 0;
     font-family: var(--font-mono);
     font-size: 12px;
   }
@@ -4640,6 +4650,15 @@
       } catch (e) {
         return '<pre>' + escapeHtml(text) + '</pre>';
       }
+      // Wrap tables in a horizontal-scroll container. The page itself
+      // has `overflow-x: clip` (to kill the iOS rubber-band pan), so a
+      // wider-than-viewport table would otherwise get silently chopped
+      // on mobile with no way to reach the right-hand columns. Each
+      // table scrolls in isolation — the page is still horizontally
+      // locked.
+      html = html
+        .replace(/<table(\s|>)/g, '<div class="md-table-scroll"><table$1')
+        .replace(/<\/table>/g, '</table></div>');
       if (purifyReady) {
         // Keep links target=_self by default but allow href/title; drop
         // scripts/iframes/event-handlers.

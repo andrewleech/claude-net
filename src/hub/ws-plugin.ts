@@ -430,6 +430,25 @@ export function wsPlugin(
           break;
         }
 
+        case "query_events": {
+          const senderName = requireRegistered(ws, requestId);
+          if (!senderName) return;
+
+          const events = eventLog.query({
+            event: data.event,
+            since: data.since,
+            limit: data.limit,
+            agent: data.agent,
+          });
+          sendResponse(ws, requestId, true, {
+            events,
+            count: events.length,
+            oldest_ts: eventLog.oldestTs(),
+            capacity: eventLog.capacity,
+          });
+          break;
+        }
+
         case "ping": {
           const senderName = requireRegistered(ws, requestId);
           if (!senderName) return;

@@ -43,6 +43,7 @@ export class EventLog {
   private head = 0;
   /** Number of populated slots; saturates at capacity. */
   private countValue = 0;
+  private listener: ((entry: HubEvent) => void) | null = null;
 
   constructor(capacity: number = DEFAULT_CAPACITY) {
     if (!Number.isFinite(capacity) || capacity < 1) {
@@ -62,6 +63,11 @@ export class EventLog {
     return this.countValue;
   }
 
+  /** Register a callback invoked synchronously after each push. */
+  setListener(fn: (entry: HubEvent) => void): void {
+    this.listener = fn;
+  }
+
   /**
    * Append an event. When the buffer is full the oldest entry is
    * overwritten — FIFO eviction, O(1).
@@ -71,6 +77,7 @@ export class EventLog {
     this.buffer[this.head] = entry;
     this.head = (this.head + 1) % this.capacityValue;
     if (this.countValue < this.capacityValue) this.countValue++;
+    this.listener?.(entry);
   }
 
   /**

@@ -492,6 +492,260 @@ describe("REST /api/send emits message.sent", () => {
   });
 });
 
+describe("query_events WS frame", () => {
+  test("registered agent can query events over WS and gets structured response", async () => {
+    const hub = createHub({ eventLogCapacity: 100 });
+    hub.app.listen(0);
+    const port = hub.app.server?.port ?? 0;
+
+    try {
+      const ws = await connectWs(port);
+      await registerAndWait(ws, "qe-agent:tester@host");
+
+      // Query all events via the WS frame
+      const resp = await new Promise<Record<string, unknown>>(
+        (resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("Timeout waiting for query_events response")),
+            2000,
+          );
+          const onMsg = (event: MessageEvent) => {
+            const frame = JSON.parse(event.data as string) as Record<
+              string,
+              unknown
+            >;
+            if (frame.event === "response" && frame.requestId === "qe-1") {
+              clearTimeout(timer);
+              ws.removeEventListener("message", onMsg);
+              resolve(frame);
+            }
+          };
+          ws.addEventListener("message", onMsg);
+
+          ws.send(
+            JSON.stringify({
+              action: "query_events",
+              requestId: "qe-1",
+            }),
+          );
+        },
+      );
+
+      expect(resp.ok).toBe(true);
+      const data = resp.data as {
+        events: unknown[];
+        count: number;
+        oldest_ts: number;
+        capacity: number;
+      };
+      expect(Array.isArray(data.events)).toBe(true);
+      expect(typeof data.count).toBe("number");
+      expect(typeof data.oldest_ts).toBe("number");
+      expect(data.capacity).toBe(100);
+      // The register event should be in the results
+      expect(
+        (
+          data.events as Array<{
+            event: string;
+            data: Record<string, unknown>;
+          }>
+        ).some(
+          (e) =>
+            e.event === "agent.registered" &&
+            e.data.fullName === "qe-agent:tester@host",
+        ),
+      ).toBe(true);
+
+      try {
+        ws.close();
+      } catch {}
+    } finally {
+      hub.stop();
+    }
+  });
+
+  test("query_events respects event filter over WS", async () => {
+    const hub = createHub({ eventLogCapacity: 100 });
+    hub.app.listen(0);
+    const port = hub.app.server?.port ?? 0;
+
+    try {
+      const ws = await connectWs(port);
+      await registerAndWait(ws, "qe-filter:tester@host");
+
+      const resp = await new Promise<Record<string, unknown>>(
+        (resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("Timeout")),
+            2000,
+          );
+          const onMsg = (event: MessageEvent) => {
+            const frame = JSON.parse(event.data as string) as Record<
+              string,
+              unknown
+            >;
+            if (frame.event === "response" && frame.requestId === "qe-2") {
+              clearTimeout(timer);
+              ws.removeEventListener("message", onMsg);
+              resolve(frame);
+            }
+          };
+          ws.addEventListener("message", onMsg);
+
+          ws.send(
+            JSON.stringify({
+              action: "query_events",
+              event: "message",
+              requestId: "qe-2",
+            }),
+          );
+        },
+      );
+
+      const data = resp.data as { events: Array<{ event: string }> };
+      // All returned events must be message.* events
+      for (const e of data.events) {
+        expect(e.event.startsWith("message.")).toBe(true);
+      }
+
+      try {
+        ws.close();
+      } catch {}
+    } finally {
+      hub.stop();
+    }
+  });
+
+  test("unregistered agent gets error on query_events", async () => {
+    const hub = createHub({ eventLogCapacity: 100 });
+    hub.app.listen(0);
+    const port = hub.app.server?.port ?? 0;
+
+    try {
+      const ws = await connectWs(port);
+      // Do NOT register
+
+      const resp = await new Promise<Record<string, unknown>>(
+        (resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("Timeout")),
+            2000,
+          );
+          const onMsg = (event: MessageEvent) => {
+            const frame = JSON.parse(event.data as string) as Record<
+              string,
+              unknown
+            >;
+            if (frame.event === "response" && frame.requestId === "qe-3") {
+              clearTimeout(timer);
+              ws.removeEventListener("message", onMsg);
+              resolve(frame);
+            }
+          };
+          ws.addEventListener("message", onMsg);
+
+          ws.send(
+            JSON.stringify({
+              action: "query_events",
+              requestId: "qe-3",
+            }),
+          );
+        },
+      );
+
+      expect(resp.ok).toBe(false);
+
+      try {
+        ws.close();
+      } catch {}
+    } finally {
+      hub.stop();
+    }
+  });
+});
+
+describe("Dashboard receives system:event broadcasts", () => {
+  test("dashboard WS receives system:event when an agent registers", async () => {
+    const hub = createHub({ eventLogCapacity: 100 });
+    // Need to also wire the dashboard plugin
+    const { broadcastToDashboards, wsDashboardPlugin } = await import(
+      "@/hub/ws-dashboard"
+    );
+    const { setDashboardBroadcast } = await import("@/hub/ws-plugin");
+    setDashboardBroadcast(broadcastToDashboards);
+
+    // Wire event log to broadcast system events — re-wire since index.ts
+    // already did it once on createHub, but dashboard plugin needs explicit
+    // registration on this app instance.
+    hub.eventLog.setListener((entry) => {
+      broadcastToDashboards({
+        event: "system:event",
+        ts: entry.ts,
+        name: entry.event,
+        data: entry.data,
+      });
+    });
+
+    let app = hub.app;
+    app = wsDashboardPlugin(app, hub.registry, hub.teams);
+    app.listen(0);
+    const port = app.server?.port ?? 0;
+
+    try {
+      // Connect a dashboard client
+      const dashWs = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://localhost:${port}/ws/dashboard`);
+        ws.onopen = () => resolve(ws);
+        ws.onerror = (e) => reject(e);
+      });
+
+      // Drain initial state
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Collect the next system:event
+      const sysEvent = new Promise<Record<string, unknown>>(
+        (resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("Timeout waiting for system:event")),
+            2000,
+          );
+          const onMsg = (event: MessageEvent) => {
+            const frame = JSON.parse(event.data as string) as Record<
+              string,
+              unknown
+            >;
+            if (
+              frame.event === "system:event" &&
+              frame.name === "agent.registered"
+            ) {
+              clearTimeout(timer);
+              dashWs.removeEventListener("message", onMsg);
+              resolve(frame);
+            }
+          };
+          dashWs.addEventListener("message", onMsg);
+        },
+      );
+
+      // Connect an agent to trigger agent.registered
+      const agentWs = await connectWs(port);
+      await registerAndWait(agentWs, "sys-evt:tester@host");
+
+      const frame = await sysEvent;
+      expect(frame.event).toBe("system:event");
+      expect(frame.name).toBe("agent.registered");
+      const data = frame.data as Record<string, unknown>;
+      expect(data.fullName).toBe("sys-evt:tester@host");
+      expect(typeof frame.ts).toBe("number");
+
+      dashWs.close();
+      agentWs.close();
+    } finally {
+      hub.stop();
+    }
+  });
+});
+
 describe("Rename emits agent.disconnected with reason=renamed", () => {
   test("registering a new name on the same WS disconnects the old identity in the event log", async () => {
     const hub = createHub({ eventLogCapacity: 100 });

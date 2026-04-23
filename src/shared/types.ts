@@ -97,6 +97,19 @@ export interface PingFrame {
   requestId?: string;
 }
 
+export interface QueryEventsFrame {
+  action: "query_events";
+  /** Prefix-match on event name: "agent" matches agent.registered, etc. */
+  event?: string;
+  /** Return only events with ts > since (epoch ms). */
+  since?: number;
+  /** Max entries returned (default 100, max 1000). */
+  limit?: number;
+  /** Substring match against from/to/fullName fields in event data. */
+  agent?: string;
+  requestId?: string;
+}
+
 export interface MirrorEventFrame {
   action: "mirror_event";
   sid: string;
@@ -167,6 +180,7 @@ export type PluginFrame =
   | ListAgentsFrame
   | ListTeamsFrame
   | PingFrame
+  | QueryEventsFrame
   | MirrorEventFrame
   | MirrorPasteDoneFrame
   | MirrorCommandsDoneFrame
@@ -475,6 +489,15 @@ export interface HostDisconnectedEvent {
   host_id: string;
 }
 
+/** Real-time broadcast of every EventLog entry to dashboard clients. */
+export interface SystemEvent {
+  event: "system:event";
+  ts: number;
+  /** The EventLog event name, e.g. "agent.registered", "ping.tick". */
+  name: string;
+  data: Record<string, unknown>;
+}
+
 export interface HostSummary {
   host_id: string;
   user: string;
@@ -498,7 +521,8 @@ export type DashboardEvent =
   | MirrorActivityEvent
   | MirrorOwnerRenamedEvent
   | HostConnectedEvent
-  | HostDisconnectedEvent;
+  | HostDisconnectedEvent
+  | SystemEvent;
 
 // ── Data model types ──────────────────────────────────────────────────────
 

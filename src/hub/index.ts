@@ -83,6 +83,16 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
   hostRegistry.setDashboardBroadcast(broadcastToDashboards);
 
+  // Broadcast every event log entry to dashboard clients in real-time.
+  eventLog.setListener((entry) => {
+    broadcastToDashboards({
+      event: "system:event",
+      ts: entry.ts,
+      name: entry.event,
+      data: entry.data,
+    });
+  });
+
   // Resolve plugin.ts path relative to hub source directory
   const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
   const dashboardPath = `${import.meta.dir}/dashboard.html`;

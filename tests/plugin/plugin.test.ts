@@ -227,6 +227,45 @@ describe("plugin helpers", () => {
       expect(frame).toEqual({ action: "list_teams" });
     });
 
+    test("hub_events: no args produces query_events with default since", () => {
+      const before = Date.now() - 60 * 60_000 - 100;
+      const frame = mapToolToFrame("hub_events", {}) as Record<string, unknown>;
+      expect(frame).not.toBeNull();
+      expect(frame.action).toBe("query_events");
+      // since should be approximately now - 60 minutes
+      expect(typeof frame.since).toBe("number");
+      expect(frame.since as number).toBeGreaterThan(before);
+      expect(frame.event).toBeUndefined();
+      expect(frame.limit).toBeUndefined();
+      expect(frame.agent).toBeUndefined();
+    });
+
+    test("hub_events: filter sets event field", () => {
+      const frame = mapToolToFrame("hub_events", {
+        filter: "message",
+      }) as Record<string, unknown>;
+      expect(frame.action).toBe("query_events");
+      expect(frame.event).toBe("message");
+    });
+
+    test("hub_events: since_minutes overrides the default window", () => {
+      const before = Date.now() - 5 * 60_000 - 200;
+      const frame = mapToolToFrame("hub_events", {
+        since_minutes: "5",
+      }) as Record<string, unknown>;
+      expect(frame.since as number).toBeGreaterThan(before);
+      expect(frame.since as number).toBeLessThan(Date.now() - 4 * 60_000);
+    });
+
+    test("hub_events: limit and agent are forwarded", () => {
+      const frame = mapToolToFrame("hub_events", {
+        limit: "50",
+        agent: "alice",
+      }) as Record<string, unknown>;
+      expect(frame.limit).toBe(50);
+      expect(frame.agent).toBe("alice");
+    });
+
     test("unknown tool: returns null", () => {
       const frame = mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();

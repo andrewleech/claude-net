@@ -99,6 +99,7 @@ Available tools:
 - leave_team(team) — leave a team
 - list_agents() — list all agents with status
 - list_teams() — list all teams with members
+- hub_events(filter?, since_minutes?, limit?, agent?) — query recent hub events. Use to diagnose delivery failures: e.g. filter="message.sent" agent="recipient-name" since_minutes=5
 
 IDENTITY AND REGISTRATION:
 On startup the plugin auto-registers as session:user@host. If that
@@ -255,6 +256,16 @@ export function mapToolToFrame(
       return { action: "list_teams" };
     case "ping":
       return { action: "ping" };
+    case "hub_events": {
+      const sinceMinutes = args.since_minutes ? Number(args.since_minutes) : 60;
+      return {
+        action: "query_events",
+        ...(args.filter ? { event: args.filter } : {}),
+        since: Date.now() - sinceMinutes * 60_000,
+        ...(args.limit ? { limit: Number(args.limit) } : {}),
+        ...(args.agent ? { agent: args.agent } : {}),
+      };
+    }
     default:
       return null;
   }
@@ -691,6 +702,36 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object" as const,
       properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "hub_events",
+    description:
+      "Query recent hub events — agent connections/disconnections, message delivery outcomes, evictions, version mismatches. Use when diagnosing delivery failures or checking system health.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filter: {
+          type: "string",
+          description:
+            "Prefix-filter by event name. 'agent' matches agent.registered, agent.disconnected, etc. 'message' matches message.sent, message.broadcast, etc.",
+        },
+        since_minutes: {
+          type: "number",
+          description:
+            "Only return events from the last N minutes (default 60).",
+        },
+        limit: {
+          type: "number",
+          description: "Max events to return (default 100, max 1000).",
+        },
+        agent: {
+          type: "string",
+          description:
+            "Substring filter on agent name (from/to/fullName fields).",
+        },
+      },
       required: [],
     },
   },

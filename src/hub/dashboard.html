@@ -1765,19 +1765,23 @@
   }
   #agent-list .list-group-item:hover { background: var(--bg-hover); color: var(--text); }
   #agent-list .list-group-item.active {
+    position: relative;
     background: var(--accent-ink);
     border-bottom-color: var(--accent);
     color: var(--text);
     font-weight: 600;
   }
+  /* Left-edge accent bar. Absolute-positioned so it's flush with the
+     row's border box regardless of which padding override (base /
+     cn-session-row / cn-host-child) is in effect. */
   #agent-list .list-group-item.active::before {
     content: "";
-    display: block;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
     width: 3px;
-    align-self: stretch;
     background: var(--accent);
-    margin: -8px 0 -8px -14px;
-    margin-right: 6px;
   }
   /* Rows without an active mirror: show them but make clear they're not
      clickable. Tooltip explains why. */

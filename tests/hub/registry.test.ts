@@ -367,4 +367,36 @@ describe("Registry", () => {
     // owned by ws2 — must fail.
     expect(result.ok).toBe(false);
   });
+
+  // ── lastPongAt (WS liveness) ───────────────────────────────────────────
+
+  test("register initializes lastPongAt close to now", () => {
+    const ws = mockWs();
+    const before = Date.now();
+    const result = registry.register("live:alice@host", ws);
+    const after = Date.now();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const t = result.entry.lastPongAt.getTime();
+    expect(t).toBeGreaterThanOrEqual(before);
+    expect(t).toBeLessThanOrEqual(after);
+  });
+
+  test("same-identity re-register preserves lastPongAt", async () => {
+    const ws = mockWs();
+    const identity = {};
+    const first = registry.register("live:alice@host", ws, identity);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const initial = first.entry.lastPongAt;
+
+    // Wait long enough for Date.now() to advance at least 1ms so a
+    // naive "reset to new Date()" would be detectable.
+    await new Promise((r) => setTimeout(r, 5));
+
+    const second = registry.register("live:alice@host", ws, identity);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.entry.lastPongAt).toBe(initial);
+  });
 });

@@ -1,3 +1,4 @@
+import type { ServerWebSocket } from "bun";
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
 import { binServerPlugin } from "./bin-server";
@@ -14,98 +15,194 @@ import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
 import { wsHostPlugin } from "./ws-host";
 import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
-const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
-const startedAt = new Date();
-
-const registry = new Registry();
-const teams = new Teams(registry);
-const router = new Router(registry, teams);
-const mirrorStore = createStoreFromEnv();
-const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
-const hostRegistry = new HostRegistry();
-const uploadsRegistry = new UploadsRegistry();
-mirrorRegistry.onSessionClosed((sid) => {
-  uploadsRegistry.purgeSession(sid).catch(() => {});
-});
-
-// Wire up disconnect timeout to clean up team memberships
-registry.setTimeoutCleanup((fullName, agentTeams) => {
-  for (const teamName of agentTeams) {
-    teams.leave(teamName, fullName);
-  }
-});
-
-// Wire dashboard broadcast into ws-plugin and mirror-registry
-setDashboardBroadcast(broadcastToDashboards);
-mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
-hostRegistry.setDashboardBroadcast(broadcastToDashboards);
-
-// Resolve plugin.ts path relative to hub source directory
-const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
-const dashboardPath = `${import.meta.dir}/dashboard.html`;
-const dashboardParsersPath = `${import.meta.dir}/dashboard/parsers.js`;
-let pluginCache: string | null = null;
-let dashboardCache: string | null = null;
-let dashboardParsersCache: string | null = null;
-
-async function getDashboardHtml(): Promise<string> {
-  if (!dashboardCache) {
-    const file = Bun.file(dashboardPath);
-    dashboardCache = await file.text();
-  }
-  return dashboardCache;
+export interface CreateHubOptions {
+  /** How often to send native WS pings to every registered plugin. */
+  pingIntervalMs?: number;
+  /**
+   * Evict a registered WS whose last pong (or register time) is older
+   * than this. 3× pingIntervalMs is a reasonable default — gives
+   * slack for scheduler jitter and a slow-but-alive client.
+   */
+  staleThresholdMs?: number;
 }
 
-async function getDashboardParsersJs(): Promise<string> {
-  if (!dashboardParsersCache) {
-    const file = Bun.file(dashboardParsersPath);
-    dashboardParsersCache = await file.text();
-  }
-  return dashboardParsersCache;
+export interface Hub {
+  app: Elysia;
+  registry: Registry;
+  teams: Teams;
+  router: Router;
+  mirrorRegistry: MirrorRegistry;
+  hostRegistry: HostRegistry;
+  startedAt: Date;
+  /** Stop the ping tick and the Elysia server. Idempotent. */
+  stop: () => void;
 }
 
-let app = new Elysia()
-  .get("/", async ({ set }) => {
-    set.headers["content-type"] = "text/html";
-    return await getDashboardHtml();
-  })
-  .get("/health", () => ({
-    status: "ok",
-    version: "0.1.0",
-    uptime: (Date.now() - startedAt.getTime()) / 1000,
-    agents: registry.agents.size,
-    teams: teams.teams.size,
-  }))
-  .get("/plugin.ts", async ({ set }) => {
-    if (!pluginCache) {
-      const file = Bun.file(pluginPath);
-      pluginCache = await file.text();
+export function createHub(options: CreateHubOptions = {}): Hub {
+  const pingIntervalMs = options.pingIntervalMs ?? 5_000;
+  const staleThresholdMs = options.staleThresholdMs ?? 15_000;
+  const startedAt = new Date();
+
+  const registry = new Registry();
+  const teams = new Teams(registry);
+  const router = new Router(registry, teams);
+  const mirrorStore = createStoreFromEnv();
+  const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
+  const hostRegistry = new HostRegistry();
+  const uploadsRegistry = new UploadsRegistry();
+  mirrorRegistry.onSessionClosed((sid) => {
+    uploadsRegistry.purgeSession(sid).catch(() => {});
+  });
+
+  // Wire up disconnect timeout to clean up team memberships
+  registry.setTimeoutCleanup((fullName, agentTeams) => {
+    for (const teamName of agentTeams) {
+      teams.leave(teamName, fullName);
     }
-    set.headers["content-type"] = "text/typescript";
-    return pluginCache;
-  })
-  .get("/dashboard/parsers.js", async ({ set }) => {
-    set.headers["content-type"] = "application/javascript";
-    return await getDashboardParsersJs();
-  })
-  .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
-  .use(mirrorPlugin({ mirrorRegistry }))
-  .use(
-    uploadsPlugin({
-      mirrorRegistry,
-      uploadsRegistry,
-      externalHost: process.env.CLAUDE_NET_HOST,
-      port,
-    }),
-  )
-  .use(hostPlugin({ hostRegistry }))
-  .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
-  .use(setupPlugin({ port }));
+  });
 
-app = wsPlugin(app, registry, teams, router, mirrorRegistry);
-app = wsDashboardPlugin(app, registry, teams, hostRegistry);
-app = wsMirrorPlugin(app, mirrorRegistry);
-app = wsHostPlugin(app, hostRegistry);
+  // Wire dashboard broadcast into ws-plugin and mirror-registry
+  setDashboardBroadcast(broadcastToDashboards);
+  mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
+  hostRegistry.setDashboardBroadcast(broadcastToDashboards);
+
+  // Resolve plugin.ts path relative to hub source directory
+  const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
+  const dashboardPath = `${import.meta.dir}/dashboard.html`;
+  const dashboardParsersPath = `${import.meta.dir}/dashboard/parsers.js`;
+  let pluginCache: string | null = null;
+  let dashboardCache: string | null = null;
+  let dashboardParsersCache: string | null = null;
+
+  async function getDashboardHtml(): Promise<string> {
+    if (!dashboardCache) {
+      const file = Bun.file(dashboardPath);
+      dashboardCache = await file.text();
+    }
+    return dashboardCache;
+  }
+
+  async function getDashboardParsersJs(): Promise<string> {
+    if (!dashboardParsersCache) {
+      const file = Bun.file(dashboardParsersPath);
+      dashboardParsersCache = await file.text();
+    }
+    return dashboardParsersCache;
+  }
+
+  let app = new Elysia()
+    .get("/", async ({ set }) => {
+      set.headers["content-type"] = "text/html";
+      return await getDashboardHtml();
+    })
+    .get("/health", () => ({
+      status: "ok",
+      version: "0.1.0",
+      uptime: (Date.now() - startedAt.getTime()) / 1000,
+      agents: registry.agents.size,
+      teams: teams.teams.size,
+    }))
+    .get("/plugin.ts", async ({ set }) => {
+      if (!pluginCache) {
+        const file = Bun.file(pluginPath);
+        pluginCache = await file.text();
+      }
+      set.headers["content-type"] = "text/typescript";
+      return pluginCache;
+    })
+    .get("/dashboard/parsers.js", async ({ set }) => {
+      set.headers["content-type"] = "application/javascript";
+      return await getDashboardParsersJs();
+    })
+    .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
+    .use(mirrorPlugin({ mirrorRegistry }))
+    .use(
+      uploadsPlugin({
+        mirrorRegistry,
+        uploadsRegistry,
+        externalHost: process.env.CLAUDE_NET_HOST,
+        port: Number(process.env.CLAUDE_NET_PORT) || 4815,
+      }),
+    )
+    .use(hostPlugin({ hostRegistry }))
+    .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
+    .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
+
+  app = wsPlugin(app, registry, teams, router, mirrorRegistry);
+  app = wsDashboardPlugin(app, registry, teams, hostRegistry);
+  app = wsMirrorPlugin(app, mirrorRegistry);
+  app = wsHostPlugin(app, hostRegistry);
+
+  // Periodic native WS ping + stale-WS eviction. Reuses the existing
+  // close handler in ws-plugin to unregister and broadcast
+  // agent:disconnected — do not duplicate that here.
+  const pingTick = setInterval(() => {
+    const cutoff = Date.now() - staleThresholdMs;
+    for (const entry of registry.agents.values()) {
+      const raw = entry.wsIdentity as ServerWebSocket<unknown>;
+      // "Greater than" — exact threshold is still alive (FR1: "15s of
+      // silence = stale").
+      if (entry.lastPongAt.getTime() < cutoff) {
+        try {
+          raw.close();
+        } catch {
+          // Already closing/closed — the close handler will clean up,
+          // or the entry was removed between the check and the call.
+        }
+        continue;
+      }
+      try {
+        raw.ping();
+      } catch {
+        // WS is in a bad state. The stale check on a subsequent tick
+        // will close it once the threshold elapses; no need to force
+        // close here.
+      }
+    }
+  }, pingIntervalMs);
+  // Don't block process exit on the ping tick (relevant for tests that
+  // forget to call stop()).
+  if (pingTick && typeof pingTick === "object" && "unref" in pingTick) {
+    (pingTick as { unref(): void }).unref();
+  }
+
+  let stopped = false;
+  function stop(): void {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(pingTick);
+    try {
+      app.stop();
+    } catch {
+      // app.stop() may throw if the server never started; best-effort.
+    }
+  }
+
+  return {
+    app,
+    registry,
+    teams,
+    router,
+    mirrorRegistry,
+    hostRegistry,
+    startedAt,
+    stop,
+  };
+}
+
+// ── Module entrypoint (executed when `bun run src/hub/index.ts`) ─────────
+
+const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
+const hub = createHub();
+const {
+  app,
+  registry,
+  teams,
+  router,
+  mirrorRegistry,
+  hostRegistry,
+  startedAt,
+} = hub;
 
 // Optional TLS. If CLAUDE_NET_TLS_CERT and CLAUDE_NET_TLS_KEY are both set,
 // bind HTTPS/WSS. The existing message-bus endpoints (/ws, /api/*) work
@@ -127,6 +224,16 @@ if (tlsCert && tlsKey) {
   app.listen(port);
   console.log(`claude-net hub listening on port ${port}`);
 }
+
+// Graceful shutdown clears the ping interval so the process can exit
+// cleanly (otherwise the interval keeps the event loop alive even after
+// app.stop()).
+const shutdown = () => {
+  hub.stop();
+  process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 export {
   app,

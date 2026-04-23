@@ -12,6 +12,12 @@ export interface AgentEntry {
   wsIdentity: object;
   teams: Set<string>;
   connectedAt: Date;
+  /**
+   * Time of the last inbound WS-level pong (or register, treated as
+   * "alive now"). Advanced by the `pong` handler in ws-plugin; read
+   * by the hub's ping tick to evict stale half-open connections.
+   */
+  lastPongAt: Date;
 }
 
 export interface DisconnectedEntry {
@@ -120,6 +126,7 @@ export class Registry {
       // Rename wins over disconnected-restore if both apply (unlikely).
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
+      lastPongAt: new Date(),
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };

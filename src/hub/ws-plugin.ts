@@ -339,6 +339,23 @@ export function wsPlugin(
         full_name: fullName,
       });
     },
+
+    // Bun ServerWebSocket surfaces native WS pong frames here. The hub's
+    // ping tick (see createHub in index.ts) sends periodic pings; the ws
+    // npm library on the plugin side auto-responds with pongs. Advancing
+    // lastPongAt here keeps the liveness check fresh — absence of pongs
+    // for >staleThresholdMs triggers the tick to close the WS.
+    //
+    // NOTE: Elysia's Bun adapter invokes pong (and ping) with the raw
+    // Bun ServerWebSocket directly — NOT wrapped in ElysiaWS as the
+    // open/message/close handlers are. So the lookup key is `ws` here,
+    // not `ws.raw`.
+    pong(ws: object) {
+      const fullName = wsToAgent.get(ws);
+      if (!fullName) return;
+      const entry = registry.getByFullName(fullName);
+      if (entry) entry.lastPongAt = new Date();
+    },
     // biome-ignore lint/suspicious/noExplicitAny: Elysia WS handler typing requires flexible return
   }) as any;
 }

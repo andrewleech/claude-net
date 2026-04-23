@@ -153,10 +153,18 @@ function connectWs(port: number, path: string): Promise<AgentConnection> {
 async function connectAgent(
   port: number,
   name: string,
+  channel_capable = true,
 ): Promise<AgentConnection> {
   const conn = await connectWs(port, "/ws");
   const requestId = `reg-${name}`;
-  conn.ws.send(JSON.stringify({ action: "register", name, requestId }));
+  conn.ws.send(
+    JSON.stringify({
+      action: "register",
+      name,
+      channel_capable,
+      requestId,
+    }),
+  );
   await conn.waitForMessage(
     (m) => m.event === "registered" && m.full_name === name,
   );
@@ -234,6 +242,7 @@ describe("e2e integration", () => {
       send(dup.ws, {
         action: "register",
         name: "proj:alice@test",
+        channel_capable: true,
         requestId: "dup1",
       });
       const resp = await dup.waitForMessage(

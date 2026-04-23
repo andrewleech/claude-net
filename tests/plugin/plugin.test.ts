@@ -3,9 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
+  detectChannelCapability,
+  drainNudges,
   mapToolToFrame,
+  pendingNudges,
   withSessionSuffix,
   writeSessionState,
 } from "@/plugin/plugin";
@@ -117,7 +121,29 @@ describe("plugin helpers", () => {
   describe("mapToolToFrame", () => {
     test("register: maps to register action", () => {
       const frame = mapToolToFrame("register", { name: "myagent" });
-      expect(frame).toEqual({ action: "register", name: "myagent" });
+      // channelCapable is module-local state in plugin.ts; mapToolToFrame
+      // mirrors it into the frame so manual register() calls carry the
+      // same capability flag as the auto-register. The exact value is
+      // irrelevant here — the shape is what matters. FR8: plugin_version
+      // is also carried so the hub can decide whether to emit an
+      // upgrade_hint; its exact value is asserted below.
+      expect(frame).toEqual({
+        action: "register",
+        name: "myagent",
+        channel_capable: expect.any(Boolean),
+        plugin_version: expect.any(String),
+      });
+    });
+
+    test("register: plugin_version is non-empty (FR8)", () => {
+      const frame = mapToolToFrame("register", { name: "myagent" }) as {
+        plugin_version: string;
+      };
+      // The MCP `Server({ version })` declaration and the register-frame
+      // plugin_version share a single constant. Non-empty is the
+      // contract the hub relies on.
+      expect(typeof frame.plugin_version).toBe("string");
+      expect(frame.plugin_version.length).toBeGreaterThan(0);
     });
 
     test("send_message: maps to send action with type message", () => {
@@ -204,6 +230,112 @@ describe("plugin helpers", () => {
     test("unknown tool: returns null", () => {
       const frame = mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();
+    });
+  });
+
+  describe("detectChannelCapability (FR2)", () => {
+    test("true when experimental.claude/channel is an object", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": {} } }),
+      ).toBe(true);
+    });
+
+    test("true when experimental.claude/channel is a truthy boolean", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": true } }),
+      ).toBe(true);
+    });
+
+    test("false when experimental.claude/channel is missing", () => {
+      expect(detectChannelCapability({ experimental: {} })).toBe(false);
+    });
+
+    test("false when experimental is missing", () => {
+      expect(detectChannelCapability({})).toBe(false);
+    });
+
+    test("false when capabilities object is null/undefined", () => {
+      expect(detectChannelCapability(null)).toBe(false);
+      expect(detectChannelCapability(undefined)).toBe(false);
+    });
+
+    test("false when value is falsy (null / false / 0)", () => {
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": null } }),
+      ).toBe(false);
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": false } }),
+      ).toBe(false);
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": 0 } }),
+      ).toBe(false);
+    });
+  });
+
+  describe("drainNudges (nudge queue)", () => {
+    afterEach(() => {
+      pendingNudges.length = 0;
+    });
+
+    test("returns unchanged result when queue is empty", () => {
+      const result = {
+        content: [{ type: "text" as const, text: "original" }],
+      };
+      const out = drainNudges(result);
+      expect(out.content).toHaveLength(1);
+      expect(out.content[0]?.text).toBe("original");
+    });
+
+    test("appends all queued nudges to result.content", () => {
+      pendingNudges.push({ text: "nudge A" }, { text: "nudge B" });
+      const result = {
+        content: [{ type: "text" as const, text: "tool output" }],
+      };
+      drainNudges(result);
+      expect(result.content).toHaveLength(3);
+      expect(result.content[1]?.text).toBe("nudge A");
+      expect(result.content[2]?.text).toBe("nudge B");
+    });
+
+    test("removes consumed nudges — fires exactly once", () => {
+      pendingNudges.push({ text: "one-shot" });
+      const first = { content: [{ type: "text" as const, text: "r1" }] };
+      drainNudges(first);
+      expect(pendingNudges).toHaveLength(0);
+
+      const second = { content: [{ type: "text" as const, text: "r2" }] };
+      drainNudges(second);
+      expect(second.content).toHaveLength(1);
+    });
+
+    test("skips nudges whose guard returns false", () => {
+      let ready = false;
+      pendingNudges.push({ text: "guarded", guard: () => ready });
+      pendingNudges.push({ text: "unguarded" });
+
+      const first = { content: [{ type: "text" as const, text: "r1" }] };
+      drainNudges(first);
+      expect(first.content).toHaveLength(2);
+      expect(first.content[1]?.text).toBe("unguarded");
+      expect(pendingNudges).toHaveLength(1);
+
+      ready = true;
+      const second = { content: [{ type: "text" as const, text: "r2" }] };
+      drainNudges(second);
+      expect(second.content).toHaveLength(2);
+      expect(second.content[1]?.text).toBe("guarded");
+      expect(pendingNudges).toHaveLength(0);
+    });
+  });
+
+  describe("buildChannelsOffNudge (FR2)", () => {
+    test("mentions install-channels and that inbound is broken", () => {
+      const nudge = buildChannelsOffNudge();
+      expect(nudge).toContain("install-channels");
+      expect(nudge.toLowerCase()).toContain("inbound");
+      // One-shot: the text itself should say it only fires once so the
+      // LLM doesn't repeat it.
+      expect(nudge.toLowerCase()).toContain("once");
     });
   });
 

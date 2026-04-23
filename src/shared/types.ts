@@ -16,6 +16,13 @@ export type MessageType = "message" | "reply";
 export interface RegisterFrame {
   action: "register";
   name: string;
+  /**
+   * Whether the plugin's Claude Code binary advertises the experimental
+   * `claude/channel` capability. Set from `Server.getClientCapabilities()`
+   * after the MCP `initialize` handshake completes. Hub refuses to
+   * promise direct delivery to recipients with `channel_capable: false`
+   * and silently skips them on broadcast/team sends.   */
+  channel_capable: boolean;
   requestId?: string;
 }
 
@@ -155,6 +162,43 @@ export interface ResponseFrame {
   error?: string;
 }
 
+// ── Send-outcome response shapes (informational) ──────────────────────────
+//
+// These document the `data` payloads returned on send/broadcast/send_team
+// responses. The ResponseFrame wire format is unchanged; these aliases
+// exist so call sites that need to interpret `data` can do so with a
+// typed view.
+
+export type SendNakReason =
+  | "offline"
+  | "no-channel"
+  | "transport-error"
+  | "no-dashboard";
+
+export type SendDirectResponseData =
+  | {
+      outcome: "delivered";
+      message_id: string;
+      /** Kept for backwards compatibility with existing dashboard parsers. */
+      delivered: true;
+      to_dashboard?: boolean;
+    }
+  | { outcome: "nak"; reason: SendNakReason };
+
+export interface SendBroadcastResponseData {
+  message_id: string;
+  delivered_to: number;
+  /** Count of online agents skipped because their `channel_capable` is false. */
+  skipped_no_channel: number;
+}
+
+export interface SendTeamResponseData {
+  message_id: string;
+  delivered_to: number;
+  /** Count of online team members skipped because `channel_capable` is false. */
+  skipped_no_channel: number;
+}
+
 export interface InboundMessageFrame {
   event: "message";
   message_id: string;
@@ -244,6 +288,11 @@ export interface AgentConnectedEvent {
   event: "agent:connected";
   name: string;
   full_name: string;
+  /**
+   * Mirrors the `channel_capable` reported by the plugin on register.
+   * Dashboards use this to render a distinct indicator for agents that
+   * cannot receive inbound messages.   */
+  channel_capable: boolean;
 }
 
 export interface AgentDisconnectedEvent {

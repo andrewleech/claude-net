@@ -111,7 +111,12 @@ describe("REST API endpoints", () => {
   async function registerAgent(ws: WebSocket, name: string): Promise<Msg[]> {
     const msgs = collectMessages(ws, 2);
     ws.send(
-      JSON.stringify({ action: "register", name, requestId: `reg-${name}` }),
+      JSON.stringify({
+        action: "register",
+        name,
+        channel_capable: true,
+        requestId: `reg-${name}`,
+      }),
     );
     return msgs;
   }

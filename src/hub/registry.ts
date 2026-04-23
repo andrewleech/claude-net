@@ -13,6 +13,7 @@ export interface AgentEntry {
   teams: Set<string>;
   connectedAt: Date;
   lastPongAt: number;
+  channelCapable: boolean;
 }
 
 export interface DisconnectedEntry {
@@ -59,6 +60,7 @@ export class Registry {
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
+    options: { channelCapable?: boolean } = {},
   ):
     | {
         ok: true;
@@ -68,6 +70,7 @@ export class Registry {
       }
     | { ok: false; error: string } {
     const identity = wsIdentity ?? ws;
+    const channelCapable = options.channelCapable ?? false;
 
     // Detect rename: same wsIdentity, different name. At most one match
     // is possible because register() maintains the invariant.
@@ -91,8 +94,14 @@ export class Registry {
     }
 
     if (existing && existing.wsIdentity === identity) {
-      // Update ws reference (Elysia wrapper may change)
+      // Update ws reference (Elysia wrapper may change). Keep
+      // channelCapable coherent — in practice it won't change across a
+      // single plugin process, but a silent plugin restart sharing the
+      // same WS identity (test fixture edge case) should reflect the
+      // newest value. lastPongAt is deliberately NOT reset here —
+      // liveness is a property of the transport, not of a re-register.
       existing.ws = ws;
+      existing.channelCapable = channelCapable;
       return { ok: true, entry: existing, restored: false };
     }
 
@@ -122,6 +131,7 @@ export class Registry {
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
       lastPongAt: Date.now(),
+      channelCapable,
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };

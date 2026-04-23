@@ -64,6 +64,14 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+// Single source of truth for the plugin version. Consumed by both the
+// MCP `Server({ version })` declaration below AND the register frame
+// that reports `plugin_version` to the hub. Must stay in lockstep
+// with the hub's `PLUGIN_VERSION_CURRENT` — which is sourced from
+// package.json — since the /plugin.ts bundle is served by the hub.
+// When bumping the version: change package.json AND this constant.
+const PLUGIN_VERSION = "0.1.0";
+
 const INSTRUCTIONS = `claude-net agent messaging plugin.
 
 Inbound messages from other agents arrive as <channel> tags:
@@ -120,6 +128,11 @@ with content starting with "claude-net channel active", channels are
 working end-to-end. If you never see this tag, channels may not be
 loaded — the MCP tools still work but inbound messages won't appear.
 
+If channels aren't enabled on your Claude Code binary, you will receive
+a one-time notice on your first tool call and will not be able to
+receive messages from other agents. You can still send. Ask the user to
+run \`install-channels\` on this host to enable inbound delivery.
+
 MESSAGES ARE EPHEMERAL — NO QUEUE:
 claude-net is strictly live delivery. There is NO message queue, NO
 store-and-forward, NO retry, and NO offline delivery of any kind.
@@ -138,6 +151,31 @@ Always include reply_to when responding to a specific message.
 The from field on all messages is your full session:user@host identity, set by the hub.`;
 
 // ── Exported helpers (testable) ───────────────────────────────────────────
+
+/**
+ * Inspect an MCP client's advertised capabilities and decide whether the
+ * experimental `claude/channel` hook is supported. Accepts any truthy
+ * value for `experimental["claude/channel"]` — Claude Code currently
+ * sends `{}`, but a boolean `true` or any other truthy shape would
+ * also count as "supported". Exported for unit testability; the
+ * plugin's `oninitialized` callback calls this internally.
+ */
+export function detectChannelCapability(
+  capabilities: { experimental?: Record<string, unknown> } | undefined | null,
+): boolean {
+  return !!capabilities?.experimental?.["claude/channel"];
+}
+
+/**
+ * Build the one-shot LLM nudge shown when the plugin detects that
+ * Claude Code does not advertise channel support. The text rides on
+ * the next tool result's content — it must NOT use
+ * `emitSystemNotification` because MCP notifications are the exact
+ * channel that's broken on a channels-off client.
+ */
+export function buildChannelsOffNudge(): string {
+  return "claude-net: this Claude Code binary does not advertise experimental channels. Inbound messages from other agents will not be delivered to this session (outbound tools still work). Ask the user to run `install-channels` on this host, then restart Claude Code. This notice only fires once.";
+}
 
 export function buildDefaultName(): string {
   const session = path.basename(process.cwd());
@@ -183,7 +221,12 @@ export function mapToolToFrame(
 ): Record<string, unknown> | null {
   switch (toolName) {
     case "register":
-      return { action: "register", name: args.name };
+      return {
+        action: "register",
+        name: args.name,
+        channel_capable: channelCapable,
+        plugin_version: PLUGIN_VERSION,
+      };
     case "send_message":
       return {
         action: "send",
@@ -266,11 +309,36 @@ let registeredName = "";
 // (pre-suffix) name here so the first claude-net tool call can nudge the
 // LLM to ask the user for a nicer name. Cleared after one nudge or after
 // a manual register() call.
-let pendingRenameNudgeBase: string | null = null;
 let hubWsUrl = "";
 let reconnectDelay = RECONNECT_INITIAL_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let mcpServer: Server | null = null;
+
+// ── MCP channel capability detection ─────────────────────────────────────
+//
+// `channelCapable` reflects whether Claude Code advertises the
+// `experimental.claude/channel` capability. Populated once after the MCP
+// `initialize` handshake (via `oninitialized`) and never re-evaluated.
+// `mcpInitialized` flips true when that callback fires; `maybeSendRegister`
+// gates the register frame on BOTH `mcpInitialized` AND an open WS so we
+// never report a stale `channel_capable: false` due to a race.
+let channelCapable = false;
+let mcpInitialized = false;
+
+// ── One-shot nudge queue ─────────────────────────────────────────────────
+//
+// Various subsystems queue text nudges (rename suggestion, channels-off
+// warning, upgrade hint) to be surfaced on the NEXT tool result. Each
+// entry fires exactly once and is removed after emission. An optional
+// `guard` defers emission until a condition is met (e.g., rename nudge
+// waits for registeredName to be set).
+
+interface PendingNudge {
+  text: string;
+  guard?: () => boolean;
+}
+
+export const pendingNudges: PendingNudge[] = [];
 
 const pendingRequests = new Map<
   string,
@@ -369,11 +437,26 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
     const candidate =
       attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
     try {
-      await request({ action: "register", name: candidate });
+      const data = (await request({
+        action: "register",
+        name: candidate,
+        channel_capable: channelCapable,
+        plugin_version: PLUGIN_VERSION,
+      })) as { upgrade_hint?: string } | undefined;
+      // The hub returns `upgrade_hint` in the register response
+      // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
+      // Store it for one-shot surfacing on the next tool result.
+      if (data && typeof data.upgrade_hint === "string") {
+        pendingNudges.push({ text: data.upgrade_hint });
+      }
       storedName = candidate;
       registeredName = candidate;
-      // Arm a rename nudge if we had to fall back to a suffix.
-      pendingRenameNudgeBase = attempt === 0 ? null : baseName;
+      if (attempt > 0) {
+        pendingNudges.push({
+          text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
+          guard: () => !!registeredName,
+        });
+      }
       log(
         attempt === 0
           ? `Auto-registered as ${candidate}`
@@ -412,6 +495,26 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
   }
 }
 
+/**
+ * Send the initial auto-register frame iff BOTH preconditions hold:
+ *   (a) MCP `initialize` has completed, so `channelCapable` is the real
+ *       value rather than the `false` default.
+ *   (b) The hub WebSocket is open, so the frame can actually be sent.
+ *
+ * Called by both the WS `open` handler and the MCP `oninitialized`
+ * callback. Whichever fires second triggers the register. If the WS
+ * drops between the two events we just wait for the reconnect `open`
+ * to call us again — `mcpInitialized` stays true across reconnects.
+ */
+function maybeSendRegister(): void {
+  if (!mcpInitialized) return;
+  if (!isConnected()) return;
+  if (!storedName) return;
+  autoRegisterWithRetry(storedName).catch(() => {
+    // Already handled (notification + state write) inside the helper.
+  });
+}
+
 function connectWebSocket(): void {
   if (!hubWsUrl) return;
 
@@ -422,15 +525,10 @@ function connectWebSocket(): void {
     log("Connected to hub");
     reconnectDelay = RECONNECT_INITIAL_MS;
 
-    // Auto-register with stored name. If the default name is taken — a
-    // common case when the user opens a second Claude Code session in the
-    // same folder (fork-session) — we retry with `-2`, `-3`, … suffixes so
-    // each session picks a distinct, visible identity without user input.
-    if (storedName) {
-      autoRegisterWithRetry(storedName).catch(() => {
-        // Already handled (notification + state write) inside the helper.
-      });
-    }
+    // Defer register until MCP `initialize` has completed — otherwise
+    // `channel_capable` on the wire would be the `false` default and
+    // the hub would store a permanently-stale value for this agent.
+    maybeSendRegister();
   });
 
   ws.on("message", (data: WebSocket.Data) => {
@@ -499,7 +597,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "send_message",
     description:
-      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name. Live delivery only — fails if the recipient is offline, no queuing.',
+      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name. Live delivery only — fails if the recipient is offline, no queuing. Returns an error with a `reason` field (`offline` / `no-channel` / `unknown` / `no-dashboard`) if delivery cannot be confirmed.',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -614,18 +712,23 @@ function toolResult(data: unknown) {
 }
 
 /**
- * If auto-register had to use a `-N` suffix, attach a one-shot nudge to the
- * next tool result so the LLM asks the user whether they'd like a custom
- * name. The nudge fires once per startup; after that `pendingRenameNudgeBase`
- * is cleared and subsequent calls are untouched.
+ * Drain all ready nudges into a tool result's content array. Entries
+ * whose `guard` returns false are left in the queue; entries with no
+ * guard or a truthy guard are appended and removed.
  */
-function attachRenameNudgeIfPending<
+export function drainNudges<
   T extends { content: { type: "text"; text: string }[] },
 >(result: T): T {
-  if (!pendingRenameNudgeBase || !registeredName) return result;
-  const note = `Rename suggestion: the default claude-net name "${pendingRenameNudgeBase}" was already taken, so this session was auto-registered as "${registeredName}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`;
-  result.content.push({ type: "text", text: note });
-  pendingRenameNudgeBase = null;
+  const kept: PendingNudge[] = [];
+  for (const nudge of pendingNudges) {
+    if (nudge.guard && !nudge.guard()) {
+      kept.push(nudge);
+    } else {
+      result.content.push({ type: "text", text: nudge.text });
+    }
+  }
+  pendingNudges.length = 0;
+  pendingNudges.push(...kept);
   return result;
 }
 
@@ -643,7 +746,9 @@ async function handleToolCall(
         `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
       );
     }
-    return attachRenameNudgeIfPending(toolResult({ name: registeredName }));
+    return drainNudges(
+      toolResult({ name: registeredName, channel_capable: channelCapable }),
+    );
   }
 
   if (!hubWsUrl) {
@@ -690,7 +795,11 @@ async function handleToolCall(
     if (name === "register" && effectiveArgs.name) {
       storedName = effectiveArgs.name;
       registeredName = effectiveArgs.name;
-      pendingRenameNudgeBase = null;
+      // Clear any pending rename nudge — user explicitly chose a name.
+      const renameIdx = pendingNudges.findIndex(
+        (n) => n.guard && n.text.startsWith("Rename suggestion:"),
+      );
+      if (renameIdx !== -1) pendingNudges.splice(renameIdx, 1);
       writeSessionState({
         name: effectiveArgs.name,
         status: "online",
@@ -699,7 +808,7 @@ async function handleToolCall(
       });
     }
 
-    return attachRenameNudgeIfPending(toolResult(data));
+    return drainNudges(toolResult(data));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return notConnectedError(message);
@@ -713,7 +822,7 @@ async function main(): Promise<void> {
 
   // Create MCP server
   mcpServer = new Server(
-    { name: "claude-net", version: "0.1.0" },
+    { name: "claude-net", version: PLUGIN_VERSION },
     {
       capabilities: {
         experimental: { "claude/channel": {} },
@@ -733,6 +842,26 @@ async function main(): Promise<void> {
     const { name, arguments: args } = req.params;
     return handleToolCall(name, (args ?? {}) as Record<string, string>);
   });
+
+  // Wire the initialize-complete hook BEFORE connecting the
+  // transport. Once `initialize` is exchanged the MCP SDK invokes
+  // `oninitialized` synchronously; attaching after `connect` would
+  // race the handshake and `getClientCapabilities()` could return
+  // undefined on a fast client.
+  mcpServer.oninitialized = () => {
+    const caps = mcpServer?.getClientCapabilities() as
+      | { experimental?: Record<string, unknown> }
+      | undefined;
+    channelCapable = detectChannelCapability(caps);
+    mcpInitialized = true;
+
+    if (!channelCapable) {
+      pendingNudges.push({ text: buildChannelsOffNudge() });
+    }
+
+    // Flush any register that was waiting on this callback.
+    maybeSendRegister();
+  };
 
   // Connect stdio transport
   const transport = new StdioServerTransport();

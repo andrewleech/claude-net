@@ -53,9 +53,18 @@ export function apiPlugin(deps: ApiDeps): Elysia {
       );
       if (!result.ok) {
         set.status = 400;
-        return { error: result.error };
+        return {
+          error: result.error,
+          outcome: result.outcome,
+          reason: result.reason,
+        };
       }
-      return { message_id: result.message_id, delivered: result.delivered };
+      return {
+        message_id: result.message_id,
+        delivered: true,
+        outcome: result.outcome,
+        ...(result.to_dashboard ? { to_dashboard: true } : {}),
+      };
     })
 
     .post("/broadcast", ({ body, set }) => {
@@ -69,6 +78,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
       return {
         message_id: result.message_id,
         delivered_to: result.delivered_to,
+        skipped_no_channel: result.skipped_no_channel,
       };
     })
 
@@ -97,6 +107,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
       return {
         message_id: result.message_id,
         delivered_to: result.delivered_to,
+        skipped_no_channel: result.skipped_no_channel,
       };
     });
 }

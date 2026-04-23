@@ -34,10 +34,15 @@ describe("shared types", () => {
 
   describe("Plugin → Hub frames (discriminated on action)", () => {
     test("RegisterFrame", () => {
-      const frame: PluginFrame = { action: "register", name: "test@host" };
+      const frame: PluginFrame = {
+        action: "register",
+        name: "test@host",
+        channel_capable: true,
+      };
       expect(frame.action).toBe("register");
       if (frame.action === "register") {
         expect(frame.name).toBe("test@host");
+        expect(frame.channel_capable).toBe(true);
       }
     });
 
@@ -184,6 +189,7 @@ describe("shared types", () => {
         event: "agent:connected",
         name: "test",
         full_name: "test@host",
+        channel_capable: true,
       };
       expect(event.event).toBe("agent:connected");
     });

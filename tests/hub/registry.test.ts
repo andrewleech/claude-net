@@ -381,6 +381,46 @@ describe("Registry", () => {
     expect(result.entry.lastPongAt).toBeLessThanOrEqual(after);
   });
 
+  // ── channelCapable (FR3) ──────────────────────────────────────────────
+
+  test("register defaults channelCapable to false when option omitted", () => {
+    const ws = mockWs();
+    const result = registry.register("cap:alice@host", ws);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.entry.channelCapable).toBe(false);
+  });
+
+  test("register stores channelCapable=true when passed in options", () => {
+    const ws = mockWs();
+    const result = registry.register("cap:alice@host", ws, undefined, {
+      channelCapable: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.entry.channelCapable).toBe(true);
+  });
+
+  test("same-identity re-register updates channelCapable", () => {
+    const ws = mockWs();
+    const identity = {};
+    const first = registry.register("cap:alice@host", ws, identity, {
+      channelCapable: false,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.entry.channelCapable).toBe(false);
+
+    const second = registry.register("cap:alice@host", ws, identity, {
+      channelCapable: true,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.entry.channelCapable).toBe(true);
+    // Same entry object — update in place.
+    expect(second.entry).toBe(first.entry);
+  });
+
   test("same-identity re-register preserves lastPongAt", async () => {
     const ws = mockWs();
     const identity = {};

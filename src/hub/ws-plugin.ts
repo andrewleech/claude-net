@@ -8,7 +8,7 @@ import type {
 } from "@/shared/types";
 import type { Elysia } from "elysia";
 import type { MirrorRegistry } from "./mirror";
-import type { Registry } from "./registry";
+import { type Registry, parseName } from "./registry";
 import type { Router } from "./router";
 import type { Teams } from "./teams";
 
@@ -115,9 +115,18 @@ export function wsPlugin(
 
       switch (data.action) {
         case "register": {
+          // Missing channel_capable field is treated as `false` — old plugins
+          // are visibly broken at send time rather than silently half-broken.
+          const channelCapable =
+            typeof data.channel_capable === "boolean"
+              ? data.channel_capable
+              : false;
+
           // Use ws itself as the sendable reference — it persists and can send.
           // Use ws.raw for identity comparison in registry.
-          const result = registry.register(data.name, ws, ws.raw);
+          const result = registry.register(data.name, ws, ws.raw, {
+            channelCapable,
+          });
           if (!result.ok) {
             sendResponse(ws, requestId, false, undefined, result.error);
             return;
@@ -141,6 +150,7 @@ export function wsPlugin(
           if (result.renamedFrom) {
             dashboardBroadcastFn({
               event: "agent:disconnected",
+              name: parseName(result.renamedFrom).session,
               full_name: result.renamedFrom,
             });
             mirrorRegistry?.renameOwner(
@@ -153,6 +163,7 @@ export function wsPlugin(
             event: "agent:connected",
             name: result.entry.shortName,
             full_name: result.entry.fullName,
+            channel_capable: result.entry.channelCapable,
           });
           break;
         }
@@ -169,11 +180,25 @@ export function wsPlugin(
             data.reply_to,
           );
           if (!result.ok) {
-            sendResponse(ws, requestId, false, undefined, result.error);
+            // Structured NAK carries `outcome` + `reason` so
+            // tools processing the response programmatically can
+            // distinguish offline / no-channel / unknown / no-dashboard.
+            sendResponse(
+              ws,
+              requestId,
+              false,
+              { outcome: "nak", reason: result.reason },
+              result.error,
+            );
           } else {
+            // Keep `delivered: true` alongside the new `outcome` field
+            // so existing dashboard parsers that only inspect `delivered`
+            // continue to work.
             sendResponse(ws, requestId, true, {
               message_id: result.message_id,
               delivered: true,
+              outcome: "delivered",
+              ...(result.to_dashboard ? { to_dashboard: true } : {}),
             });
             dashboardBroadcastFn({
               event: "message:routed",
@@ -197,6 +222,7 @@ export function wsPlugin(
           sendResponse(ws, requestId, true, {
             message_id: result.message_id,
             delivered_to: result.delivered_to,
+            skipped_no_channel: result.skipped_no_channel,
           });
           dashboardBroadcastFn({
             event: "message:routed",
@@ -227,6 +253,7 @@ export function wsPlugin(
             sendResponse(ws, requestId, true, {
               message_id: result.message_id,
               delivered_to: result.delivered_to,
+              skipped_no_channel: result.skipped_no_channel,
             });
             dashboardBroadcastFn({
               event: "message:routed",

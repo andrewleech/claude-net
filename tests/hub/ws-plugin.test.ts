@@ -107,10 +107,19 @@ describe("WebSocket Plugin (integration)", () => {
     return ws;
   }
 
-  async function registerAgent(ws: WebSocket, name: string): Promise<Msg[]> {
+  async function registerAgent(
+    ws: WebSocket,
+    name: string,
+    channel_capable = true,
+  ): Promise<Msg[]> {
     const msgs = collectMessages(ws, 2); // registered + response
     ws.send(
-      JSON.stringify({ action: "register", name, requestId: `reg-${name}` }),
+      JSON.stringify({
+        action: "register",
+        name,
+        channel_capable,
+        requestId: `reg-${name}`,
+      }),
     );
     return msgs;
   }
@@ -343,6 +352,7 @@ describe("WebSocket Plugin (integration)", () => {
       JSON.stringify({
         action: "register",
         name: "skydeck:alice@host",
+        channel_capable: true,
         requestId: "r1",
       }),
     );
@@ -360,6 +370,7 @@ describe("WebSocket Plugin (integration)", () => {
       JSON.stringify({
         action: "register",
         name: "thisisnew:alice@host",
+        channel_capable: true,
         requestId: "r2",
       }),
     );

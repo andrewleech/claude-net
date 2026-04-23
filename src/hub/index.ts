@@ -97,6 +97,11 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
   const dashboardPath = `${import.meta.dir}/dashboard.html`;
   const dashboardParsersPath = `${import.meta.dir}/dashboard/parsers.js`;
+  const pwaManifestPath = `${import.meta.dir}/pwa/manifest.webmanifest`;
+  const pwaSwPath = `${import.meta.dir}/pwa/sw.js`;
+  const pwaIconSvgPath = `${import.meta.dir}/pwa/icon.svg`;
+  const pwaIcon192Path = `${import.meta.dir}/pwa/icon-192.png`;
+  const pwaIcon512Path = `${import.meta.dir}/pwa/icon-512.png`;
   let pluginCache: string | null = null;
   let dashboardCache: string | null = null;
   let dashboardParsersCache: string | null = null;
@@ -141,6 +146,41 @@ export function createHub(options: CreateHubOptions = {}): Hub {
       set.headers["content-type"] = "application/javascript";
       return await getDashboardParsersJs();
     })
+    // PWA assets. These are tiny (manifest/SW/icon total <30 KB) so
+    // they're re-read on every request rather than cached in module
+    // memory — that keeps `bun run dev --watch` honest: edits to the
+    // PWA files take effect immediately on the next request instead of
+    // silently no-opping until the hub restarts.
+    .get("/manifest.webmanifest", async ({ set }) => {
+      set.headers["content-type"] = "application/manifest+json";
+      return await Bun.file(pwaManifestPath).text();
+    })
+    .get("/sw.js", async ({ set }) => {
+      // `Cache-Control: no-cache` forces the browser to revalidate the
+      // worker on every navigation so a bumped SHELL-version string
+      // propagates to all clients within one page load.
+      set.headers["content-type"] = "application/javascript";
+      set.headers["cache-control"] = "no-cache";
+      return await Bun.file(pwaSwPath).text();
+    })
+    .get("/icon.svg", async ({ set }) => {
+      set.headers["content-type"] = "image/svg+xml";
+      return await Bun.file(pwaIconSvgPath).text();
+    })
+    .get(
+      "/icon-192.png",
+      () =>
+        new Response(Bun.file(pwaIcon192Path), {
+          headers: { "content-type": "image/png" },
+        }),
+    )
+    .get(
+      "/icon-512.png",
+      () =>
+        new Response(Bun.file(pwaIcon512Path), {
+          headers: { "content-type": "image/png" },
+        }),
+    )
     .use(
       apiPlugin({ registry, teams, router, startedAt, hostRegistry, eventLog }),
     )

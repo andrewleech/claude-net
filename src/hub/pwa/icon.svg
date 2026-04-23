@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="claude-net">
+  <rect width="512" height="512" rx="96" ry="96" fill="#0b0c10"/>
+  <g fill="none" stroke="#ff4d2e" stroke-width="24" stroke-linecap="round">
+    <circle cx="256" cy="256" r="28" fill="#ff4d2e" stroke="none"/>
+    <path d="M 186 326 A 100 100 0 0 1 186 186"/>
+    <path d="M 326 186 A 100 100 0 0 1 326 326"/>
+    <path d="M 136 376 A 170 170 0 0 1 136 136"/>
+    <path d="M 376 136 A 170 170 0 0 1 376 376"/>
+  </g>
+</svg>

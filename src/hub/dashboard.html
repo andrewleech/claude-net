@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>claude-net</title>
+<meta name="theme-color" content="#0b0c10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="claude-net">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -761,8 +770,9 @@
   .mirror-compose textarea {
     flex: 1;
     min-height: 46px;
-    max-height: 180px;
-    resize: vertical;
+    max-height: 50vh;
+    resize: none;
+    overflow-y: auto;
     background: transparent;
     border: none;
     color: var(--text);
@@ -4934,6 +4944,7 @@
             composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
           } else {
             composeText.value = '';
+            autosizeCompose();
             composeErr.className = 'mirror-compose-err is-notice';
             if (useLargeBlobPath && r.body && r.body.path) {
               composeErr.textContent =
@@ -5228,6 +5239,31 @@
       }, { signal: attachSig });
     }
 
+    // Auto-grow the textarea to fit its content, up to the CSS max-height
+    // cap (which then lets overflow-y scroll take over). Runs on every
+    // input event plus once immediately in case stashed draft text is
+    // restored. We also fire it after send so the box snaps back to its
+    // one-line baseline.
+    //
+    // Two guards matter: (a) if the compose panel is display:none at
+    // measurement time, scrollHeight is 0 and would pin the textarea
+    // to 0px via inline style, overriding the CSS min-height. (b) Even
+    // when visible, scrollHeight can be < the CSS min-height for
+    // empty/one-line content, so we floor to 46 px to match the CSS
+    // baseline rather than letting the inline style shrink below it.
+    var AUTOSIZE_MIN = 46;
+    function autosizeCompose() {
+      if (!composeText) return;
+      if (composeText.offsetParent === null) return; // not rendered
+      composeText.style.height = 'auto';
+      var target = Math.max(AUTOSIZE_MIN, composeText.scrollHeight);
+      composeText.style.height = target + 'px';
+    }
+    if (composeText) {
+      composeText.addEventListener('input', autosizeCompose, { signal: attachSig });
+      autosizeCompose();
+    }
+
     if (composeText) {
       composeText.addEventListener('keydown', function(e) {
         // Intercept popover navigation first — only when the popover is open.
@@ -5309,6 +5345,22 @@
     });
   }
 })();
+</script>
+<script>
+// PWA: register the hub's service worker so the dashboard is installable
+// (Chrome/Android homescreen, desktop Apps list, iOS add-to-homescreen).
+// The worker itself is network-first — live data always hits the hub —
+// so registration failure is non-fatal for normal browsing.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    // Default scope for a worker served from /sw.js is the origin
+    // root, so no explicit scope arg is needed.
+    navigator.serviceWorker.register('/sw.js')
+      .catch(function(err) {
+        if (window.console) console.warn('[claude-net] SW registration failed', err);
+      });
+  });
+}
 </script>
 </body>
 </html>

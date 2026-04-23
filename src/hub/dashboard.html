@@ -3653,7 +3653,12 @@
     function parseCreatedTaskId(resp) {
       if (!resp) return null;
       if (typeof resp === 'object' && resp !== null) {
-        return resp.taskId || resp.id || null;
+        // TaskCreate's actual response shape is { task: { id, subject } };
+        // older code paths may use `taskId` or `id` at the top level.
+        if (resp.task && (resp.task.id != null)) return String(resp.task.id);
+        if (resp.taskId != null) return String(resp.taskId);
+        if (resp.id != null) return String(resp.id);
+        return null;
       }
       var s = String(resp);
       var m = s.match(/[Tt]ask\s*#?(\d+)/);

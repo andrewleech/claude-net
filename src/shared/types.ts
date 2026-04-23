@@ -21,16 +21,14 @@ export interface RegisterFrame {
    * `claude/channel` capability. Set from `Server.getClientCapabilities()`
    * after the MCP `initialize` handshake completes. Hub refuses to
    * promise direct delivery to recipients with `channel_capable: false`
-   * and silently skips them on broadcast/team sends. See FR2/FR3/FR4.
-   */
+   * and silently skips them on broadcast/team sends.   */
   channel_capable: boolean;
   /**
    * Plugin's self-reported version — sourced from the same value declared
    * on the MCP `Server({ version })` constructor. The hub compares this
    * against its own `PLUGIN_VERSION_CURRENT` (from package.json) on
    * register; on mismatch or missing it returns an `upgrade_hint` in the
-   * register response data. See FR8.
-   */
+   * register response data.   */
   plugin_version: string;
   requestId?: string;
 }
@@ -41,8 +39,7 @@ export interface RegisterFrame {
  *   - `name` / `full_name` mirror the plugin's identity as the hub sees it.
  *   - `upgrade_hint` (optional) is present iff `plugin_version` did not
  *     exactly match `PLUGIN_VERSION_CURRENT`; the plugin stores the
- *     string and surfaces it on the next tool result. See FR8.
- */
+ *     string and surfaces it on the next tool result. */
 export interface RegisterResponseData {
   name: string;
   full_name: string;
@@ -192,11 +189,10 @@ export interface ResponseFrame {
 // exist so call sites that need to interpret `data` can do so with a
 // typed view.
 
-/** NAK reason codes returned to direct-send callers. See FR4. */
 export type SendNakReason =
   | "offline"
   | "no-channel"
-  | "unknown"
+  | "transport-error"
   | "no-dashboard";
 
 export type SendDirectResponseData =
@@ -315,8 +311,7 @@ export interface AgentConnectedEvent {
   /**
    * Mirrors the `channel_capable` reported by the plugin on register.
    * Dashboards use this to render a distinct indicator for agents that
-   * cannot receive inbound messages. See FR6.
-   */
+   * cannot receive inbound messages.   */
   channel_capable: boolean;
 }
 

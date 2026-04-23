@@ -377,9 +377,8 @@ describe("Registry", () => {
     const after = Date.now();
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const t = result.entry.lastPongAt.getTime();
-    expect(t).toBeGreaterThanOrEqual(before);
-    expect(t).toBeLessThanOrEqual(after);
+    expect(result.entry.lastPongAt).toBeGreaterThanOrEqual(before);
+    expect(result.entry.lastPongAt).toBeLessThanOrEqual(after);
   });
 
   // ── channelCapable (FR3) ──────────────────────────────────────────────

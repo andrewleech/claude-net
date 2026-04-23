@@ -280,12 +280,11 @@ describe("channel liveness — hub WS ping/pong", () => {
     const entry = hub.registry.getByFullName("live1:alice@test");
     expect(entry).toBeDefined();
     if (!entry) return;
-    const initial = entry.lastPongAt.getTime();
+    const initial = entry.lastPongAt;
 
-    // Wait for multiple ping ticks to exchange a few pong frames.
     await waitMs(350);
 
-    const advanced = entry.lastPongAt.getTime();
+    const advanced = entry.lastPongAt;
     expect(advanced).toBeGreaterThan(initial);
   });
 

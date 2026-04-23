@@ -54,9 +54,6 @@ export class Router {
   /**
    * Direct send. Returns a structured outcome so ws-plugin can translate
    * NAK reasons into a specific error field for the sender's LLM.
-   *
-   * See FR4: the hub decides ACK/NAK synchronously based purely on
-   * registry state and transport writes — no agent cooperation.
    */
   routeDirect(
     from: string,
@@ -131,14 +128,11 @@ export class Router {
     try {
       resolved.entry.ws.send(JSON.stringify(frame));
     } catch (err) {
-      // Rare path — the WS write threw. The close handler will evict
-      // shortly. Report as "unknown" (not "offline"): the recipient was
-      // registered at send time; the transport failed mid-write.
       const message = err instanceof Error ? err.message : String(err);
       return {
         ok: false,
         outcome: "nak",
-        reason: "unknown",
+        reason: "transport-error",
         error: `Failed to deliver to '${resolved.entry.fullName}': ${message}`,
       };
     }
@@ -151,6 +145,17 @@ export class Router {
     let delivered_to = 0;
     let skipped_no_channel = 0;
 
+    const frame: InboundMessageFrame = {
+      event: "message",
+      message_id,
+      from,
+      to: "broadcast",
+      type: "message",
+      content,
+      timestamp,
+    };
+    const serialized = JSON.stringify(frame);
+
     for (const entry of this.registry.agents.values()) {
       if (entry.fullName === from) continue;
       if (!entry.channelCapable) {
@@ -158,21 +163,11 @@ export class Router {
         continue;
       }
 
-      const frame: InboundMessageFrame = {
-        event: "message",
-        message_id,
-        from,
-        to: "broadcast",
-        type: "message",
-        content,
-        timestamp,
-      };
       try {
-        entry.ws.send(JSON.stringify(frame));
+        entry.ws.send(serialized);
         delivered_to++;
       } catch {
-        // Half-open WS — don't crash the broadcast. The close handler
-        // will clean it up on the next tick.
+        // Half-open WS — the close handler will clean it up.
       }
     }
 
@@ -196,33 +191,32 @@ export class Router {
     let delivered_to = 0;
     let skipped_no_channel = 0;
 
+    const frame: InboundMessageFrame = {
+      event: "message",
+      message_id,
+      from,
+      to: `team:${team}`,
+      type,
+      content,
+      team,
+      timestamp,
+      ...(reply_to ? { reply_to } : {}),
+    };
+    const serialized = JSON.stringify(frame);
+
     for (const memberName of members) {
       if (memberName === from) continue;
       const entry = this.registry.getByFullName(memberName);
-      if (!entry) continue; // offline member
+      if (!entry) continue;
       if (!entry.channelCapable) {
         skipped_no_channel++;
         continue;
       }
 
-      const frame: InboundMessageFrame = {
-        event: "message",
-        message_id,
-        from,
-        to: `team:${team}`,
-        type,
-        content,
-        team,
-        timestamp,
-        ...(reply_to ? { reply_to } : {}),
-      };
       try {
-        entry.ws.send(JSON.stringify(frame));
+        entry.ws.send(serialized);
         delivered_to++;
-      } catch {
-        // Same rationale as broadcast — half-open WS doesn't abort
-        // the team send.
-      }
+      } catch {}
     }
 
     if (delivered_to === 0 && skipped_no_channel === 0) {

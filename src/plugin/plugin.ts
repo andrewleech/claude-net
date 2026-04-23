@@ -66,7 +66,7 @@ const RECONNECT_MAX_MS = 30_000;
 
 // Single source of truth for the plugin version. Consumed by both the
 // MCP `Server({ version })` declaration below AND the register frame
-// that reports `plugin_version` to the hub (FR8). Must stay in lockstep
+// that reports `plugin_version` to the hub. Must stay in lockstep
 // with the hub's `PLUGIN_VERSION_CURRENT` — which is sourced from
 // package.json — since the /plugin.ts bundle is served by the hub.
 // When bumping the version: change package.json AND this constant.
@@ -315,7 +315,7 @@ let reconnectDelay = RECONNECT_INITIAL_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let mcpServer: Server | null = null;
 
-// ── MCP channel capability (FR2) ────────────────────────────────────────
+// ── MCP channel capability detection ─────────────────────────────────────
 //
 // `channelCapable` reflects whether Claude Code advertises the
 // `experimental.claude/channel` capability. Populated once after the MCP
@@ -333,7 +333,7 @@ let mcpInitialized = false;
 // the nudge is warning about.
 let pendingChannelsOffNudge: string | null = null;
 
-// FR8: one-shot upgrade-version nudge. Populated when the hub's register
+// One-shot upgrade-version nudge. Populated when the hub's register
 // response carries `upgrade_hint` (plugin_version != PLUGIN_VERSION_CURRENT).
 // Consumed by `attachUpgradeNudgeIfPending` on the next tool result.
 // Never re-populated mid-lifetime — fires at most once per plugin startup.
@@ -442,7 +442,7 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
         channel_capable: channelCapable,
         plugin_version: PLUGIN_VERSION,
       })) as { upgrade_hint?: string } | undefined;
-      // FR8: the hub returns `upgrade_hint` in the register response
+      // The hub returns `upgrade_hint` in the register response
       // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
       // Store it for one-shot surfacing on the next tool result.
       if (data && typeof data.upgrade_hint === "string") {
@@ -523,7 +523,6 @@ function connectWebSocket(): void {
     // Defer register until MCP `initialize` has completed — otherwise
     // `channel_capable` on the wire would be the `false` default and
     // the hub would store a permanently-stale value for this agent.
-    // See FR2/FR3.
     maybeSendRegister();
   });
 
@@ -729,7 +728,7 @@ function attachRenameNudgeIfPending<
  * MUST ride on tool-result text (not `emitSystemNotification`) because
  * the MCP notifications channel is exactly what's broken on a
  * channels-off client — sending the notice through it would be a
- * silent no-op. See FR2.
+ * silent no-op.
  */
 function attachChannelsOffNudgeIfPending<
   T extends { content: { type: "text"; text: string }[] },
@@ -741,18 +740,8 @@ function attachChannelsOffNudgeIfPending<
 }
 
 /**
- * FR8: if the hub reported our plugin_version didn't match its
- * PLUGIN_VERSION_CURRENT (set in `autoRegisterWithRetry`), surface the
- * hub-supplied upgrade hint as additional text on the next tool result.
- * Rides tool-result text (not MCP notifications) so it reaches clients
- * whose Claude Code binary lacks channel support — a stale plugin is
- * often stale precisely because the host wasn't re-installed after
- * upstream changes landed. Clears after firing so it shows up exactly
- * once per plugin startup.
- *
- * Exported so tests can exercise the attach-once-then-clear contract
- * without spinning up a real hub + WS. Tests use `__setPendingUpgradeNudgeForTest`
- * below to seed the module state.
+ * One-shot upgrade nudge, surfaced via tool-result text (not MCP
+ * notifications) so it reaches even channel-incapable clients.
  */
 export function attachUpgradeNudgeIfPending<
   T extends { content: { type: "text"; text: string }[] },
@@ -796,10 +785,6 @@ async function handleToolCall(
         `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
       );
     }
-    // FR9: expose channel capability via whoami so the LLM can
-    // self-inspect without waiting for a tool-level failure.
-    // Nudge chain order is arbitrary (each clears its own slot) but
-    // kept consistent across whoami and the general-tool path below.
     return attachUpgradeNudgeIfPending(
       attachChannelsOffNudgeIfPending(
         attachRenameNudgeIfPending(
@@ -901,7 +886,7 @@ async function main(): Promise<void> {
     return handleToolCall(name, (args ?? {}) as Record<string, string>);
   });
 
-  // FR2: wire the initialize-complete hook BEFORE connecting the
+  // Wire the initialize-complete hook BEFORE connecting the
   // transport. Once `initialize` is exchanged the MCP SDK invokes
   // `oninitialized` synchronously; attaching after `connect` would
   // race the handshake and `getClientCapabilities()` could return

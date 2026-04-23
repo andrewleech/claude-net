@@ -12,18 +12,7 @@ export interface AgentEntry {
   wsIdentity: object;
   teams: Set<string>;
   connectedAt: Date;
-  /**
-   * Time of the last inbound WS-level pong (or register, treated as
-   * "alive now"). Advanced by the `pong` handler in ws-plugin; read
-   * by the hub's ping tick to evict stale half-open connections.
-   */
-  lastPongAt: Date;
-  /**
-   * Whether this agent's Claude Code binary advertises the experimental
-   * `claude/channel` capability (self-reported by the plugin on register).
-   * When false, the router NAKs direct sends with `reason: "no-channel"`
-   * and silently skips the agent on broadcast / team sends. See FR3/FR4.
-   */
+  lastPongAt: number;
   channelCapable: boolean;
 }
 
@@ -141,7 +130,7 @@ export class Registry {
       // Rename wins over disconnected-restore if both apply (unlikely).
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
-      lastPongAt: new Date(),
+      lastPongAt: Date.now(),
       channelCapable,
     };
     this.agents.set(fullName, entry);
@@ -298,7 +287,7 @@ export class Registry {
   }
 }
 
-function parseName(fullName: string): {
+export function parseName(fullName: string): {
   session: string;
   user: string;
   host: string;

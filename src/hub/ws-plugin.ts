@@ -9,7 +9,7 @@ import type {
 } from "@/shared/types";
 import type { Elysia } from "elysia";
 import type { MirrorRegistry } from "./mirror";
-import type { Registry } from "./registry";
+import { type Registry, parseName } from "./registry";
 import type { Router } from "./router";
 import type { Teams } from "./teams";
 import { PLUGIN_VERSION_CURRENT, buildUpgradeHint } from "./version";
@@ -74,7 +74,7 @@ function requireRegistered(
 }
 
 /**
- * Compute the informational hub URL embedded in the FR8 upgrade hint.
+ * Compute the informational hub URL embedded in the upgrade hint.
  * Prefers `CLAUDE_NET_HOST` (the same env var the setup route consults),
  * falling back to `http://localhost:<port>`. This is *not* authoritative —
  * a remote user reading the hint can correct the URL locally if needed.
@@ -99,7 +99,7 @@ export function wsPlugin(
   router: Router,
   mirrorRegistry?: MirrorRegistry,
   /**
-   * Listen port, used only to build the FR8 upgrade-hint URL fallback
+   * Listen port, used only to build the upgrade-hint URL fallback
    * when `CLAUDE_NET_HOST` is unset. Defaults to the same value the
    * setup plugin uses so behavior is consistent across routes.
    */
@@ -142,10 +142,8 @@ export function wsPlugin(
 
       switch (data.action) {
         case "register": {
-          // FR3: plugin reports its MCP channel capability on register.
-          // Missing field is treated as `false` (NG5) — old plugins that
-          // haven't been updated are visibly broken at send time rather
-          // than silently half-broken.
+          // Missing channel_capable field is treated as `false` — old plugins
+          // are visibly broken at send time rather than silently half-broken.
           const channelCapable =
             typeof data.channel_capable === "boolean"
               ? data.channel_capable
@@ -169,10 +167,9 @@ export function wsPlugin(
           };
           sendFrame(ws, registeredFrame);
 
-          // FR8: compare plugin's self-reported version against the hub's
-          // canonical version (from package.json). On mismatch OR missing
-          // field (old plugin pre-dating FR8), include an upgrade_hint
-          // the plugin will surface on the next tool result.
+          // Compare plugin's self-reported version against the hub's
+          // canonical version. On mismatch or missing field, include an
+          // upgrade_hint the plugin will surface on the next tool result.
           const reportedVersion =
             typeof data.plugin_version === "string"
               ? data.plugin_version
@@ -193,13 +190,9 @@ export function wsPlugin(
           // dashboard to drop the old name and propagate the rename
           // into mirror sessions so sidebar labels update in place.
           if (result.renamedFrom) {
-            // Parse the shortName out of the old full_name (session portion
-            // before `:`, falling back to the full string for legacy names).
-            const renamedFromShortName =
-              result.renamedFrom.split(":")[0] ?? result.renamedFrom;
             dashboardBroadcastFn({
               event: "agent:disconnected",
-              name: renamedFromShortName,
+              name: parseName(result.renamedFrom).session,
               full_name: result.renamedFrom,
             });
             mirrorRegistry?.renameOwner(
@@ -229,7 +222,7 @@ export function wsPlugin(
             data.reply_to,
           );
           if (!result.ok) {
-            // FR5: structured NAK carries `outcome` + `reason` so
+            // Structured NAK carries `outcome` + `reason` so
             // tools processing the response programmatically can
             // distinguish offline / no-channel / unknown / no-dashboard.
             sendResponse(
@@ -430,7 +423,7 @@ export function wsPlugin(
       const fullName = wsToAgent.get(ws);
       if (!fullName) return;
       const entry = registry.getByFullName(fullName);
-      if (entry) entry.lastPongAt = new Date();
+      if (entry) entry.lastPongAt = Date.now();
     },
     // biome-ignore lint/suspicious/noExplicitAny: Elysia WS handler typing requires flexible return
   }) as any;

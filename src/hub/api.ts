@@ -61,9 +61,6 @@ export function apiPlugin(deps: ApiDeps): Elysia {
       }
       return {
         message_id: result.message_id,
-        // `delivered: true` retained for backwards compatibility with
-        // older dashboard code; the structured `outcome` field is the
-        // canonical signal going forward. See FR4/FR5.
         delivered: true,
         outcome: result.outcome,
         ...(result.to_dashboard ? { to_dashboard: true } : {}),

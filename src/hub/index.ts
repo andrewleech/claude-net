@@ -25,7 +25,7 @@ export interface CreateHubOptions {
    */
   staleThresholdMs?: number;
   /**
-   * Listen port, threaded through to the WS plugin so FR8's upgrade-hint
+   * Listen port, threaded through to the WS plugin so the upgrade-hint
    * text can reference a local fallback URL when `CLAUDE_NET_HOST` is
    * unset. Informational only — does not affect what port `app.listen`
    * actually binds to.
@@ -148,9 +148,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     const cutoff = Date.now() - staleThresholdMs;
     for (const entry of registry.agents.values()) {
       const raw = entry.wsIdentity as ServerWebSocket<unknown>;
-      // "Greater than" — exact threshold is still alive (FR1: "15s of
-      // silence = stale").
-      if (entry.lastPongAt.getTime() < cutoff) {
+      if (entry.lastPongAt < cutoff) {
         try {
           raw.close();
         } catch {

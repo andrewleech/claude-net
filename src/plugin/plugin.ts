@@ -309,7 +309,6 @@ let registeredName = "";
 // (pre-suffix) name here so the first claude-net tool call can nudge the
 // LLM to ask the user for a nicer name. Cleared after one nudge or after
 // a manual register() call.
-let pendingRenameNudgeBase: string | null = null;
 let hubWsUrl = "";
 let reconnectDelay = RECONNECT_INITIAL_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -326,18 +325,20 @@ let mcpServer: Server | null = null;
 let channelCapable = false;
 let mcpInitialized = false;
 
-// One-shot LLM nudge surfaced when `channelCapable` is false. Populated
-// inside `oninitialized` and consumed by `attachChannelsOffNudgeIfPending`
-// on the next tool result. Rides tool-result text (not MCP
-// notifications) because the notifications channel is the exact thing
-// the nudge is warning about.
-let pendingChannelsOffNudge: string | null = null;
+// ── One-shot nudge queue ─────────────────────────────────────────────────
+//
+// Various subsystems queue text nudges (rename suggestion, channels-off
+// warning, upgrade hint) to be surfaced on the NEXT tool result. Each
+// entry fires exactly once and is removed after emission. An optional
+// `guard` defers emission until a condition is met (e.g., rename nudge
+// waits for registeredName to be set).
 
-// One-shot upgrade-version nudge. Populated when the hub's register
-// response carries `upgrade_hint` (plugin_version != PLUGIN_VERSION_CURRENT).
-// Consumed by `attachUpgradeNudgeIfPending` on the next tool result.
-// Never re-populated mid-lifetime — fires at most once per plugin startup.
-let pendingUpgradeNudge: string | null = null;
+interface PendingNudge {
+  text: string;
+  guard?: () => boolean;
+}
+
+export const pendingNudges: PendingNudge[] = [];
 
 const pendingRequests = new Map<
   string,
@@ -446,12 +447,16 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
       // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
       // Store it for one-shot surfacing on the next tool result.
       if (data && typeof data.upgrade_hint === "string") {
-        pendingUpgradeNudge = data.upgrade_hint;
+        pendingNudges.push({ text: data.upgrade_hint });
       }
       storedName = candidate;
       registeredName = candidate;
-      // Arm a rename nudge if we had to fall back to a suffix.
-      pendingRenameNudgeBase = attempt === 0 ? null : baseName;
+      if (attempt > 0) {
+        pendingNudges.push({
+          text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
+          guard: () => !!registeredName,
+        });
+      }
       log(
         attempt === 0
           ? `Auto-registered as ${candidate}`
@@ -707,68 +712,24 @@ function toolResult(data: unknown) {
 }
 
 /**
- * If auto-register had to use a `-N` suffix, attach a one-shot nudge to the
- * next tool result so the LLM asks the user whether they'd like a custom
- * name. The nudge fires once per startup; after that `pendingRenameNudgeBase`
- * is cleared and subsequent calls are untouched.
+ * Drain all ready nudges into a tool result's content array. Entries
+ * whose `guard` returns false are left in the queue; entries with no
+ * guard or a truthy guard are appended and removed.
  */
-function attachRenameNudgeIfPending<
+export function drainNudges<
   T extends { content: { type: "text"; text: string }[] },
 >(result: T): T {
-  if (!pendingRenameNudgeBase || !registeredName) return result;
-  const note = `Rename suggestion: the default claude-net name "${pendingRenameNudgeBase}" was already taken, so this session was auto-registered as "${registeredName}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`;
-  result.content.push({ type: "text", text: note });
-  pendingRenameNudgeBase = null;
+  const kept: PendingNudge[] = [];
+  for (const nudge of pendingNudges) {
+    if (nudge.guard && !nudge.guard()) {
+      kept.push(nudge);
+    } else {
+      result.content.push({ type: "text", text: nudge.text });
+    }
+  }
+  pendingNudges.length = 0;
+  pendingNudges.push(...kept);
   return result;
-}
-
-/**
- * If the MCP client does not advertise `experimental.claude/channel`,
- * surface a one-shot notice to the LLM on the next tool result. This
- * MUST ride on tool-result text (not `emitSystemNotification`) because
- * the MCP notifications channel is exactly what's broken on a
- * channels-off client — sending the notice through it would be a
- * silent no-op.
- */
-function attachChannelsOffNudgeIfPending<
-  T extends { content: { type: "text"; text: string }[] },
->(result: T): T {
-  if (!pendingChannelsOffNudge) return result;
-  result.content.push({ type: "text", text: pendingChannelsOffNudge });
-  pendingChannelsOffNudge = null;
-  return result;
-}
-
-/**
- * One-shot upgrade nudge, surfaced via tool-result text (not MCP
- * notifications) so it reaches even channel-incapable clients.
- */
-export function attachUpgradeNudgeIfPending<
-  T extends { content: { type: "text"; text: string }[] },
->(result: T): T {
-  if (!pendingUpgradeNudge) return result;
-  result.content.push({ type: "text", text: pendingUpgradeNudge });
-  pendingUpgradeNudge = null;
-  return result;
-}
-
-/**
- * Test-only: seed or clear the module-level `pendingUpgradeNudge`. The
- * production population path is `autoRegisterWithRetry` reading
- * `data.upgrade_hint` off the register response — unit tests can't easily
- * run that without a hub, so this hook is the testable surface for the
- * attach-and-clear behavior. Not part of the public API.
- */
-export function __setPendingUpgradeNudgeForTest(value: string | null): void {
-  pendingUpgradeNudge = value;
-}
-
-/**
- * Test-only: read back the module-level `pendingUpgradeNudge` so a test
- * can assert it was cleared after a firing attach call.
- */
-export function __getPendingUpgradeNudgeForTest(): string | null {
-  return pendingUpgradeNudge;
 }
 
 async function handleToolCall(
@@ -785,12 +746,8 @@ async function handleToolCall(
         `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
       );
     }
-    return attachUpgradeNudgeIfPending(
-      attachChannelsOffNudgeIfPending(
-        attachRenameNudgeIfPending(
-          toolResult({ name: registeredName, channel_capable: channelCapable }),
-        ),
-      ),
+    return drainNudges(
+      toolResult({ name: registeredName, channel_capable: channelCapable }),
     );
   }
 
@@ -838,7 +795,11 @@ async function handleToolCall(
     if (name === "register" && effectiveArgs.name) {
       storedName = effectiveArgs.name;
       registeredName = effectiveArgs.name;
-      pendingRenameNudgeBase = null;
+      // Clear any pending rename nudge — user explicitly chose a name.
+      const renameIdx = pendingNudges.findIndex(
+        (n) => n.guard && n.text.startsWith("Rename suggestion:"),
+      );
+      if (renameIdx !== -1) pendingNudges.splice(renameIdx, 1);
       writeSessionState({
         name: effectiveArgs.name,
         status: "online",
@@ -847,11 +808,7 @@ async function handleToolCall(
       });
     }
 
-    return attachUpgradeNudgeIfPending(
-      attachChannelsOffNudgeIfPending(
-        attachRenameNudgeIfPending(toolResult(data)),
-      ),
-    );
+    return drainNudges(toolResult(data));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return notConnectedError(message);
@@ -899,7 +856,7 @@ async function main(): Promise<void> {
     mcpInitialized = true;
 
     if (!channelCapable) {
-      pendingChannelsOffNudge = buildChannelsOffNudge();
+      pendingNudges.push({ text: buildChannelsOffNudge() });
     }
 
     // Flush any register that was waiting on this callback.

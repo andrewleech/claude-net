@@ -3,14 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  __getPendingUpgradeNudgeForTest,
-  __setPendingUpgradeNudgeForTest,
-  attachUpgradeNudgeIfPending,
   buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
   detectChannelCapability,
+  drainNudges,
   mapToolToFrame,
+  pendingNudges,
   withSessionSuffix,
   writeSessionState,
 } from "@/plugin/plugin";
@@ -273,57 +272,59 @@ describe("plugin helpers", () => {
     });
   });
 
-  describe("attachUpgradeNudgeIfPending (FR8)", () => {
-    // Reset the module-level pending slot between tests — this state
-    // persists across the test file since plugin.ts is loaded once per
-    // test run. Every test in this block MUST explicitly set the state
-    // before asserting behavior.
+  describe("drainNudges (nudge queue)", () => {
     afterEach(() => {
-      __setPendingUpgradeNudgeForTest(null);
+      pendingNudges.length = 0;
     });
 
-    test("returns the result unchanged when no nudge is pending", () => {
-      __setPendingUpgradeNudgeForTest(null);
+    test("returns unchanged result when queue is empty", () => {
       const result = {
         content: [{ type: "text" as const, text: "original" }],
       };
-      const out = attachUpgradeNudgeIfPending(result);
+      const out = drainNudges(result);
       expect(out.content).toHaveLength(1);
       expect(out.content[0]?.text).toBe("original");
     });
 
-    test("appends the nudge text to result.content when pending", () => {
-      __setPendingUpgradeNudgeForTest("please upgrade");
+    test("appends all queued nudges to result.content", () => {
+      pendingNudges.push({ text: "nudge A" }, { text: "nudge B" });
       const result = {
         content: [{ type: "text" as const, text: "tool output" }],
       };
-      const out = attachUpgradeNudgeIfPending(result);
-      expect(out.content).toHaveLength(2);
-      expect(out.content[0]?.text).toBe("tool output");
-      expect(out.content[1]?.text).toBe("please upgrade");
+      drainNudges(result);
+      expect(result.content).toHaveLength(3);
+      expect(result.content[1]?.text).toBe("nudge A");
+      expect(result.content[2]?.text).toBe("nudge B");
     });
 
-    test("clears the pending slot after firing — fires exactly once", () => {
-      __setPendingUpgradeNudgeForTest("upgrade hint");
-      expect(__getPendingUpgradeNudgeForTest()).toBe("upgrade hint");
-
+    test("removes consumed nudges — fires exactly once", () => {
+      pendingNudges.push({ text: "one-shot" });
       const first = { content: [{ type: "text" as const, text: "r1" }] };
-      attachUpgradeNudgeIfPending(first);
-      expect(__getPendingUpgradeNudgeForTest()).toBeNull();
+      drainNudges(first);
+      expect(pendingNudges).toHaveLength(0);
 
       const second = { content: [{ type: "text" as const, text: "r2" }] };
-      attachUpgradeNudgeIfPending(second);
-      // Nudge already consumed; no duplicate emission.
+      drainNudges(second);
       expect(second.content).toHaveLength(1);
-      expect(second.content[0]?.text).toBe("r2");
     });
 
-    test("pending slot starts null by default (no nudge leakage between tests)", () => {
-      // This relies on the afterEach in this block having cleared the
-      // state from prior tests. If a future test in the file forgets to
-      // reset, this test catches the leak.
-      __setPendingUpgradeNudgeForTest(null);
-      expect(__getPendingUpgradeNudgeForTest()).toBeNull();
+    test("skips nudges whose guard returns false", () => {
+      let ready = false;
+      pendingNudges.push({ text: "guarded", guard: () => ready });
+      pendingNudges.push({ text: "unguarded" });
+
+      const first = { content: [{ type: "text" as const, text: "r1" }] };
+      drainNudges(first);
+      expect(first.content).toHaveLength(2);
+      expect(first.content[1]?.text).toBe("unguarded");
+      expect(pendingNudges).toHaveLength(1);
+
+      ready = true;
+      const second = { content: [{ type: "text" as const, text: "r2" }] };
+      drainNudges(second);
+      expect(second.content).toHaveLength(2);
+      expect(second.content[1]?.text).toBe("guarded");
+      expect(pendingNudges).toHaveLength(0);
     });
   });
 

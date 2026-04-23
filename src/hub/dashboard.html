@@ -1039,6 +1039,68 @@
   .mirror-status.error { color: var(--accent); }
   .mirror-status:empty { padding: 0; }
 
+  /* ── Permission prompt banner ────────────────────────────────
+     Appears when Claude Code's Notification hook fires with a
+     permission-shaped message. Shows the text + one-key inject
+     buttons so the user can answer the modal without hopping to
+     the terminal. */
+  .cn-prompt-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 10px 20px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--gold);
+    border-bottom: 1px solid var(--gold);
+    box-shadow: 0 0 18px rgba(234, 179, 8, 0.2);
+    flex-shrink: 0;
+  }
+  .cn-prompt-banner[hidden] { display: none; }
+  .cn-prompt-text {
+    flex: 1 1 60%;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .cn-prompt-text::before {
+    content: "⚠ ";
+    color: var(--gold);
+    font-weight: 700;
+    margin-right: 4px;
+  }
+  .cn-prompt-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .cn-prompt-actions .btn {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+    min-width: 42px;
+    --bs-btn-color: var(--gold);
+    --bs-btn-border-color: var(--gold);
+    --bs-btn-hover-color: var(--on-accent);
+    --bs-btn-hover-bg: var(--gold);
+    --bs-btn-hover-border-color: var(--gold);
+  }
+  .cn-prompt-dismiss {
+    filter: invert(1) grayscale(100%) brightness(2);
+    opacity: 0.65;
+    margin-left: 4px;
+  }
+  .cn-prompt-dismiss:hover { opacity: 1; }
+  @media (max-width: 767.98px) {
+    .cn-prompt-banner { padding: 8px 12px; }
+    .cn-prompt-text { flex-basis: 100%; font-size: 11.5px; }
+    .cn-prompt-actions .btn { min-width: 36px; font-size: 10px; }
+  }
+
   /* Thinking ghost row: sits between the transcript and compose bar.
      Scraped straight from the TUI's `✻ Brewed for Ns` line by the
      mirror-agent, so it shows the real elapsed time. Hidden when the
@@ -1982,6 +2044,22 @@
         </div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
         <div class="mirror-thinking" id="mirror-thinking"></div>
+        <!-- Sticky banner that appears when Claude Code fires a
+             Notification hook (tool permission prompt, "waiting for
+             input", etc). Quick-inject buttons below the text cover
+             the common modal options (1/2/3 for tri-state, Esc to
+             cancel). Auto-dismisses when the assistant produces text
+             after the user answered. -->
+        <div class="cn-prompt-banner" id="mirror-prompt-banner" hidden>
+          <div class="cn-prompt-text" id="mirror-prompt-text"></div>
+          <div class="cn-prompt-actions">
+            <button type="button" data-prompt-key="1" class="btn btn-sm btn-outline-light">1</button>
+            <button type="button" data-prompt-key="2" class="btn btn-sm btn-outline-light">2</button>
+            <button type="button" data-prompt-key="3" class="btn btn-sm btn-outline-light">3</button>
+            <button type="button" data-prompt-key="esc" class="btn btn-sm btn-outline-light">Esc</button>
+            <button type="button" class="btn-close cn-prompt-dismiss" aria-label="Dismiss"></button>
+          </div>
+        </div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
           <div class="mirror-compose-frame">
@@ -4505,6 +4583,9 @@
           '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + ts + '</div>' +
           '<div class="md-body">' + renderMarkdown(payload.text || '') + '</div>' +
           (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+        // Claude moved on → any outstanding permission banner has been
+        // answered and should disappear.
+        onAssistantReply();
       } else if (kind === 'tool_call') {
         // Question tools get their own card; everything else uses the
         // tool-renderer registry with a safe fallback for unknown names.
@@ -4553,6 +4634,10 @@
         el = document.createElement('div');
         el.className = 'm-evt m-evt-notif';
         el.innerHTML = escapeHtml(payload.text || '');
+        // Fire the permission-banner side-effect for attention-
+        // getting notifications. Inline card still renders as
+        // history; the banner is the at-a-glance affordance.
+        onNotificationEvent(payload.text || '');
       } else if (kind === 'compact') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-compact';
@@ -4642,6 +4727,67 @@
       renderThinking();
     }
 
+    // ── Permission-prompt banner ────────────────────────────────
+    // Claude Code fires a Notification hook when it needs user
+    // attention (tool-permission prompt, idle wait). We already
+    // capture that as a mirror:event with kind: notification, but
+    // buried in the transcript it's easy to miss — so match on
+    // permission-shaped text and surface it as a sticky banner
+    // with quick-inject buttons covering the common modal options.
+    var promptBannerEl = document.getElementById('mirror-prompt-banner');
+    var promptTextEl = document.getElementById('mirror-prompt-text');
+    var PROMPT_RE = /permission|approval|waiting for input|needs your|allow/i;
+
+    function showPromptBanner(text) {
+      if (!promptBannerEl) return;
+      promptTextEl.textContent = text;
+      promptBannerEl.removeAttribute('hidden');
+    }
+    function hidePromptBanner() {
+      if (!promptBannerEl) return;
+      promptBannerEl.setAttribute('hidden', '');
+      promptTextEl.textContent = '';
+    }
+    function onNotificationEvent(text) {
+      if (!text || !PROMPT_RE.test(text)) return;
+      showPromptBanner(text);
+    }
+    function onAssistantReply() {
+      // Once Claude emits new text, the modal has been answered.
+      hidePromptBanner();
+    }
+
+    if (promptBannerEl) {
+      promptBannerEl.addEventListener('click', function(e) {
+        var target = e.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.classList.contains('cn-prompt-dismiss')) {
+          hidePromptBanner();
+          return;
+        }
+        var key = target.getAttribute('data-prompt-key');
+        if (!key) return;
+        // Esc uses the existing /stop endpoint (single Escape keypress).
+        // Digits go through the normal inject path (which also sends
+        // Enter — Claude Code's modals accept either bare digit or
+        // digit+Enter so the double-Enter safety is harmless here).
+        if (key === 'esc') {
+          fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ watcher: 'web-prompt-banner' }),
+          }).catch(function() {});
+        } else {
+          fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: key, watcher: 'web-prompt-banner' }),
+          }).catch(function() {});
+        }
+        hidePromptBanner();
+      }, { signal: attachSig });
+    }
+
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
@@ -4657,6 +4803,10 @@
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
         }
+        // Transcript replay would have flipped the banner on for every
+        // old notification it contains. Those prompts are answered and
+        // historical — hide it so it only shows for live ones.
+        hidePromptBanner();
       }
       scrollToBottom();
     }
@@ -4714,6 +4864,7 @@
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
       if (transcriptEl) transcriptEl.innerHTML = '';
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
+      hidePromptBanner();
       // Task panel is shared DOM, but taskState is per-attach. Wipe
       // the rendered rows + button so the next session doesn't inherit
       // the previous one's list.

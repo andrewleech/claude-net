@@ -49,6 +49,14 @@ interface SessionState {
   tmuxPane: string | null;
   /** Set while a recovery round-trip is in flight to avoid duplicate recoveries. */
   recovering: boolean;
+  /** Highest context-window size we've inferred for this session (auto-
+   *  upgrades from 200k → 1M the first time a usage row crosses 200k). */
+  ctxWindow: number;
+  /** Last ctx_pct sent to the hub, to avoid re-sending unchanged values. */
+  lastCtxPct: number;
+  /** Most-recent usage row seen in the JSONL; re-emitted on WS reconnect
+   *  so a hub restart doesn't leave the dashboard without a snapshot. */
+  lastUsage: Record<string, unknown> | null;
 }
 
 export interface AgentHandle {
@@ -230,6 +238,45 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     return new Response("not found", { status: 404 });
   }
 
+  /**
+   * Emit a context-usage snapshot derived from the JSONL transcript.
+   * Called from the tail's onRecord callback whenever a new `usage` row
+   * appears. Window auto-upgrades from 200k to 1M the first time a
+   * usage row crosses 200k, so both standard and 1m-context sessions
+   * render correctly without any client config.
+   */
+  function emitCtxFromUsage(
+    session: SessionState,
+    usage: Record<string, unknown>,
+  ): void {
+    session.lastUsage = usage;
+    if (!session.ws) return;
+    const input = Number(usage.input_tokens) || 0;
+    const creation = Number(usage.cache_creation_input_tokens) || 0;
+    const read = Number(usage.cache_read_input_tokens) || 0;
+    const tokens = input + creation + read;
+    if (tokens <= 0) return;
+    if (tokens > session.ctxWindow) {
+      // Jump to the next known tier so the bar doesn't overflow.
+      session.ctxWindow = tokens > 1_000_000 ? 2_000_000 : 1_000_000;
+    }
+    const pct = Math.min(100, Math.round((tokens / session.ctxWindow) * 100));
+    if (pct === session.lastCtxPct) return;
+    session.lastCtxPct = pct;
+    session.ws.send(
+      JSON.stringify({
+        action: "mirror_statusline",
+        sid: session.sid,
+        ctx_pct: pct,
+        ctx_tokens: tokens,
+        ctx_window: session.ctxWindow,
+        rl_pct: null,
+        rl_resets_at: null,
+        ts: Date.now(),
+      }),
+    );
+  }
+
   async function handleHookPost(req: Request): Promise<Response> {
     let payload: RawHookPayload;
     try {
@@ -365,6 +412,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       closed: false,
       tmuxPane: tmuxPane ?? null,
       recovering: false,
+      ctxWindow: 200_000,
+      lastCtxPct: -1,
+      lastUsage: null,
     };
     sessions.set(sid, session);
 
@@ -417,6 +467,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);
+        // Fresh hub (e.g. post-restart) has no cached statusline. Re-emit
+        // the last known usage so the dashboard's bar lights up on attach
+        // instead of waiting for the next assistant turn.
+        if (session.lastUsage) {
+          session.lastCtxPct = -1; // force re-send
+          emitCtxFromUsage(session, session.lastUsage);
+        }
       },
       onMessage: (raw) => handleHubMessage(session, raw),
       onClose: (code, reason) => {
@@ -525,7 +582,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           rec.message &&
           typeof rec.message === "object"
         ) {
-          const msg = rec.message as { content?: unknown };
+          const msg = rec.message as {
+            content?: unknown;
+            usage?: Record<string, unknown>;
+          };
           const content = Array.isArray(msg.content) ? msg.content : [];
           for (let i = 0; i < content.length; i++) {
             const block = content[i] as
@@ -539,6 +599,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             ) {
               emitAssistantTextFromJsonl(session, rec, i, block.text);
             }
+          }
+          if (msg.usage && typeof msg.usage === "object") {
+            emitCtxFromUsage(session, msg.usage);
           }
         }
       },

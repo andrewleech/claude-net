@@ -1043,7 +1043,8 @@
      Appears when Claude Code's Notification hook fires with a
      permission-shaped message. Shows the text + one-key inject
      buttons so the user can answer the modal without hopping to
-     the terminal. */
+     the terminal. Styled to stand out (amber border, accent-lit
+     background) without fighting the broadcast aesthetic. */
   .cn-prompt-banner {
     display: flex;
     flex-wrap: wrap;
@@ -1873,6 +1874,61 @@
   #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
   #mirror-conn.is-error { color: var(--red); }
 
+  /* Live statusline snapshot from the mirror-agent: context bar + 5h info.
+     Sits to the left of the spacer (i.e., left of the Tasks/Stop
+     cluster) so it reads as session status, not an action button. */
+  .cn-mirror-stats {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    margin-left: 14px;
+  }
+  .cn-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .cn-stat .cn-stat-num {
+    color: var(--text);
+    font-feature-settings: "tnum";
+    white-space: nowrap;
+  }
+  /* Override Bootstrap's default .progress so it matches the terminal
+     chrome: slim, darker background, animated width transition. */
+  .cn-stat-progress {
+    width: 80px;
+    height: 6px;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    overflow: hidden;
+  }
+  .cn-stat-progress .progress-bar {
+    transition: width 0.35s ease, background-color 0.2s;
+    background-color: var(--green);
+  }
+  .cn-stat-progress .progress-bar.bar-mid { background-color: var(--gold); }
+  .cn-stat-progress .progress-bar.bar-high { background-color: var(--red); }
+
+  /* Mobile: wrap stats onto their own row below the title, but keep
+     each stat compact so they fit side-by-side. */
+  @media (max-width: 767.98px) {
+    .cn-mirror-stats {
+      order: 4;
+      flex-basis: 100%;
+      margin-left: 0;
+      padding-top: 2px;
+      gap: 10px;
+    }
+    .cn-stat { font-size: 9px; gap: 6px; }
+    .cn-stat-progress { width: 70px; height: 5px; }
+  }
+
   /* ── Task panel ───────────────────────────────────────────────
      Bootstrap's .collapse handles the show/hide and transition;
      we only supply the chrome that matches the rest of the mirror
@@ -2014,6 +2070,14 @@
         <span class="cn-header-title" id="mirror-owner"></span>
         <span class="cn-header-sub cwd" id="mirror-cwd"></span>
         <span id="mirror-conn">connecting…</span>
+        <div class="cn-mirror-stats d-none" id="mirror-stats" aria-hidden="true">
+          <div class="cn-stat" id="mirror-stat-ctx-wrap" title="Context window usage">
+            <div class="progress cn-stat-progress">
+              <div class="progress-bar" id="mirror-stat-ctx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+            <span class="cn-stat-num" id="mirror-stat-ctx-num"></span>
+          </div>
+        </div>
         <span class="cn-header-spacer ms-auto"></span>
         <button id="mirror-tasks-btn" class="btn btn-outline-secondary btn-sm d-none" type="button"
                 data-bs-toggle="collapse" data-bs-target="#mirror-tasks-panel"
@@ -4727,6 +4791,47 @@
       renderThinking();
     }
 
+    // ── Statusline snapshot (context bar + 5h rate limit) ──────────
+    // Bootstrap progress bars updated from the mirror-agent whenever
+    // Claude Code refreshes its terminal statusline. Width animates
+    // via CSS transition, colour flips green/gold/red at 50/80.
+    var statsEl = document.getElementById('mirror-stats');
+    var statsCtxBar = document.getElementById('mirror-stat-ctx-bar');
+    var statsCtxNum = document.getElementById('mirror-stat-ctx-num');
+    var statsState = null;
+
+    function setBarClass(el, pct) {
+      el.classList.remove('bar-mid', 'bar-high');
+      if (pct >= 80) el.classList.add('bar-high');
+      else if (pct >= 50) el.classList.add('bar-mid');
+    }
+
+    function fmtTokens(n) {
+      if (!n) return '0K';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 10_000) return Math.round(n / 1000) + 'K';
+      return (n / 1000).toFixed(1) + 'K';
+    }
+
+    function renderStatslineSnapshot() {
+      if (!statsEl || !statsState) return;
+      var s = statsState;
+      statsEl.classList.remove('d-none');
+      var cPct = Math.max(0, Math.min(100, Math.round(s.ctx_pct || 0)));
+      statsCtxBar.style.width = cPct + '%';
+      statsCtxBar.setAttribute('aria-valuenow', String(cPct));
+      setBarClass(statsCtxBar, cPct);
+      // Auto-detected context-window tier is a guess, so don't assert
+      // a specific max or percent — just show the current token count.
+      // The bar fill still reflects tokens-vs-tier visually.
+      statsCtxNum.textContent = fmtTokens(s.ctx_tokens);
+    }
+
+    function renderStatusline(msg) {
+      statsState = msg;
+      renderStatslineSnapshot();
+    }
+
     // ── Permission-prompt banner ────────────────────────────────
     // Claude Code fires a Notification hook when it needs user
     // attention (tool-permission prompt, idle wait). We already
@@ -4808,6 +4913,10 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
+      // Snapshot of the most recent context-usage broadcast, so the bar
+      // shows up immediately on attach instead of waiting for the next
+      // assistant message.
+      if (msg.statusline) renderStatusline(msg.statusline);
       scrollToBottom();
     }
 
@@ -4835,6 +4944,7 @@
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
         else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool);
+        else if (msg.event === 'mirror:statusline') renderStatusline(msg);
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
@@ -4864,6 +4974,10 @@
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
       if (transcriptEl) transcriptEl.innerHTML = '';
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
+      if (statsEl) statsEl.classList.add('d-none');
+      if (statsCtxBar) { statsCtxBar.style.width = '0%'; statsCtxBar.classList.remove('bar-mid', 'bar-high'); }
+      if (statsCtxNum) statsCtxNum.textContent = '';
+      statsState = null;
       hidePromptBanner();
       // Task panel is shared DOM, but taskState is per-attach. Wipe
       // the rendered rows + button so the next session doesn't inherit

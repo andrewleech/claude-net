@@ -51,12 +51,21 @@ describe("MirrorRegistry", () => {
     expect(reg.sessions.size).toBe(1);
   });
 
-  test("createSession rejects a different owner claiming an existing sid", () => {
-    reg.createSession("alice:u@h", "/home/alice", "sid-1");
-    const r2 = reg.createSession("bob:u@h", "/home/bob", "sid-1");
-    expect(r2.ok).toBe(false);
-    if (r2.ok) return;
-    expect(r2.error).toContain("different owner");
+  test("createSession treats a stale owner POST on an existing sid as keep-alive", () => {
+    // After an MCP rename, the mirror-agent keeps re-POSTing the
+    // cwd-derived owner because it doesn't track the chosen label —
+    // the hub must accept those as keep-alives rather than failing
+    // them, otherwise WS reconnects after a rename would wedge.
+    const r1 = reg.createSession("alice:u@h", "/home/alice", "sid-1");
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    r1.entry.ownerAgent = "renamed:u@h"; // simulate post-rename state
+    const r2 = reg.createSession("alice:u@h", "/home/alice", "sid-1");
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.restored).toBe(true);
+    // Keep the post-rename label intact.
+    expect(r2.entry.ownerAgent).toBe("renamed:u@h");
   });
 
   test("getSession returns the entry for a known sid, 404 otherwise", () => {
@@ -242,56 +251,105 @@ describe("MirrorRegistry", () => {
     expect(names).toContain("mirror:session_ended");
   });
 
-  test("renameOwner rewrites every matching session and broadcasts", () => {
+  test("attachAgent rewrites sessions matching (host, ccPid) and broadcasts", () => {
     const events: Record<string, unknown>[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
-    const a = reg.createSession("skydeck:alice@host", "/work/skydeck");
-    const b = reg.createSession("skydeck:alice@host", "/work/skydeck");
-    const c = reg.createSession("other:alice@host", "/work/other");
-    expect(a.ok && b.ok && c.ok).toBe(true);
-
-    const affected = reg.renameOwner(
-      "skydeck:alice@host",
-      "thisisnew:alice@host",
+    // Two mirror sessions belong to CC pid 1000 on host "laptop".
+    reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/skydeck",
+      "s1",
+      "laptop",
+      1000,
     );
-    expect(affected.length).toBe(2);
+    reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/skydeck",
+      "s2",
+      "laptop",
+      1000,
+    );
+    // Third session belongs to a different CC pid — must NOT be touched.
+    reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/skydeck",
+      "s3",
+      "laptop",
+      1001,
+    );
 
-    // Both sessions in /work/skydeck got the new owner; the other cwd
-    // is untouched.
-    for (const entry of reg.sessions.values()) {
-      if (entry.cwd === "/work/skydeck") {
-        expect(entry.ownerAgent).toBe("thisisnew:alice@host");
-      } else {
-        expect(entry.ownerAgent).toBe("other:alice@host");
-      }
-    }
+    const affected = reg.attachAgent("laptop", 1000, "yos-docs:alice@laptop");
+    expect(affected.sort()).toEqual(["s1", "s2"]);
+
+    expect(reg.sessions.get("s1")?.ownerAgent).toBe("yos-docs:alice@laptop");
+    expect(reg.sessions.get("s2")?.ownerAgent).toBe("yos-docs:alice@laptop");
+    expect(reg.sessions.get("s3")?.ownerAgent).toBe("skydeck:alice@laptop");
 
     const rename = events.find((e) => e.event === "mirror:owner_renamed");
     expect(rename).toBeDefined();
-    expect(rename?.old_owner).toBe("skydeck:alice@host");
-    expect(rename?.new_owner).toBe("thisisnew:alice@host");
-    expect((rename?.sids as string[]).length).toBe(2);
+    expect(rename?.new_owner).toBe("yos-docs:alice@laptop");
+    expect((rename?.sids as string[]).sort()).toEqual(["s1", "s2"]);
   });
 
-  test("renameOwner is a no-op when no sessions match", () => {
+  test("attachAgent is a no-op when no sessions match", () => {
     const events: Record<string, unknown>[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
-    reg.createSession("other:u@h", "/x");
-    const affected = reg.renameOwner("missing:u@h", "whatever:u@h");
+    reg.createSession("other:u@h", "/x", "s1", "laptop", 1000);
+    const affected = reg.attachAgent("laptop", 9999, "whatever:u@h");
     expect(affected.length).toBe(0);
     expect(
       events.find((e) => e.event === "mirror:owner_renamed"),
     ).toBeUndefined();
   });
 
-  test("renameOwner with identical names does nothing", () => {
+  test("attachAgent skips sessions already on the target name", () => {
     const events: Record<string, unknown>[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
-    reg.createSession("a:u@h", "/x");
-    expect(reg.renameOwner("a:u@h", "a:u@h").length).toBe(0);
+    reg.createSession("a:u@h", "/x", "s1", "laptop", 1000);
+    expect(reg.attachAgent("laptop", 1000, "a:u@h").length).toBe(0);
     expect(
       events.find((e) => e.event === "mirror:owner_renamed"),
     ).toBeUndefined();
+  });
+
+  test("attachAgent bails when host or pid is missing (no mass-rename)", () => {
+    reg.createSession("a:u@h", "/x", "s1", "", null);
+    expect(reg.attachAgent("", 1000, "b:u@h").length).toBe(0);
+    expect(reg.attachAgent("laptop", Number.NaN, "b:u@h").length).toBe(0);
+    expect(reg.sessions.get("s1")?.ownerAgent).toBe("a:u@h");
+  });
+
+  test("createSession applies agentLookup when (host, ccPid) resolves", () => {
+    reg.setAgentLookup((host, pid) =>
+      host === "laptop" && pid === 1000 ? "yos-docs:alice@laptop" : null,
+    );
+    const r = reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/skydeck",
+      "s1",
+      "laptop",
+      1000,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The cwd-derived "skydeck" label is overridden by the MCP agent's
+    // chosen name — no rename broadcast needed because the session was
+    // born with the right label.
+    expect(r.entry.ownerAgent).toBe("yos-docs:alice@laptop");
+  });
+
+  test("createSession skips agentLookup when cc_pid is missing", () => {
+    reg.setAgentLookup(() => "should-not-apply:x@y");
+    const r = reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/skydeck",
+      "s1",
+      "laptop",
+      null,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.ownerAgent).toBe("skydeck:alice@laptop");
   });
 });
 

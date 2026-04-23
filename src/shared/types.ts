@@ -16,6 +16,11 @@ export type MessageType = "message" | "reply";
 export interface RegisterFrame {
   action: "register";
   name: string;
+  /** Claude Code PID (plugin's process.ppid). Paired with the name's
+   *  @host suffix to join mirror sessions on register. Optional because
+   *  pre-rollout plugins don't send it; the hub falls back to leaving
+   *  mirror labels untouched when absent. */
+  cc_pid?: number;
   requestId?: string;
 }
 
@@ -543,4 +548,12 @@ export interface MirrorSessionSummary {
   closed_at: string | null;
   watcher_count: number;
   transcript_len: number;
+  /** Mirror-agent's hostname — paired with `cc_pid` for the rename join
+   *  in ws-plugin. Empty string when unknown (pre-rollout entry). */
+  host: string;
+  /** Claude Code process PID. null when unknown (pre-rollout entry). */
+  cc_pid: number | null;
+  /** True when a mirror-agent WS is currently attached. false if
+   *  orphaned (hub restart with no agent yet, or agent died). */
+  agent_attached: boolean;
 }

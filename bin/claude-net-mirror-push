@@ -13,6 +13,34 @@ import * as path from "node:path";
 const STATE_DIR = "/tmp/claude-net";
 const HOOK_TIMEOUT_MS = 50;
 
+/**
+ * Regex used by `resolveCcPid()` to identify the Claude Code binary
+ * while walking up the process tree from the hook wrapper. `argv[0]`
+ * of the ancestor process is tested against this — match on NUL
+ * (/proc), whitespace (ps), or end-of-string to stay robust across
+ * Linux and macOS.
+ *
+ * Override with `CLAUDE_NET_CC_BINARY_PATTERN=<regex>` if your
+ * installation uses a non-default binary name — e.g. a custom
+ * `claude-wrapper` that in turn execs the real Claude Code. If the
+ * pattern doesn't match anything in the parent chain, the wrapper
+ * falls back to `process.ppid` (the direct parent), which disables
+ * rename propagation for that hook but keeps everything else working.
+ */
+const CC_BINARY_PATTERN_SRC =
+  process.env.CLAUDE_NET_CC_BINARY_PATTERN ??
+  "\\/claude-patched(?:\\x00|\\s|$)";
+const CC_BINARY_PATTERN = safeCompileRegex(CC_BINARY_PATTERN_SRC);
+
+function safeCompileRegex(src: string): RegExp {
+  try {
+    return new RegExp(src);
+  } catch {
+    // Fall back to the default if a user-supplied env pattern is invalid.
+    return /\/claude-patched(?:\x00|\s|$)/;
+  }
+}
+
 async function main(): Promise<void> {
   const payload = await readStdin();
   if (!payload) return;
@@ -48,6 +76,7 @@ function enrichPayload(raw: string): string {
       obj._mirror_env = {
         TMUX: process.env.TMUX ?? "",
         TMUX_PANE: process.env.TMUX_PANE ?? "",
+        CC_PID: resolveCcPid(),
       };
       return JSON.stringify(obj);
     }
@@ -55,6 +84,74 @@ function enrichPayload(raw: string): string {
     // ignore — pass through
   }
   return raw;
+}
+
+/**
+ * Walk up the process tree to find the Claude Code process that
+ * spawned us. `process.ppid` alone is unreliable because Claude Code
+ * runs hooks via `sh -c "<command>"` — the direct parent is an
+ * ephemeral shell that dies as soon as we do, and its pid won't
+ * match anything the MCP plugin reports (the plugin is `exec`-replaced
+ * by bun so its process.ppid IS Claude Code).
+ *
+ * Scans up to 4 ancestors looking for a `claude-patched` / `claude`
+ * cmdline. Falls back to `process.ppid` if we can't find one — that
+ * preserves the legacy direct-exec behaviour where even the walk
+ * doesn't help.
+ */
+function resolveCcPid(): number {
+  const direct = process.ppid;
+  let pid = direct;
+  for (let i = 0; i < 4; i++) {
+    const info = readProcessInfo(pid);
+    if (CC_BINARY_PATTERN.test(info.cmdline)) {
+      return pid;
+    }
+    if (!info.ppid || info.ppid <= 1) break;
+    pid = info.ppid;
+  }
+  return direct;
+}
+
+/**
+ * Read a process's ppid + cmdline in one shot. Linux reads /proc
+ * directly (no subprocess cost); macOS/BSD shells out to
+ * `ps -o ppid=,command=` — ~5 ms per call, 3–4 calls per hook
+ * still fits comfortably inside the 50 ms hook budget.
+ */
+function readProcessInfo(pid: number): { ppid: number; cmdline: string } {
+  if (process.platform === "linux") {
+    try {
+      // /proc/<pid>/cmdline uses NUL bytes between args; we match against
+      // it as-is because the regexes in resolveCcPid() don't care about
+      // the separator.
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = status.match(/^PPid:\s*(\d+)/m);
+      return {
+        ppid: m?.[1] ? Number.parseInt(m[1], 10) : 0,
+        cmdline,
+      };
+    } catch {
+      return { ppid: 0, cmdline: "" };
+    }
+  }
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["ps", "-o", "ppid=,command=", "-p", String(pid)],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = new TextDecoder().decode(result.stdout).trim();
+    const m = out.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m?.[1]) return { ppid: 0, cmdline: "" };
+    return {
+      ppid: Number.parseInt(m[1], 10),
+      cmdline: m[2] ?? "",
+    };
+  } catch {
+    return { ppid: 0, cmdline: "" };
+  }
 }
 
 function readPort(): number | null {

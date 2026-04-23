@@ -40,6 +40,14 @@ setDashboardBroadcast(broadcastToDashboards);
 mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
 hostRegistry.setDashboardBroadcast(broadcastToDashboards);
 
+// Forward half of the rename-propagation join: when a mirror-agent
+// opens a session with a (host, cc_pid), the hub looks up whether an
+// MCP agent has already registered with that identity and, if so, uses
+// its chosen name as the session's owner label.
+mirrorRegistry.setAgentLookup(
+  (host, ccPid) => registry.findByHostPid(host, ccPid)?.fullName ?? null,
+);
+
 // Resolve plugin.ts path relative to hub source directory
 const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
 const dashboardPath = `${import.meta.dir}/dashboard.html`;

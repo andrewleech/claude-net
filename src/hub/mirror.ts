@@ -55,6 +55,15 @@ export interface MirrorSessionEntry {
   sid: string;
   ownerAgent: string;
   cwd: string;
+  /** Host the mirror-agent is running on. Paired with `ccPid` to join
+   *  mirror sessions to MCP agents on register (Plan A). Empty string
+   *  when unknown (e.g. pre-rollout client). */
+  host: string;
+  /** Claude Code process PID — the same pid both halves of the system
+   *  naturally know: plugin via process.ppid, mirror-agent via the
+   *  CC_PID field injected into the hook payload by
+   *  claude-net-mirror-push. null when unknown. */
+  ccPid: number | null;
   createdAt: Date;
   lastEventAt: Date;
   transcript: MirrorEventFrame[];
@@ -108,6 +117,15 @@ export class MirrorRegistry {
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
   private sessionClosedHooks: Array<(sid: string) => void> = [];
+  /**
+   * Resolves (host, ccPid) → the full name of the MCP agent that owns that
+   * Claude Code process, or null. Used by createSession to apply a
+   * pre-registered MCP name to a newly-opened mirror session. Set by the
+   * hub wire-up in src/hub/index.ts; stays null in unit tests that don't
+   * need the join.
+   */
+  private agentLookup: ((host: string, ccPid: number) => string | null) | null =
+    null;
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
@@ -164,6 +182,10 @@ export class MirrorRegistry {
     this.dashboardBroadcast = fn;
   }
 
+  setAgentLookup(fn: (host: string, ccPid: number) => string | null): void {
+    this.agentLookup = fn;
+  }
+
   /** Register a callback to run when any session is closed. Used by the
    *  uploads registry to purge per-session files. */
   onSessionClosed(fn: (sid: string) => void): void {
@@ -173,11 +195,21 @@ export class MirrorRegistry {
   /**
    * Create a new mirror session, or return an existing one idempotently if
    * the same owner is reconnecting with the same sid.
+   *
+   * When (host, ccPid) resolves to an already-registered MCP agent, its
+   * name wins over the cwd-derived `ownerAgent` — the mirror row appears
+   * on the dashboard with the user's chosen label immediately, no rename
+   * broadcast needed. This is the forward half of the register/POST join
+   * (Plan A): survives hub restart because both halves re-announce
+   * themselves on reconnect and the lookup table is rebuilt from live WS
+   * state.
    */
   createSession(
     ownerAgent: string,
     cwd: string,
     sid?: string,
+    host = "",
+    ccPid: number | null = null,
   ):
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
@@ -185,10 +217,10 @@ export class MirrorRegistry {
     const existing = this.sessions.get(actualSid);
     if (existing) {
       if (existing.ownerAgent !== ownerAgent) {
-        return {
-          ok: false,
-          error: `Session '${actualSid}' belongs to a different owner.`,
-        };
+        // ownerAgent on an existing entry can legitimately differ from
+        // the POST's cwd-derived default: the MCP agent renamed itself
+        // and `attachAgent` already rewrote the entry. Treat the POST
+        // as a keep-alive rather than an ownership assertion.
       }
       if (existing.closedAt) {
         // Re-open a closed session when the same owner comes back with
@@ -203,6 +235,38 @@ export class MirrorRegistry {
           existing.retentionTimerId = null;
         }
       }
+      // Keep (host, ccPid) in sync with the latest announcement. A pid
+      // change on a live sid means the user --continued under a fresh
+      // Claude Code — the rename-join needs to see the new pid to
+      // match subsequent registers. A host change is rare but
+      // possible (daemon migration); accept both.
+      const hostChanged = host !== "" && existing.host !== host;
+      const pidChanged = ccPid !== null && existing.ccPid !== ccPid;
+      if (hostChanged) existing.host = host;
+      if (pidChanged) existing.ccPid = ccPid;
+
+      // If the identity changed and a matching MCP agent is already
+      // registered, apply its name to this session right away —
+      // otherwise the user would have to re-register after --continue
+      // to re-synchronise the label.
+      if (
+        (hostChanged || pidChanged) &&
+        existing.host &&
+        existing.ccPid !== null &&
+        this.agentLookup
+      ) {
+        const matched = this.agentLookup(existing.host, existing.ccPid);
+        if (matched && existing.ownerAgent !== matched) {
+          const oldOwner = existing.ownerAgent;
+          existing.ownerAgent = matched;
+          this.dashboardBroadcast({
+            event: "mirror:owner_renamed",
+            old_owner: oldOwner,
+            new_owner: matched,
+            sids: [actualSid],
+          });
+        }
+      }
       return {
         ok: true,
         entry: existing,
@@ -210,11 +274,20 @@ export class MirrorRegistry {
       };
     }
 
+    // Apply pre-registered MCP name if we have identity.
+    let resolvedOwner = ownerAgent;
+    if (host && ccPid !== null && this.agentLookup) {
+      const matched = this.agentLookup(host, ccPid);
+      if (matched) resolvedOwner = matched;
+    }
+
     const now = new Date();
     const entry: MirrorSessionEntry = {
       sid: actualSid,
-      ownerAgent,
+      ownerAgent: resolvedOwner,
       cwd,
+      host,
+      ccPid,
       createdAt: now,
       lastEventAt: now,
       transcript: [],
@@ -229,7 +302,7 @@ export class MirrorRegistry {
 
     this.store.recordOpen({
       sid: actualSid,
-      owner_agent: ownerAgent,
+      owner_agent: resolvedOwner,
       cwd,
       created_at: now.toISOString(),
     });
@@ -237,7 +310,7 @@ export class MirrorRegistry {
     this.dashboardBroadcast({
       event: "mirror:session_started",
       sid: actualSid,
-      owner_agent: ownerAgent,
+      owner_agent: resolvedOwner,
       cwd,
       created_at: now.toISOString(),
     });
@@ -454,32 +527,45 @@ export class MirrorRegistry {
   }
 
   /**
-   * Rewrite ownerAgent on every session currently owned by `oldName` to
-   * `newName`. Returns the list of affected sids. Broadcasts a single
-   * `mirror:owner_renamed` event so dashboards can update their sidebars
-   * without a full refresh.
+   * Back half of the (host, ccPid) join. Called from the MCP register
+   * handler whenever an agent (re)registers. Scans all mirror sessions
+   * whose (host, ccPid) matches and rewrites their `ownerAgent` to the
+   * agent's full name. Broadcasts `mirror:owner_renamed` so dashboards
+   * update their sidebars in place.
    *
-   * Called from the MCP register handler when the hub detects that an
-   * already-connected ws has chosen a different name. When two mirror
-   * sessions share the same ownerAgent (fork sessions in the same cwd)
-   * both rename together — the sid suffix on each sidebar row keeps
-   * them visually distinct.
+   * Why this replaces the old wsIdentity-based `renameOwner`:
+   *  - Survives hub restart: both the plugin and the mirror-agent
+   *    re-announce (host, ccPid) on reconnect, so the join re-fires from
+   *    scratch without any persisted state.
+   *  - Fork-session safe: each Claude Code has a distinct PID, so
+   *    renaming one sibling's MCP doesn't touch the others.
+   *  - Idempotent: sessions already on the target name are skipped; no
+   *    spurious broadcasts.
    */
-  renameOwner(oldName: string, newName: string): string[] {
-    if (!oldName || !newName || oldName === newName) return [];
+  attachAgent(host: string, ccPid: number, newName: string): string[] {
+    if (!host || !Number.isFinite(ccPid) || !newName) return [];
+    const byOldOwner = new Map<string, string[]>();
     const affected: string[] = [];
     for (const entry of this.sessions.values()) {
-      if (entry.ownerAgent === oldName) {
+      if (
+        entry.host === host &&
+        entry.ccPid === ccPid &&
+        entry.ownerAgent !== newName
+      ) {
+        const prev = entry.ownerAgent;
         entry.ownerAgent = newName;
         affected.push(entry.sid);
+        const sids = byOldOwner.get(prev);
+        if (sids) sids.push(entry.sid);
+        else byOldOwner.set(prev, [entry.sid]);
       }
     }
-    if (affected.length > 0) {
+    for (const [oldOwner, sids] of byOldOwner) {
       this.dashboardBroadcast({
         event: "mirror:owner_renamed",
-        old_owner: oldName,
+        old_owner: oldOwner,
         new_owner: newName,
-        sids: affected,
+        sids,
       });
     }
     return affected;
@@ -883,6 +969,9 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
     watcher_count: entry.watchers.size,
     transcript_len: entry.transcript.length,
+    host: entry.host,
+    cc_pid: entry.ccPid,
+    agent_attached: entry.agent !== null,
   };
 }
 
@@ -902,6 +991,8 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           owner_agent?: string;
           cwd?: string;
           sid?: string;
+          host?: string;
+          cc_pid?: number | null;
         };
         if (!payload.owner_agent || !payload.cwd) {
           set.status = 400;
@@ -916,10 +1007,17 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           );
           return { error: "Rate limit: too many session creations." };
         }
+        const host = typeof payload.host === "string" ? payload.host : "";
+        const ccPid =
+          typeof payload.cc_pid === "number" && Number.isFinite(payload.cc_pid)
+            ? payload.cc_pid
+            : null;
         const result = mirrorRegistry.createSession(
           payload.owner_agent,
           payload.cwd,
           payload.sid,
+          host,
+          ccPid,
         );
         if (!result.ok) {
           set.status = 409;

@@ -117,7 +117,11 @@ export function wsPlugin(
         case "register": {
           // Use ws itself as the sendable reference — it persists and can send.
           // Use ws.raw for identity comparison in registry.
-          const result = registry.register(data.name, ws, ws.raw);
+          const ccPid =
+            typeof data.cc_pid === "number" && Number.isFinite(data.cc_pid)
+              ? data.cc_pid
+              : null;
+          const result = registry.register(data.name, ws, ws.raw, ccPid);
           if (!result.ok) {
             sendResponse(ws, requestId, false, undefined, result.error);
             return;
@@ -135,16 +139,26 @@ export function wsPlugin(
             full_name: result.entry.fullName,
           });
 
-          // If this was a rename (same WS, new name), tell every
-          // dashboard to drop the old name and propagate the rename
-          // into mirror sessions so sidebar labels update in place.
+          // Drop the stale name on every dashboard if this was a rename
+          // (same WS, new name). Propagation to mirror sessions is
+          // handled below via the (host, ccPid) join — not keyed on the
+          // old name — so that the join also fires on a fresh register
+          // after hub restart, where `renamedFrom` is never set.
           if (result.renamedFrom) {
             dashboardBroadcastFn({
               event: "agent:disconnected",
               full_name: result.renamedFrom,
             });
-            mirrorRegistry?.renameOwner(
-              result.renamedFrom,
+          }
+
+          // Forward half of the rename-propagation join: rewrite every
+          // mirror session whose (host, ccPid) matches this agent to
+          // use the newly-registered name. Silent no-op when ccPid is
+          // null (pre-rollout client) or no sessions match yet.
+          if (mirrorRegistry && ccPid !== null) {
+            mirrorRegistry.attachAgent(
+              result.entry.host,
+              ccPid,
               result.entry.fullName,
             );
           }

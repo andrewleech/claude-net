@@ -115,9 +115,13 @@ describe("plugin helpers", () => {
   });
 
   describe("mapToolToFrame", () => {
-    test("register: maps to register action", () => {
+    test("register: maps to register action with cc_pid", () => {
       const frame = mapToolToFrame("register", { name: "myagent" });
-      expect(frame).toEqual({ action: "register", name: "myagent" });
+      expect(frame).toEqual({
+        action: "register",
+        name: "myagent",
+        cc_pid: process.ppid,
+      });
     });
 
     test("send_message: maps to send action with type message", () => {

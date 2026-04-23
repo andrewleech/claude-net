@@ -367,4 +367,40 @@ describe("Registry", () => {
     // owned by ws2 — must fail.
     expect(result.ok).toBe(false);
   });
+
+  // ── (host, ccPid) join for mirror-session rename propagation ───────────
+
+  test("register stores ccPid and findByHostPid resolves it", () => {
+    const ws = mockWs();
+    registry.register("sky:alice@laptop", ws, {}, 4242);
+    const found = registry.findByHostPid("laptop", 4242);
+    expect(found?.fullName).toBe("sky:alice@laptop");
+  });
+
+  test("findByHostPid returns null when no agent matches", () => {
+    const ws = mockWs();
+    registry.register("sky:alice@laptop", ws, {}, 4242);
+    expect(registry.findByHostPid("laptop", 9999)).toBeNull();
+    expect(registry.findByHostPid("other", 4242)).toBeNull();
+  });
+
+  test("findByHostPid guards against missing host/pid", () => {
+    const ws = mockWs();
+    registry.register("sky:alice@laptop", ws, {}, 4242);
+    expect(registry.findByHostPid("", 4242)).toBeNull();
+    expect(registry.findByHostPid("laptop", Number.NaN)).toBeNull();
+  });
+
+  test("rename on same ws keeps the ccPid attached to the new name", () => {
+    const ws = mockWs();
+    const identity = {};
+    registry.register("old:alice@laptop", ws, identity, 4242);
+    const renamed = registry.register("new:alice@laptop", ws, identity, 4242);
+    expect(renamed.ok).toBe(true);
+    if (!renamed.ok) return;
+    expect(registry.findByHostPid("laptop", 4242)?.fullName).toBe(
+      "new:alice@laptop",
+    );
+    expect(registry.agents.has("old:alice@laptop")).toBe(false);
+  });
 });

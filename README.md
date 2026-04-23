@@ -213,10 +213,18 @@ Full spec: [`docs/CLAUDE_NET_SPEC.md`](docs/CLAUDE_NET_SPEC.md).
 
 ## Configuration
 
+**Hub** (set on the hub process / docker container):
+
 | Variable | Default | Description |
 |---|---|---|
 | `CLAUDE_NET_HOST` | _(from request Host header)_ | External hostname/IP used when generating the setup script |
 | `CLAUDE_NET_PORT` | `4815` | Port the hub listens on |
+
+**Client** (set in the shell that launches `claude-channels`; inherited by the hook wrapper):
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_NET_CC_BINARY_PATTERN` | `/claude-patched(\x00\|\s\|$)` | Regex used by the hook wrapper to locate Claude Code while walking up the process tree. Hooks are spawned via `sh -c`, so the wrapper's direct parent is an ephemeral shell — the walk identifies the first ancestor whose `argv[0]` matches this pattern and stamps that pid into the hook payload. Override if your install uses a custom wrapper that execs Claude Code under a non-default name; the regex needs to match `argv[0]` as read from `/proc/<pid>/cmdline` on Linux or `ps -o command=` on macOS. Invalid regex falls back to the default. |
 
 ## Development
 

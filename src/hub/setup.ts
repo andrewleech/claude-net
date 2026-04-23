@@ -75,12 +75,19 @@ for f in claude-channels claude-net-mirror-push claude-net-mirror-agent; do
     ln -snf "\$INSTALL_DIR/\$f" "\$BIN_DIR/\$f"
 done
 
-# Retire any running mirror-agent daemon so the next claude-channels launch
-# respawns against the just-installed bundle. The launcher's /health probe
-# only detects liveness, not version, so a stale daemon would otherwise
-# keep running the old code and the dashboard would show "NO MIRROR".
+# Replace any running mirror-agent with one running the freshly
+# installed bundle. We kill + respawn rather than rely on the next
+# claude-channels launch: doing the replacement inline keeps the outage
+# to ~1s, after which live sessions recover on their next hook event.
 pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
 rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
+# Give the OS a beat to release the old port, then daemonise a fresh
+# one. The ( ... & ) subshell orphans the child so it survives this
+# /setup run even though the shell exits immediately after.
+sleep 0.3
+mkdir -p /tmp/claude-net
+( CLAUDE_NET_HUB="\$HUB" nohup "\$BIN_DIR/claude-net-mirror-agent" \\
+    >/tmp/claude-net/mirror-agent.log 2>&1 < /dev/null & )
 
 echo "[2/5] Registering claude-net MCP server…"
 claude mcp add \\

@@ -12,6 +12,10 @@ export interface AgentEntry {
   wsIdentity: object;
   teams: Set<string>;
   connectedAt: Date;
+  /** Claude Code process PID announced by the plugin on register. Null if
+   *  the plugin didn't send cc_pid (pre-rollout client). Paired with
+   *  `host` in `findByHostPid` for the mirror-session rename join. */
+  ccPid: number | null;
 }
 
 export interface DisconnectedEntry {
@@ -58,6 +62,7 @@ export class Registry {
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
+    ccPid: number | null = null,
   ):
     | {
         ok: true;
@@ -90,8 +95,11 @@ export class Registry {
     }
 
     if (existing && existing.wsIdentity === identity) {
-      // Update ws reference (Elysia wrapper may change)
+      // Update ws reference (Elysia wrapper may change) + refresh ccPid
+      // so a late-arriving identity upgrade (plugin upgraded mid-session)
+      // still flows into findByHostPid without needing a reconnect.
       existing.ws = ws;
+      if (ccPid !== null) existing.ccPid = ccPid;
       return { ok: true, entry: existing, restored: false };
     }
 
@@ -120,9 +128,24 @@ export class Registry {
       // Rename wins over disconnected-restore if both apply (unlikely).
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
+      ccPid,
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };
+  }
+
+  /**
+   * Find the connected agent that owns (host, ccPid). Used by
+   * MirrorRegistry to resolve the current mirror-session label from a
+   * live MCP registration — including immediately after a hub restart,
+   * where the plugin has re-announced itself with the same ccPid.
+   */
+  findByHostPid(host: string, ccPid: number): AgentEntry | null {
+    if (!host || !Number.isFinite(ccPid)) return null;
+    for (const entry of this.agents.values()) {
+      if (entry.host === host && entry.ccPid === ccPid) return entry;
+    }
+    return null;
   }
 
   unregister(fullName: string): void {

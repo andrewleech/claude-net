@@ -183,7 +183,11 @@ export function mapToolToFrame(
 ): Record<string, unknown> | null {
   switch (toolName) {
     case "register":
-      return { action: "register", name: args.name };
+      return {
+        action: "register",
+        name: args.name,
+        cc_pid: process.ppid,
+      };
     case "send_message":
       return {
         action: "send",
@@ -369,7 +373,11 @@ async function autoRegisterWithRetry(baseName: string): Promise<void> {
     const candidate =
       attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
     try {
-      await request({ action: "register", name: candidate });
+      await request({
+        action: "register",
+        name: candidate,
+        cc_pid: process.ppid,
+      });
       storedName = candidate;
       registeredName = candidate;
       // Arm a rename nudge if we had to fall back to a suffix.

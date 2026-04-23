@@ -8,6 +8,7 @@ import type {
   ResponseFrame,
 } from "@/shared/types";
 import type { Elysia } from "elysia";
+import type { EventLog } from "./event-log";
 import type { MirrorRegistry } from "./mirror";
 import { type Registry, parseName } from "./registry";
 import type { Router } from "./router";
@@ -24,6 +25,15 @@ interface ElysiaWs {
 
 // Map from raw ServerWebSocket reference to registered fullName
 const wsToAgent = new WeakMap<object, string>();
+
+// WS references the ping tick is closing due to stale-pong eviction.
+// The close handler checks membership to distinguish `reason: "evicted"`
+// from `reason: "close"`.
+const evictingWs = new WeakSet<object>();
+
+export function markEvicting(ws: object): void {
+  evictingWs.add(ws);
+}
 
 let dashboardBroadcastFn: (event: DashboardEvent) => void = () => {};
 
@@ -97,6 +107,7 @@ export function wsPlugin(
   registry: Registry,
   teams: Teams,
   router: Router,
+  eventLog: EventLog,
   mirrorRegistry?: MirrorRegistry,
   /**
    * Listen port, used only to build the upgrade-hint URL fallback
@@ -105,6 +116,9 @@ export function wsPlugin(
    */
   port: number = Number(process.env.CLAUDE_NET_PORT) || 4815,
 ): Elysia {
+  const emit = (event: string, data: Record<string, unknown>): void => {
+    eventLog.push(event, data);
+  };
   return app.ws("/ws", {
     open(_ws: ElysiaWs) {
       // No action — agent must send register frame
@@ -183,8 +197,21 @@ export function wsPlugin(
               resolveHubUrlForHint(port),
               reportedVersion,
             );
+            emit("agent.upgraded", {
+              fullName: result.entry.fullName,
+              reportedVersion: reportedVersion ?? null,
+              currentVersion: PLUGIN_VERSION_CURRENT,
+            });
           }
           sendResponse(ws, requestId, true, registerResponse);
+
+          emit("agent.registered", {
+            fullName: result.entry.fullName,
+            channelCapable: result.entry.channelCapable,
+            pluginVersion: reportedVersion ?? null,
+            restored: result.restored,
+            ...(result.renamedFrom ? { renamedFrom: result.renamedFrom } : {}),
+          });
 
           // If this was a rename (same WS, new name), tell every
           // dashboard to drop the old name and propagate the rename
@@ -194,6 +221,10 @@ export function wsPlugin(
               event: "agent:disconnected",
               name: parseName(result.renamedFrom).session,
               full_name: result.renamedFrom,
+            });
+            emit("agent.disconnected", {
+              fullName: result.renamedFrom,
+              reason: "renamed",
             });
             mirrorRegistry?.renameOwner(
               result.renamedFrom,
@@ -214,6 +245,7 @@ export function wsPlugin(
           const senderName = requireRegistered(ws, requestId);
           if (!senderName) return;
 
+          const startedAt = Date.now();
           const result = router.routeDirect(
             senderName,
             data.to,
@@ -221,6 +253,7 @@ export function wsPlugin(
             data.type,
             data.reply_to,
           );
+          const elapsedMs = Date.now() - startedAt;
           if (!result.ok) {
             // Structured NAK carries `outcome` + `reason` so
             // tools processing the response programmatically can
@@ -232,6 +265,14 @@ export function wsPlugin(
               { outcome: "nak", reason: result.reason },
               result.error,
             );
+            emit("message.sent", {
+              from: senderName,
+              to: data.to,
+              messageId: null,
+              outcome: "nak",
+              reason: result.reason,
+              elapsedMs,
+            });
           } else {
             // Keep `delivered: true` alongside the new `outcome` field
             // so existing dashboard parsers that only inspect `delivered`
@@ -251,6 +292,13 @@ export function wsPlugin(
               content: data.content,
               reply_to: data.reply_to,
               timestamp: new Date().toISOString(),
+            });
+            emit("message.sent", {
+              from: senderName,
+              to: data.to,
+              messageId: result.message_id,
+              outcome: "delivered",
+              elapsedMs,
             });
           }
           break;
@@ -274,6 +322,12 @@ export function wsPlugin(
             type: "message",
             content: data.content,
             timestamp: new Date().toISOString(),
+          });
+          emit("message.broadcast", {
+            from: senderName,
+            messageId: result.message_id,
+            deliveredTo: result.delivered_to,
+            skippedNoChannel: result.skipped_no_channel,
           });
           break;
         }
@@ -307,6 +361,13 @@ export function wsPlugin(
               team: data.team,
               reply_to: data.reply_to,
               timestamp: new Date().toISOString(),
+            });
+            emit("message.team", {
+              from: senderName,
+              team: data.team,
+              messageId: result.message_id,
+              deliveredTo: result.delivered_to,
+              skippedNoChannel: result.skipped_no_channel,
             });
           }
           break;
@@ -398,6 +459,8 @@ export function wsPlugin(
       const fullName = wsToAgent.get(ws.raw);
       if (!fullName) return;
 
+      const evicted = evictingWs.has(ws.raw);
+      evictingWs.delete(ws.raw);
       wsToAgent.delete(ws.raw);
       const entry = registry.getByFullName(fullName);
       registry.unregister(fullName);
@@ -406,6 +469,10 @@ export function wsPlugin(
         event: "agent:disconnected",
         name: entry?.shortName ?? fullName,
         full_name: fullName,
+      });
+      emit("agent.disconnected", {
+        fullName,
+        reason: evicted ? "evicted" : "close",
       });
     },
 

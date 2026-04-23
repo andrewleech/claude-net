@@ -6,6 +6,7 @@ import {
   expect,
   test,
 } from "bun:test";
+import { EventLog } from "@/hub/event-log";
 import { MirrorRegistry } from "@/hub/mirror";
 import { Registry } from "@/hub/registry";
 import { Router } from "@/hub/router";
@@ -28,8 +29,9 @@ function createHub() {
     }
   });
 
+  const eventLog = new EventLog(100);
   let app = new Elysia();
-  app = wsPlugin(app, registry, teams, router, mirror);
+  app = wsPlugin(app, registry, teams, router, eventLog, mirror);
   app.listen(0); // random port
 
   return { app, registry, teams, router, mirror };

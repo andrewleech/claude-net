@@ -2,6 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
 import { binServerPlugin } from "./bin-server";
+import { EventLog } from "./event-log";
 import { hostPlugin } from "./host";
 import { HostRegistry } from "./host-registry";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
@@ -13,7 +14,7 @@ import { Teams } from "./teams";
 import { UploadsRegistry, uploadsPlugin } from "./uploads";
 import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
 import { wsHostPlugin } from "./ws-host";
-import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
+import { markEvicting, setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
 export interface CreateHubOptions {
   /** How often to send native WS pings to every registered plugin. */
@@ -31,6 +32,12 @@ export interface CreateHubOptions {
    * actually binds to.
    */
   port?: number;
+  /**
+   * Max entries retained by the hub event log (ring buffer). Defaults
+   * to 10_000 — enough for several hours of typical traffic without
+   * bloating memory.
+   */
+  eventLogCapacity?: number;
 }
 
 export interface Hub {
@@ -40,6 +47,7 @@ export interface Hub {
   router: Router;
   mirrorRegistry: MirrorRegistry;
   hostRegistry: HostRegistry;
+  eventLog: EventLog;
   startedAt: Date;
   /** Stop the ping tick and the Elysia server. Idempotent. */
   stop: () => void;
@@ -58,6 +66,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   const mirrorRegistry = new MirrorRegistry({ store: mirrorStore });
   const hostRegistry = new HostRegistry();
   const uploadsRegistry = new UploadsRegistry();
+  const eventLog = new EventLog(options.eventLogCapacity);
   mirrorRegistry.onSessionClosed((sid) => {
     uploadsRegistry.purgeSession(sid).catch(() => {});
   });
@@ -122,7 +131,9 @@ export function createHub(options: CreateHubOptions = {}): Hub {
       set.headers["content-type"] = "application/javascript";
       return await getDashboardParsersJs();
     })
-    .use(apiPlugin({ registry, teams, router, startedAt, hostRegistry }))
+    .use(
+      apiPlugin({ registry, teams, router, startedAt, hostRegistry, eventLog }),
+    )
     .use(mirrorPlugin({ mirrorRegistry }))
     .use(
       uploadsPlugin({
@@ -136,7 +147,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
-  app = wsPlugin(app, registry, teams, router, mirrorRegistry, port);
+  app = wsPlugin(app, registry, teams, router, eventLog, mirrorRegistry, port);
   app = wsDashboardPlugin(app, registry, teams, hostRegistry);
   app = wsMirrorPlugin(app, mirrorRegistry);
   app = wsHostPlugin(app, hostRegistry);
@@ -145,10 +156,19 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   // close handler in ws-plugin to unregister and broadcast
   // agent:disconnected — do not duplicate that here.
   const pingTick = setInterval(() => {
-    const cutoff = Date.now() - staleThresholdMs;
+    const now = Date.now();
+    const cutoff = now - staleThresholdMs;
+    let evictedCount = 0;
     for (const entry of registry.agents.values()) {
       const raw = entry.wsIdentity as ServerWebSocket<unknown>;
       if (entry.lastPongAt < cutoff) {
+        eventLog.push("agent.evicted", {
+          fullName: entry.fullName,
+          lastPongAt: entry.lastPongAt,
+          silentForMs: now - entry.lastPongAt,
+        });
+        evictedCount++;
+        markEvicting(entry.wsIdentity);
         try {
           raw.close();
         } catch {
@@ -165,6 +185,10 @@ export function createHub(options: CreateHubOptions = {}): Hub {
         // close here.
       }
     }
+    eventLog.push("ping.tick", {
+      agentCount: registry.agents.size,
+      evictedCount,
+    });
   }, pingIntervalMs);
   // Don't block process exit on the ping tick (relevant for tests that
   // forget to call stop()).
@@ -191,6 +215,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     router,
     mirrorRegistry,
     hostRegistry,
+    eventLog,
     startedAt,
     stop,
   };
@@ -207,6 +232,7 @@ const {
   router,
   mirrorRegistry,
   hostRegistry,
+  eventLog,
   startedAt,
 } = hub;
 
@@ -248,5 +274,6 @@ export {
   router,
   mirrorRegistry,
   hostRegistry,
+  eventLog,
   startedAt,
 };

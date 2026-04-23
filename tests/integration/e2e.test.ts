@@ -7,6 +7,7 @@ import {
   test,
 } from "bun:test";
 import { apiPlugin } from "@/hub/api";
+import { EventLog } from "@/hub/event-log";
 import { Registry } from "@/hub/registry";
 import { Router } from "@/hub/router";
 import { setupPlugin } from "@/hub/setup";
@@ -37,6 +38,7 @@ function createHub(disconnectTimeoutMs = 200) {
   const teams = new Teams(registry);
   const router = new Router(registry, teams);
   const startedAt = new Date();
+  const eventLog = new EventLog(100);
 
   registry.setTimeoutCleanup((fullName, agentTeams) => {
     for (const teamName of agentTeams) {
@@ -75,10 +77,10 @@ function createHub(disconnectTimeoutMs = 200) {
       set.headers["content-type"] = "text/typescript";
       return pluginCache;
     })
-    .use(apiPlugin({ registry, teams, router, startedAt }))
+    .use(apiPlugin({ registry, teams, router, startedAt, eventLog }))
     .use(setupPlugin({ port: 0 }));
 
-  app = wsPlugin(app, registry, teams, router);
+  app = wsPlugin(app, registry, teams, router, eventLog);
   app = wsDashboardPlugin(app, registry, teams);
   app.listen(0);
 

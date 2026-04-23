@@ -8,6 +8,7 @@ import {
   test,
 } from "bun:test";
 import { apiPlugin } from "@/hub/api";
+import { EventLog } from "@/hub/event-log";
 import { Registry } from "@/hub/registry";
 import { Router } from "@/hub/router";
 import { Teams } from "@/hub/teams";
@@ -31,8 +32,11 @@ function createHub() {
 
   setDashboardBroadcast(broadcastToDashboards);
 
-  let app = new Elysia().use(apiPlugin({ registry, teams, router, startedAt }));
-  app = wsPlugin(app, registry, teams, router);
+  const eventLog = new EventLog(100);
+  let app = new Elysia().use(
+    apiPlugin({ registry, teams, router, startedAt, eventLog }),
+  );
+  app = wsPlugin(app, registry, teams, router, eventLog);
   app = wsDashboardPlugin(app, registry, teams);
   app.listen(0);
 

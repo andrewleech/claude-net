@@ -24,6 +24,13 @@ export interface CreateHubOptions {
    * slack for scheduler jitter and a slow-but-alive client.
    */
   staleThresholdMs?: number;
+  /**
+   * Listen port, threaded through to the WS plugin so the upgrade-hint
+   * text can reference a local fallback URL when `CLAUDE_NET_HOST` is
+   * unset. Informational only — does not affect what port `app.listen`
+   * actually binds to.
+   */
+  port?: number;
 }
 
 export interface Hub {
@@ -41,6 +48,7 @@ export interface Hub {
 export function createHub(options: CreateHubOptions = {}): Hub {
   const pingIntervalMs = options.pingIntervalMs ?? 5_000;
   const staleThresholdMs = options.staleThresholdMs ?? 15_000;
+  const port = options.port ?? (Number(process.env.CLAUDE_NET_PORT) || 4815);
   const startedAt = new Date();
 
   const registry = new Registry();
@@ -128,7 +136,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
-  app = wsPlugin(app, registry, teams, router, mirrorRegistry);
+  app = wsPlugin(app, registry, teams, router, mirrorRegistry, port);
   app = wsDashboardPlugin(app, registry, teams, hostRegistry);
   app = wsMirrorPlugin(app, mirrorRegistry);
   app = wsHostPlugin(app, hostRegistry);
@@ -191,7 +199,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
 // ── Module entrypoint (executed when `bun run src/hub/index.ts`) ─────────
 
 const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
-const hub = createHub();
+const hub = createHub({ port });
 const {
   app,
   registry,

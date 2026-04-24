@@ -126,30 +126,47 @@ def read_claude_net_state(cwd):
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Fallback: glob for any state file matching cwd
+    # Fallback: glob for any state file matching cwd.
+    # Multiple plugins can write state for the same cwd (concurrent
+    # sessions, the claude-net-host control socket, stale files from
+    # crashed processes). Collect every cwd-match within the 24h window
+    # and pick the one that best reflects the live session: prefer
+    # online > disconnected > error, and within a tier the most
+    # recently updated. Returning the first glob hit blindly means the
+    # statusline will flap to whatever ordering readdir happened to
+    # give — including stale 'disconnected' files shadowing a live
+    # 'online' write.
+    status_rank = {"online": 0, "disconnected": 1, "error": 2}
+    best = None
+    best_key = None
     try:
         for path in glob.glob(os.path.join(state_dir, "state-*.json")):
             try:
                 with open(path) as f:
                     state = json.load(f)
-                if state.get("cwd") == cwd:
-                    updated = state.get("updated_at", "")
-                    if updated:
-                        try:
-                            age = time.time() - time.mktime(
-                                time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S")
-                            )
-                            if age > 86400:
-                                continue
-                        except (ValueError, OverflowError):
-                            pass
-                    return state
+                if state.get("cwd") != cwd:
+                    continue
+                updated = state.get("updated_at", "")
+                ts = 0.0
+                if updated:
+                    try:
+                        ts = time.mktime(
+                            time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S")
+                        )
+                        if time.time() - ts > 86400:
+                            continue
+                    except (ValueError, OverflowError):
+                        pass
+                key = (status_rank.get(state.get("status", ""), 99), -ts)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best = state
             except (json.JSONDecodeError, OSError):
                 continue
     except OSError:
         pass
 
-    return None
+    return best
 
 
 # ── Colors ──────────────────────────────────────────────────────────────

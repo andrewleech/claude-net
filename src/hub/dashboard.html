@@ -4927,7 +4927,11 @@
         // Fire the permission-banner side-effect for attention-
         // getting notifications. Inline card still renders as
         // history; the banner is the at-a-glance affordance.
-        onNotificationEvent(payload.text || '');
+        // Skip mirror-agent audit events ("inject from web: …",
+        // "paste from …") — their text can quote user input that
+        // happens to contain the permission regex keywords, which
+        // would misfire the banner on the user's own message.
+        onNotificationEvent(payload.text || '', payload.source || '');
       } else if (kind === 'compact') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-compact';
@@ -5084,7 +5088,13 @@
       promptBannerEl.setAttribute('hidden', '');
       promptTextEl.textContent = '';
     }
-    function onNotificationEvent(text) {
+    function onNotificationEvent(text, source) {
+      // Audit events emitted by the mirror-agent ("inject from web: …",
+      // "paste from web: …", "stop from …", "tmux pane reported: …")
+      // carry source="mirror-agent" and often quote raw user input.
+      // Those must not fire the permission banner — it's for Claude
+      // Code's own Notification hook only.
+      if (source === 'mirror-agent') return;
       if (!text || !PROMPT_RE.test(text)) return;
       showPromptBanner(text);
     }

@@ -769,6 +769,7 @@
 
   .mirror-compose textarea {
     flex: 1;
+    field-sizing: content;
     min-height: 46px;
     max-height: 50vh;
     resize: none;
@@ -4964,7 +4965,6 @@
             composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
           } else {
             composeText.value = '';
-            autosizeCompose();
             composeErr.className = 'mirror-compose-err is-notice';
             if (useLargeBlobPath && r.body && r.body.path) {
               composeErr.textContent =
@@ -5257,31 +5257,6 @@
         slashActiveIdx = parseInt(row.getAttribute('data-idx'), 10) || 0;
         slashInsertActive();
       }, { signal: attachSig });
-    }
-
-    // Auto-grow the textarea to fit its content, up to the CSS max-height
-    // cap (which then lets overflow-y scroll take over). Runs on every
-    // input event plus once immediately in case stashed draft text is
-    // restored. We also fire it after send so the box snaps back to its
-    // one-line baseline.
-    //
-    // Two guards matter: (a) if the compose panel is display:none at
-    // measurement time, scrollHeight is 0 and would pin the textarea
-    // to 0px via inline style, overriding the CSS min-height. (b) Even
-    // when visible, scrollHeight can be < the CSS min-height for
-    // empty/one-line content, so we floor to 46 px to match the CSS
-    // baseline rather than letting the inline style shrink below it.
-    var AUTOSIZE_MIN = 46;
-    function autosizeCompose() {
-      if (!composeText) return;
-      if (composeText.offsetParent === null) return; // not rendered
-      composeText.style.height = 'auto';
-      var target = Math.max(AUTOSIZE_MIN, composeText.scrollHeight);
-      composeText.style.height = target + 'px';
-    }
-    if (composeText) {
-      composeText.addEventListener('input', autosizeCompose, { signal: attachSig });
-      autosizeCompose();
     }
 
     if (composeText) {

@@ -63,6 +63,7 @@ type HubFrame =
 const REQUEST_TIMEOUT_MS = 10_000;
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
 
 // Single source of truth for the plugin version. Consumed by both the
 // MCP `Server({ version })` declaration below AND the register frame
@@ -151,7 +152,7 @@ store-and-forward, NO retry, and NO offline delivery of any kind.
 Always include reply_to when responding to a specific message.
 The from field on all messages is your full session:user@host identity, set by the hub.`;
 
-// ── Exported helpers (testable) ───────────────────────────────────────────
+// ── Exported stateless helpers (testable) ────────────────────────────────
 
 /**
  * Inspect an MCP client's advertised capabilities and decide whether the
@@ -216,61 +217,6 @@ export function createChannelNotification(message: InboundMessageFrame): {
   };
 }
 
-export function mapToolToFrame(
-  toolName: string,
-  args: Record<string, string>,
-): Record<string, unknown> | null {
-  switch (toolName) {
-    case "register":
-      return {
-        action: "register",
-        name: args.name,
-        channel_capable: channelCapable,
-        plugin_version: PLUGIN_VERSION,
-      };
-    case "send_message":
-      return {
-        action: "send",
-        to: args.to,
-        content: args.content,
-        type: args.reply_to ? "reply" : "message",
-        ...(args.reply_to ? { reply_to: args.reply_to } : {}),
-      };
-    case "broadcast":
-      return { action: "broadcast", content: args.content };
-    case "send_team":
-      return {
-        action: "send_team",
-        team: args.team,
-        content: args.content,
-        type: args.reply_to ? "reply" : "message",
-        ...(args.reply_to ? { reply_to: args.reply_to } : {}),
-      };
-    case "join_team":
-      return { action: "join_team", team: args.team };
-    case "leave_team":
-      return { action: "leave_team", team: args.team };
-    case "list_agents":
-      return { action: "list_agents" };
-    case "list_teams":
-      return { action: "list_teams" };
-    case "ping":
-      return { action: "ping" };
-    case "hub_events": {
-      const sinceMinutes = args.since_minutes ? Number(args.since_minutes) : 60;
-      return {
-        action: "query_events",
-        ...(args.filter ? { event: args.filter } : {}),
-        since: Date.now() - sinceMinutes * 60_000,
-        ...(args.limit ? { limit: Number(args.limit) } : {}),
-        ...(args.agent ? { agent: args.agent } : {}),
-      };
-    }
-    default:
-      return null;
-  }
-}
-
 // ── Logging ───────────────────────────────────────────────────────────────
 
 function log(msg: string): void {
@@ -309,271 +255,6 @@ function deleteSessionState(): void {
   } catch {
     // ignore — file may not exist
   }
-}
-
-// ── WebSocket client state ────────────────────────────────────────────────
-
-let ws: WebSocket | null = null;
-let storedName = "";
-let registeredName = "";
-// When auto-register had to fall back to a -N suffix, hold the original
-// (pre-suffix) name here so the first claude-net tool call can nudge the
-// LLM to ask the user for a nicer name. Cleared after one nudge or after
-// a manual register() call.
-let hubWsUrl = "";
-let reconnectDelay = RECONNECT_INITIAL_MS;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let mcpServer: Server | null = null;
-
-// ── MCP channel capability detection ─────────────────────────────────────
-//
-// `channelCapable` reflects whether Claude Code advertises the
-// `experimental.claude/channel` capability. Populated once after the MCP
-// `initialize` handshake (via `oninitialized`) and never re-evaluated.
-// `mcpInitialized` flips true when that callback fires; `maybeSendRegister`
-// gates the register frame on BOTH `mcpInitialized` AND an open WS so we
-// never report a stale `channel_capable: false` due to a race.
-let channelCapable = false;
-let mcpInitialized = false;
-
-// ── One-shot nudge queue ─────────────────────────────────────────────────
-//
-// Various subsystems queue text nudges (rename suggestion, channels-off
-// warning, upgrade hint) to be surfaced on the NEXT tool result. Each
-// entry fires exactly once and is removed after emission. An optional
-// `guard` defers emission until a condition is met (e.g., rename nudge
-// waits for registeredName to be set).
-
-interface PendingNudge {
-  text: string;
-  guard?: () => boolean;
-}
-
-export const pendingNudges: PendingNudge[] = [];
-
-const pendingRequests = new Map<
-  string,
-  {
-    resolve: (data: unknown) => void;
-    reject: (err: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }
->();
-
-function isConnected(): boolean {
-  return ws !== null && ws.readyState === WebSocket.OPEN;
-}
-
-function emitSystemNotification(content: string): void {
-  if (!mcpServer) return;
-  mcpServer
-    .notification({
-      method: "notifications/claude/channel",
-      params: {
-        content,
-        meta: {
-          from: "system@claude-net",
-          type: "message",
-          message_id: crypto.randomUUID(),
-        },
-      },
-    })
-    .catch((err: unknown) => log(`Failed to emit system notification: ${err}`));
-}
-
-function request(frame: Record<string, unknown>): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    if (!isConnected()) {
-      reject(new Error("Not connected to hub"));
-      return;
-    }
-
-    const requestId = crypto.randomUUID();
-    const timer = setTimeout(() => {
-      pendingRequests.delete(requestId);
-      reject(new Error("Request timed out after 10 seconds"));
-    }, REQUEST_TIMEOUT_MS);
-
-    pendingRequests.set(requestId, { resolve, reject, timer });
-    // biome-ignore lint/style/noNonNullAssertion: ws is checked by isConnected() above
-    ws!.send(JSON.stringify({ ...frame, requestId }));
-  });
-}
-
-function handleHubFrame(raw: string): void {
-  let frame: HubFrame;
-  try {
-    frame = JSON.parse(raw) as HubFrame;
-  } catch {
-    log(`Invalid JSON from hub: ${raw}`);
-    return;
-  }
-
-  switch (frame.event) {
-    case "response": {
-      const pending = pendingRequests.get(frame.requestId);
-      if (pending) {
-        clearTimeout(pending.timer);
-        pendingRequests.delete(frame.requestId);
-        if (frame.ok) {
-          pending.resolve(frame.data);
-        } else {
-          pending.reject(new Error(frame.error ?? "Unknown error"));
-        }
-      }
-      break;
-    }
-    case "message": {
-      const notification = createChannelNotification(frame);
-      if (mcpServer) {
-        mcpServer
-          .notification(notification)
-          .catch((err: unknown) => log(`Failed to emit notification: ${err}`));
-      }
-      break;
-    }
-    case "registered":
-      log(`Registered as ${frame.full_name}`);
-      break;
-    case "error":
-      log(`Hub error: ${frame.message}`);
-      break;
-  }
-}
-
-const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
-
-async function autoRegisterWithRetry(baseName: string): Promise<void> {
-  for (let attempt = 0; attempt < MAX_AUTO_REGISTER_ATTEMPTS; attempt++) {
-    const candidate =
-      attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
-    try {
-      const data = (await request({
-        action: "register",
-        name: candidate,
-        channel_capable: channelCapable,
-        plugin_version: PLUGIN_VERSION,
-      })) as { upgrade_hint?: string } | undefined;
-      // The hub returns `upgrade_hint` in the register response
-      // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
-      // Store it for one-shot surfacing on the next tool result.
-      if (data && typeof data.upgrade_hint === "string") {
-        pendingNudges.push({ text: data.upgrade_hint });
-      }
-      storedName = candidate;
-      registeredName = candidate;
-      if (attempt > 0) {
-        pendingNudges.push({
-          text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
-          guard: () => !!registeredName,
-        });
-      }
-      log(
-        attempt === 0
-          ? `Auto-registered as ${candidate}`
-          : `Auto-registered as ${candidate} (base "${baseName}" was taken)`,
-      );
-      writeSessionState({
-        name: candidate,
-        status: "online",
-        hub: hubWsUrl,
-        cwd: process.cwd(),
-      });
-      request({ action: "ping" }).catch(() => {});
-      return;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const isCollision = /already registered/i.test(message);
-      if (!isCollision || attempt === MAX_AUTO_REGISTER_ATTEMPTS - 1) {
-        registeredName = "";
-        log(
-          `Auto-registration failed after ${attempt + 1} attempt(s): ${message}`,
-        );
-        writeSessionState({
-          name: "",
-          status: "error",
-          error: message,
-          hub: hubWsUrl,
-          cwd: process.cwd(),
-        });
-        emitSystemNotification(
-          `claude-net: could not auto-register (tried ${candidate} and earlier suffixes; last error: ${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools.`,
-        );
-        return;
-      }
-      log(`Name "${candidate}" taken; trying next suffix`);
-    }
-  }
-}
-
-/**
- * Send the initial auto-register frame iff BOTH preconditions hold:
- *   (a) MCP `initialize` has completed, so `channelCapable` is the real
- *       value rather than the `false` default.
- *   (b) The hub WebSocket is open, so the frame can actually be sent.
- *
- * Called by both the WS `open` handler and the MCP `oninitialized`
- * callback. Whichever fires second triggers the register. If the WS
- * drops between the two events we just wait for the reconnect `open`
- * to call us again — `mcpInitialized` stays true across reconnects.
- */
-function maybeSendRegister(): void {
-  if (!mcpInitialized) return;
-  if (!isConnected()) return;
-  if (!storedName) return;
-  autoRegisterWithRetry(storedName).catch(() => {
-    // Already handled (notification + state write) inside the helper.
-  });
-}
-
-function connectWebSocket(): void {
-  if (!hubWsUrl) return;
-
-  log(`Connecting to ${hubWsUrl}`);
-  ws = new WebSocket(hubWsUrl);
-
-  ws.on("open", () => {
-    log("Connected to hub");
-    reconnectDelay = RECONNECT_INITIAL_MS;
-
-    // Defer register until MCP `initialize` has completed — otherwise
-    // `channel_capable` on the wire would be the `false` default and
-    // the hub would store a permanently-stale value for this agent.
-    maybeSendRegister();
-  });
-
-  ws.on("message", (data: WebSocket.Data) => {
-    handleHubFrame(data.toString());
-  });
-
-  ws.on("close", () => {
-    log("Disconnected from hub");
-    ws = null;
-    if (registeredName) {
-      writeSessionState({
-        name: registeredName,
-        status: "disconnected",
-        hub: hubWsUrl,
-        cwd: process.cwd(),
-      });
-    }
-    scheduleReconnect();
-  });
-
-  ws.on("error", (err: Error) => {
-    log(`WebSocket error: ${err.message}`);
-  });
-}
-
-function scheduleReconnect(): void {
-  if (reconnectTimer) return;
-
-  log(`Reconnecting in ${reconnectDelay}ms`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectWebSocket();
-    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-  }, reconnectDelay);
 }
 
 // ── Tool definitions ──────────────────────────────────────────────────────
@@ -737,7 +418,26 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
-// ── Tool dispatch ─────────────────────────────────────────────────────────
+// ── Plugin class ─────────────────────────────────────────────────────────
+//
+// All mutable runtime state lives on an instance of this class. Keeping
+// state on a single object instead of module-scope `let`s means
+// subsystems (connection, identity, MCP lifecycle, nudge queue) can be
+// reasoned about together, tests can set state explicitly without
+// backdoor exports, and previously-hidden dependencies (e.g.
+// `mapToolToFrame` reading `channelCapable`) become explicit
+// `this.x` references.
+
+interface PendingNudge {
+  text: string;
+  guard?: () => boolean;
+}
+
+interface PendingRequest {
+  resolve: (data: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 function notConnectedError(reason: string) {
   return {
@@ -752,189 +452,536 @@ function toolResult(data: unknown) {
   };
 }
 
-/**
- * Drain all ready nudges into a tool result's content array. Entries
- * whose `guard` returns false are left in the queue; entries with no
- * guard or a truthy guard are appended and removed.
- */
-export function drainNudges<
-  T extends { content: { type: "text"; text: string }[] },
->(result: T): T {
-  const kept: PendingNudge[] = [];
-  for (const nudge of pendingNudges) {
-    if (nudge.guard && !nudge.guard()) {
-      kept.push(nudge);
-    } else {
-      result.content.push({ type: "text", text: nudge.text });
+export class Plugin {
+  // ── Connection ───────────────────────────
+  private ws: WebSocket | null = null;
+  private hubWsUrl = "";
+  private reconnectDelay = RECONNECT_INITIAL_MS;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingRequests = new Map<string, PendingRequest>();
+
+  // ── Identity ─────────────────────────────
+  // storedName is the last-attempted name; registeredName is only set
+  // once the hub confirms a successful register. Tests read
+  // registeredName through the guarded nudge queue.
+  private storedName = "";
+  registeredName = "";
+
+  // ── MCP lifecycle ────────────────────────
+  // channelCapable is public so tests can pin it and mapToolToFrame
+  // can reference it without a hidden module-scope read.
+  private mcpServer: Server | null = null;
+  private mcpInitialized = false;
+  channelCapable = false;
+
+  // ── One-shot nudge queue ─────────────────
+  // Public & readonly-as-a-reference so tests and external callers can
+  // push() into it but not reassign. The array is drained by
+  // drainNudges() on every tool result.
+  readonly pendingNudges: PendingNudge[] = [];
+
+  constructor(private readonly hubEnvUrl: string | undefined) {}
+
+  // ── Stateless-on-instance helpers ────────
+
+  private isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Map an MCP tool call to the WebSocket frame the hub expects. Reads
+   * this.channelCapable explicitly rather than through a hidden
+   * module-scope closure — previously `mapToolToFrame` looked pure
+   * but silently depended on the initialize handshake having run.
+   */
+  mapToolToFrame(
+    toolName: string,
+    args: Record<string, string>,
+  ): Record<string, unknown> | null {
+    switch (toolName) {
+      case "register":
+        return {
+          action: "register",
+          name: args.name,
+          channel_capable: this.channelCapable,
+          plugin_version: PLUGIN_VERSION,
+        };
+      case "send_message":
+        return {
+          action: "send",
+          to: args.to,
+          content: args.content,
+          type: args.reply_to ? "reply" : "message",
+          ...(args.reply_to ? { reply_to: args.reply_to } : {}),
+        };
+      case "broadcast":
+        return { action: "broadcast", content: args.content };
+      case "send_team":
+        return {
+          action: "send_team",
+          team: args.team,
+          content: args.content,
+          type: args.reply_to ? "reply" : "message",
+          ...(args.reply_to ? { reply_to: args.reply_to } : {}),
+        };
+      case "join_team":
+        return { action: "join_team", team: args.team };
+      case "leave_team":
+        return { action: "leave_team", team: args.team };
+      case "list_agents":
+        return { action: "list_agents" };
+      case "list_teams":
+        return { action: "list_teams" };
+      case "ping":
+        return { action: "ping" };
+      case "hub_events": {
+        const sinceMinutes = args.since_minutes
+          ? Number(args.since_minutes)
+          : 60;
+        return {
+          action: "query_events",
+          ...(args.filter ? { event: args.filter } : {}),
+          since: Date.now() - sinceMinutes * 60_000,
+          ...(args.limit ? { limit: Number(args.limit) } : {}),
+          ...(args.agent ? { agent: args.agent } : {}),
+        };
+      }
+      default:
+        return null;
     }
   }
-  pendingNudges.length = 0;
-  pendingNudges.push(...kept);
-  return result;
-}
 
-async function handleToolCall(
-  name: string,
-  args: Record<string, string>,
-): Promise<{
-  isError?: boolean;
-  content: { type: "text"; text: string }[];
-}> {
-  // whoami is handled locally — no hub round-trip
-  if (name === "whoami") {
-    if (!registeredName) {
+  /**
+   * Drain all ready nudges into a tool result's content array. Entries
+   * whose `guard` returns false are left in the queue; entries with no
+   * guard or a truthy guard are appended and removed.
+   */
+  drainNudges<T extends { content: { type: "text"; text: string }[] }>(
+    result: T,
+  ): T {
+    const kept: PendingNudge[] = [];
+    for (const nudge of this.pendingNudges) {
+      if (nudge.guard && !nudge.guard()) {
+        kept.push(nudge);
+      } else {
+        result.content.push({ type: "text", text: nudge.text });
+      }
+    }
+    this.pendingNudges.length = 0;
+    this.pendingNudges.push(...kept);
+    return result;
+  }
+
+  // ── Inbound MCP tool calls ───────────────
+
+  async handleToolCall(
+    name: string,
+    args: Record<string, string>,
+  ): Promise<{
+    isError?: boolean;
+    content: { type: "text"; text: string }[];
+  }> {
+    // whoami is handled locally — no hub round-trip
+    if (name === "whoami") {
+      if (!this.registeredName) {
+        return notConnectedError(
+          `Not registered. The default name "${this.storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
+        );
+      }
+      return this.drainNudges(
+        toolResult({
+          name: this.registeredName,
+          channel_capable: this.channelCapable,
+        }),
+      );
+    }
+
+    if (!this.hubWsUrl) {
       return notConnectedError(
-        `Not registered. The default name "${storedName}" is taken by another session. Use AskUserQuestion to ask which name to register as — suggest the session name as the first option, and a free-text "Type your own" as the second.`,
+        "Not connected — CLAUDE_NET_HUB environment variable not set.",
       );
     }
-    return drainNudges(
-      toolResult({ name: registeredName, channel_capable: channelCapable }),
-    );
-  }
 
-  if (!hubWsUrl) {
-    return notConnectedError(
-      "Not connected — CLAUDE_NET_HUB environment variable not set.",
-    );
-  }
-
-  if (!isConnected()) {
-    return notConnectedError(
-      "Not connected to hub. Claude Code will auto-connect on next restart, or use register tool.",
-    );
-  }
-
-  // Block messaging tools when not registered — force the identity flow
-  if (name !== "register" && !registeredName) {
-    return notConnectedError(
-      "Not registered — call whoami first, then use AskUserQuestion to let the user pick a name.",
-    );
-  }
-
-  // Auto-expand plain register names to session:user@host format
-  const effectiveArgs = { ...args };
-  if (name === "register" && effectiveArgs.name) {
-    const n = effectiveArgs.name;
-    if (!n.includes(":") && !n.includes("@")) {
-      const user = process.env.USER || os.userInfo().username;
-      const host = os.hostname();
-      effectiveArgs.name = `${n}:${user}@${host}`;
+    if (!this.isConnected()) {
+      return notConnectedError(
+        "Not connected to hub. Claude Code will auto-connect on next restart, or use register tool.",
+      );
     }
-  }
 
-  const frame = mapToolToFrame(name, effectiveArgs);
-  if (!frame) {
-    return notConnectedError(`Unknown tool: ${name}`);
-  }
+    // Block messaging tools when not registered — force the identity flow
+    if (name !== "register" && !this.registeredName) {
+      return notConnectedError(
+        "Not registered — call whoami first, then use AskUserQuestion to let the user pick a name.",
+      );
+    }
 
-  try {
-    const data = await request(frame);
-
-    // Update stored+registered name on successful register.
-    // A manual register cancels any pending rename nudge — the user has
-    // already chosen a name, so we don't want to prompt them again.
+    // Auto-expand plain register names to session:user@host format
+    const effectiveArgs = { ...args };
     if (name === "register" && effectiveArgs.name) {
-      storedName = effectiveArgs.name;
-      registeredName = effectiveArgs.name;
-      // Clear any pending rename nudge — user explicitly chose a name.
-      const renameIdx = pendingNudges.findIndex(
-        (n) => n.guard && n.text.startsWith("Rename suggestion:"),
+      const n = effectiveArgs.name;
+      if (!n.includes(":") && !n.includes("@")) {
+        const user = process.env.USER || os.userInfo().username;
+        const host = os.hostname();
+        effectiveArgs.name = `${n}:${user}@${host}`;
+      }
+    }
+
+    const frame = this.mapToolToFrame(name, effectiveArgs);
+    if (!frame) {
+      return notConnectedError(`Unknown tool: ${name}`);
+    }
+
+    try {
+      const data = await this.request(frame);
+
+      // Update stored+registered name on successful register.
+      // A manual register cancels any pending rename nudge — the user has
+      // already chosen a name, so we don't want to prompt them again.
+      if (name === "register" && effectiveArgs.name) {
+        this.storedName = effectiveArgs.name;
+        this.registeredName = effectiveArgs.name;
+        // Clear any pending rename nudge — user explicitly chose a name.
+        const renameIdx = this.pendingNudges.findIndex(
+          (n) => n.guard && n.text.startsWith("Rename suggestion:"),
+        );
+        if (renameIdx !== -1) this.pendingNudges.splice(renameIdx, 1);
+        writeSessionState({
+          name: effectiveArgs.name,
+          status: "online",
+          hub: this.hubWsUrl,
+          cwd: process.cwd(),
+        });
+      }
+
+      return this.drainNudges(toolResult(data));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return notConnectedError(message);
+    }
+  }
+
+  // ── Outbound WS requests / hub frame dispatch ────
+
+  private emitSystemNotification(content: string): void {
+    if (!this.mcpServer) return;
+    this.mcpServer
+      .notification({
+        method: "notifications/claude/channel",
+        params: {
+          content,
+          meta: {
+            from: "system@claude-net",
+            type: "message",
+            message_id: crypto.randomUUID(),
+          },
+        },
+      })
+      .catch((err: unknown) =>
+        log(`Failed to emit system notification: ${err}`),
       );
-      if (renameIdx !== -1) pendingNudges.splice(renameIdx, 1);
-      writeSessionState({
-        name: effectiveArgs.name,
-        status: "online",
-        hub: hubWsUrl,
-        cwd: process.cwd(),
-      });
+  }
+
+  private request(frame: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.isConnected()) {
+        reject(new Error("Not connected to hub"));
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error("Request timed out after 10 seconds"));
+      }, REQUEST_TIMEOUT_MS);
+
+      this.pendingRequests.set(requestId, { resolve, reject, timer });
+      // biome-ignore lint/style/noNonNullAssertion: ws is checked by isConnected() above
+      this.ws!.send(JSON.stringify({ ...frame, requestId }));
+    });
+  }
+
+  private handleHubFrame(raw: string): void {
+    let frame: HubFrame;
+    try {
+      frame = JSON.parse(raw) as HubFrame;
+    } catch {
+      log(`Invalid JSON from hub: ${raw}`);
+      return;
     }
 
-    return drainNudges(toolResult(data));
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return notConnectedError(message);
+    switch (frame.event) {
+      case "response": {
+        const pending = this.pendingRequests.get(frame.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingRequests.delete(frame.requestId);
+          if (frame.ok) {
+            pending.resolve(frame.data);
+          } else {
+            pending.reject(new Error(frame.error ?? "Unknown error"));
+          }
+        }
+        break;
+      }
+      case "message": {
+        const notification = createChannelNotification(frame);
+        if (this.mcpServer) {
+          this.mcpServer
+            .notification(notification)
+            .catch((err: unknown) =>
+              log(`Failed to emit notification: ${err}`),
+            );
+        }
+        break;
+      }
+      case "registered":
+        log(`Registered as ${frame.full_name}`);
+        break;
+      case "error":
+        log(`Hub error: ${frame.message}`);
+        break;
+    }
   }
-}
 
-// ── Main ──────────────────────────────────────────────────────────────────
+  private async autoRegisterWithRetry(baseName: string): Promise<void> {
+    for (let attempt = 0; attempt < MAX_AUTO_REGISTER_ATTEMPTS; attempt++) {
+      const candidate =
+        attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
+      try {
+        const data = (await this.request({
+          action: "register",
+          name: candidate,
+          channel_capable: this.channelCapable,
+          plugin_version: PLUGIN_VERSION,
+        })) as { upgrade_hint?: string } | undefined;
+        // The hub returns `upgrade_hint` in the register response
+        // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
+        // Store it for one-shot surfacing on the next tool result.
+        if (data && typeof data.upgrade_hint === "string") {
+          this.pendingNudges.push({ text: data.upgrade_hint });
+        }
+        this.storedName = candidate;
+        this.registeredName = candidate;
+        if (attempt > 0) {
+          this.pendingNudges.push({
+            text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
+            guard: () => !!this.registeredName,
+          });
+        }
+        log(
+          attempt === 0
+            ? `Auto-registered as ${candidate}`
+            : `Auto-registered as ${candidate} (base "${baseName}" was taken)`,
+        );
+        writeSessionState({
+          name: candidate,
+          status: "online",
+          hub: this.hubWsUrl,
+          cwd: process.cwd(),
+        });
+        this.request({ action: "ping" }).catch(() => {});
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isCollision = /already registered/i.test(message);
+        if (!isCollision || attempt === MAX_AUTO_REGISTER_ATTEMPTS - 1) {
+          this.registeredName = "";
+          log(
+            `Auto-registration failed after ${attempt + 1} attempt(s): ${message}`,
+          );
+          writeSessionState({
+            name: "",
+            status: "error",
+            error: message,
+            hub: this.hubWsUrl,
+            cwd: process.cwd(),
+          });
+          this.emitSystemNotification(
+            `claude-net: could not auto-register (tried ${candidate} and earlier suffixes; last error: ${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools.`,
+          );
+          return;
+        }
+        log(`Name "${candidate}" taken; trying next suffix`);
+      }
+    }
+  }
 
-async function main(): Promise<void> {
-  const hubUrl = process.env.CLAUDE_NET_HUB;
+  /**
+   * Send the initial auto-register frame iff BOTH preconditions hold:
+   *   (a) MCP `initialize` has completed, so `channelCapable` is the real
+   *       value rather than the `false` default.
+   *   (b) The hub WebSocket is open, so the frame can actually be sent.
+   *
+   * Called by both the WS `open` handler and the MCP `oninitialized`
+   * callback. Whichever fires second triggers the register. If the WS
+   * drops between the two events we just wait for the reconnect `open`
+   * to call us again — `mcpInitialized` stays true across reconnects.
+   */
+  private maybeSendRegister(): void {
+    if (!this.mcpInitialized) return;
+    if (!this.isConnected()) return;
+    if (!this.storedName) return;
+    this.autoRegisterWithRetry(this.storedName).catch(() => {
+      // Already handled (notification + state write) inside the helper.
+    });
+  }
 
-  // Create MCP server
-  mcpServer = new Server(
-    { name: "claude-net", version: PLUGIN_VERSION },
-    {
-      capabilities: {
-        experimental: { "claude/channel": {} },
-        tools: {},
+  private connectWebSocket(): void {
+    if (!this.hubWsUrl) return;
+
+    log(`Connecting to ${this.hubWsUrl}`);
+    this.ws = new WebSocket(this.hubWsUrl);
+
+    this.ws.on("open", () => {
+      log("Connected to hub");
+      this.reconnectDelay = RECONNECT_INITIAL_MS;
+
+      // Defer register until MCP `initialize` has completed — otherwise
+      // `channel_capable` on the wire would be the `false` default and
+      // the hub would store a permanently-stale value for this agent.
+      this.maybeSendRegister();
+    });
+
+    this.ws.on("message", (data: WebSocket.Data) => {
+      this.handleHubFrame(data.toString());
+    });
+
+    this.ws.on("close", () => {
+      log("Disconnected from hub");
+      this.ws = null;
+      if (this.registeredName) {
+        writeSessionState({
+          name: this.registeredName,
+          status: "disconnected",
+          hub: this.hubWsUrl,
+          cwd: process.cwd(),
+        });
+      }
+      this.scheduleReconnect();
+    });
+
+    this.ws.on("error", (err: Error) => {
+      log(`WebSocket error: ${err.message}`);
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+
+    log(`Reconnecting in ${this.reconnectDelay}ms`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connectWebSocket();
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+    }, this.reconnectDelay);
+  }
+
+  // ── Lifecycle ────────────────────────────
+
+  /**
+   * Create the MCP server, wire handlers, connect the stdio transport,
+   * and if CLAUDE_NET_HUB was provided, open the hub WebSocket. The
+   * register frame is deferred until BOTH the MCP initialize handshake
+   * has completed AND the WebSocket is open (see maybeSendRegister).
+   */
+  async start(): Promise<void> {
+    this.mcpServer = new Server(
+      { name: "claude-net", version: PLUGIN_VERSION },
+      {
+        capabilities: {
+          experimental: { "claude/channel": {} },
+          tools: {},
+        },
+        instructions: INSTRUCTIONS,
       },
-      instructions: INSTRUCTIONS,
-    },
-  );
+    );
 
-  // Register tool list handler
-  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_DEFINITIONS,
-  }));
+    this.mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: TOOL_DEFINITIONS,
+    }));
 
-  // Register tool call handler
-  mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: args } = req.params;
-    return handleToolCall(name, (args ?? {}) as Record<string, string>);
-  });
+    this.mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
+      const { name, arguments: args } = req.params;
+      return this.handleToolCall(name, (args ?? {}) as Record<string, string>);
+    });
 
-  // Wire the initialize-complete hook BEFORE connecting the
-  // transport. Once `initialize` is exchanged the MCP SDK invokes
-  // `oninitialized` synchronously; attaching after `connect` would
-  // race the handshake and `getClientCapabilities()` could return
-  // undefined on a fast client.
-  mcpServer.oninitialized = () => {
-    const caps = mcpServer?.getClientCapabilities() as
-      | { experimental?: Record<string, unknown> }
-      | undefined;
-    channelCapable = detectChannelCapability(caps);
-    mcpInitialized = true;
+    // Wire the initialize-complete hook BEFORE connecting the transport.
+    // Once `initialize` is exchanged the MCP SDK invokes `oninitialized`
+    // synchronously; attaching after `connect` would race the handshake
+    // and `getClientCapabilities()` could return undefined on a fast
+    // client.
+    this.mcpServer.oninitialized = () => {
+      const caps = this.mcpServer?.getClientCapabilities() as
+        | { experimental?: Record<string, unknown> }
+        | undefined;
+      this.channelCapable = detectChannelCapability(caps);
+      this.mcpInitialized = true;
 
-    if (!channelCapable) {
-      pendingNudges.push({ text: buildChannelsOffNudge() });
+      if (!this.channelCapable) {
+        this.pendingNudges.push({ text: buildChannelsOffNudge() });
+      }
+
+      // Flush any register that was waiting on this callback.
+      this.maybeSendRegister();
+    };
+
+    const transport = new StdioServerTransport();
+    await this.mcpServer.connect(transport);
+
+    if (this.hubEnvUrl) {
+      this.hubWsUrl = `${this.hubEnvUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
+      this.storedName = buildDefaultName();
+      this.connectWebSocket();
+    } else {
+      log("CLAUDE_NET_HUB not set — running without hub connection");
     }
-
-    // Flush any register that was waiting on this callback.
-    maybeSendRegister();
-  };
-
-  // Connect stdio transport
-  const transport = new StdioServerTransport();
-  await mcpServer.connect(transport);
-
-  // Connect to hub if URL is set
-  if (hubUrl) {
-    hubWsUrl = `${hubUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
-    storedName = buildDefaultName();
-    connectWebSocket();
-  } else {
-    log("CLAUDE_NET_HUB not set — running without hub connection");
   }
 
-  // Graceful shutdown
-  const shutdown = () => {
+  shutdown(): void {
     deleteSessionState();
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    if (ws) {
-      ws.removeAllListeners();
-      ws.close();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
     }
-    for (const [, pending] of pendingRequests) {
+    for (const [, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error("Shutting down"));
     }
-    pendingRequests.clear();
+    this.pendingRequests.clear();
     process.exit(0);
-  };
+  }
+}
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+// ── Module-level backward-compat shims ──────────────────────────────────
+// A single module-scope Plugin instance so existing tests that import
+// `mapToolToFrame`, `drainNudges`, `pendingNudges` continue to work
+// without rewriting them. Phase 3 migrates the tests onto explicit
+// `new Plugin(...)` instantiation; these shims then become removable.
+
+const _plugin = new Plugin(process.env.CLAUDE_NET_HUB);
+
+export function mapToolToFrame(
+  toolName: string,
+  args: Record<string, string>,
+): Record<string, unknown> | null {
+  return _plugin.mapToolToFrame(toolName, args);
+}
+
+export function drainNudges<
+  T extends { content: { type: "text"; text: string }[] },
+>(result: T): T {
+  return _plugin.drainNudges(result);
+}
+
+export const pendingNudges = _plugin.pendingNudges;
+
+// ── Entry point ─────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  await _plugin.start();
+  process.on("SIGINT", () => _plugin.shutdown());
+  process.on("SIGTERM", () => _plugin.shutdown());
 }
 
 main().catch((err) => {

@@ -669,46 +669,6 @@ export class MirrorRegistry {
     return { ok: true, seq };
   }
 
-  /** Ask the session's mirror-agent to re-scrape the tmux pane for
-   *  a permission-modal menu and emit it as a fresh notification.
-   *  Used by the dashboard when the banner shows without menu lines
-   *  (agent/hub was restarted mid-prompt, so the original capture
-   *  never fired). Fire-and-forget; the agent replies by queueing a
-   *  normal notification event. */
-  relayCaptureMenu(
-    sid: string,
-    title: string,
-    watcher: string,
-  ): { ok: true } | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
-    if (!entry)
-      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-    if (entry.closedAt)
-      return { ok: false, error: "Session is closed.", status: 409 };
-    if (!entry.agent)
-      return {
-        ok: false,
-        error: "Mirror-agent is not connected for this session.",
-        status: 503,
-      };
-    const frame = {
-      event: "mirror_capture_menu" as const,
-      sid,
-      title,
-      origin: { watcher, ts: Date.now() },
-    };
-    try {
-      entry.agent.ws.send(JSON.stringify(frame));
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Failed to relay to mirror-agent: ${String(err)}`,
-        status: 502,
-      };
-    }
-    return { ok: true };
-  }
-
   /** Relay a "stop" (Esc) signal to the session's agent. Fire and
    *  forget — no correlated ack. */
   relayStop(
@@ -1337,40 +1297,6 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         }
         return { accepted: true };
       })
-
-      /**
-       * POST /:sid/permission-menu/recapture — ask the session's
-       * mirror-agent to re-scrape the modal menu off the tmux pane.
-       * Used when the banner fires but the original capture was never
-       * done (mirror-agent or hub restarted mid-prompt, pre-rollout
-       * client), so the user sees "Claude needs your permission …"
-       * without knowing which digit does what.
-       */
-      .post(
-        "/:sid/permission-menu/recapture",
-        ({ params, body, set, request }) => {
-          const found = mirrorRegistry.getSession(params.sid);
-          if (!found.ok) {
-            set.status = found.status;
-            return { error: found.error };
-          }
-          const payload = body as { title?: string };
-          const title = typeof payload?.title === "string" ? payload.title : "";
-          const watcher = sanitizeWatcher(
-            request.headers.get("user-agent") ?? "unknown",
-          );
-          const result = mirrorRegistry.relayCaptureMenu(
-            params.sid,
-            title,
-            watcher,
-          );
-          if (!result.ok) {
-            set.status = result.status;
-            return { error: result.error };
-          }
-          return { accepted: true };
-        },
-      )
 
       /**
        * GET /:sid/commands — list slash commands available to this

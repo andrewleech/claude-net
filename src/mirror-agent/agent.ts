@@ -738,6 +738,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     let data: {
       event?: string;
       text?: string;
+      title?: string;
       seq?: number;
       requestId?: string;
       origin?: { watcher?: string };
@@ -745,6 +746,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     try {
       data = JSON.parse(raw) as typeof data;
     } catch {
+      return;
+    }
+    if (data.event === "mirror_capture_menu") {
+      const title = typeof data.title === "string" ? data.title : "";
+      void capturePermissionMenu(session, { text: title }).catch(
+        (err: unknown) => {
+          log(
+            `[${session.sid}] recapture permission menu threw: ${String(err)}`,
+          );
+        },
+      );
       return;
     }
     if (data.event === "mirror_inject") {

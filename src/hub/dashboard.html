@@ -4892,10 +4892,30 @@
     var promptTextEl = document.getElementById('mirror-prompt-text');
     var PROMPT_RE = /permission|approval|waiting for input|needs your|allow/i;
 
+    // Menu lines look like "1. Yes" / "2. Yes, and don't ask again" /
+    // "3. No, and tell Claude what to do differently". Absence of any
+    // such line means we've been handed the hook title only (capture
+    // didn't run — agent restarted mid-prompt, or client is
+    // pre-rollout), and we should ask the agent to re-scrape.
+    var MENU_LINE_RE = /^\s*\d\.\s+\S/m;
+    var lastRecaptureAt = 0;
     function showPromptBanner(text) {
       if (!promptBannerEl) return;
       promptTextEl.textContent = text;
       promptBannerEl.removeAttribute('hidden');
+      if (!MENU_LINE_RE.test(text)) {
+        // Throttle to one request per 5s; the agent re-emits a richer
+        // notification which re-enters this function and this time
+        // passes the regex.
+        var now = Date.now();
+        if (now - lastRecaptureAt < 5000) return;
+        lastRecaptureAt = now;
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/permission-menu/recapture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: text }),
+        }).catch(function() { /* best effort */ });
+      }
     }
     function hidePromptBanner() {
       if (!promptBannerEl) return;

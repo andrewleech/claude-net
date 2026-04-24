@@ -382,6 +382,23 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
 
+    // Permission-prompt follow-up: Claude Code's Notification hook only
+    // carries the title ("Claude needs your permission to use Write"),
+    // not the numbered menu options. After a beat, scrape them off the
+    // tmux pane and emit a second notification so the dashboard banner
+    // actually tells the user which digit does what.
+    if (
+      ingested.frame.kind === "notification" &&
+      session.tmuxPane &&
+      isPermissionNotification(ingested.frame.payload)
+    ) {
+      void capturePermissionMenu(session, ingested.frame.payload).catch(
+        (err: unknown) => {
+          log(`[${session.sid}] capturePermissionMenu threw: ${String(err)}`);
+        },
+      );
+    }
+
     // Drive the thinking indicator purely off hook transitions.
     if (ingested.frame.kind === "user_prompt") {
       onTurnStart(session);
@@ -919,6 +936,63 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     }
     if (matches.length === 0) return;
     emitAuditEvent(session, `tmux pane reported: ${matches.join(" · ")}`);
+  }
+
+  function isPermissionNotification(payload: unknown): boolean {
+    if (!payload || typeof payload !== "object") return false;
+    const text =
+      typeof (payload as { text?: unknown }).text === "string"
+        ? (payload as { text: string }).text
+        : "";
+    if (!text) return false;
+    return /permission|approval|allow|needs your/i.test(text);
+  }
+
+  /**
+   * Claude Code's Notification hook fires BEFORE the modal text is
+   * drawn and only carries the title, so the numbered menu options
+   * (1. Yes / 2. Yes, always / 3. No …) never reach the dashboard.
+   * After a short delay we capture the pane, extract any numbered
+   * menu rows, and emit a second notification carrying them. The
+   * dashboard's banner picks up the later (richer) notification
+   * because it still matches the permission regex.
+   */
+  async function capturePermissionMenu(
+    session: SessionState,
+    payload: unknown,
+  ): Promise<void> {
+    if (!session.tmuxPane) return;
+    const original =
+      payload && typeof payload === "object" && "text" in payload
+        ? String((payload as { text?: unknown }).text ?? "")
+        : "";
+    await sleep(600);
+    const cap = await injector.capturePane(session.tmuxPane, 40);
+    if (!cap.ok) return;
+    const boxRx = /[│┃|┆╎╌╍┄┅─━╭╮╰╯╷╵╴╶❯>]/g;
+    const menuRx = /^\s*(\d)\.\s+(.+?)\s*$/;
+    const menu: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of cap.output.split("\n")) {
+      const cleaned = raw.replace(boxRx, "").trimEnd();
+      const m = cleaned.match(menuRx);
+      if (!m?.[1] || !m[2]) continue;
+      const key = `${m[1]}|${m[2].trim()}`;
+      if (seen.has(key)) continue; // modal sometimes renders twice
+      seen.add(key);
+      menu.push(`${m[1]}. ${m[2].trim()}`);
+    }
+    if (menu.length === 0) return;
+    const augmented = `${original}\n\n${menu.join("\n")}`;
+    const frame: MirrorEventFrame = {
+      action: "mirror_event",
+      sid: session.sid,
+      uuid: crypto.randomUUID(),
+      kind: "notification",
+      ts: Date.now(),
+      payload: { kind: "notification", text: augmented },
+    };
+    queueEvent(session, frame);
   }
 
   // ── Thinking indicator ──────────────────────────────────────────────

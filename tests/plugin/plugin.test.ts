@@ -1,23 +1,29 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
   INSTRUCTIONS,
   PLUGIN_VERSION,
+  Plugin,
   TOOL_DEFINITIONS,
   buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
   detectChannelCapability,
-  drainNudges,
-  mapToolToFrame,
-  pendingNudges,
   withSessionSuffix,
   writeSessionState,
 } from "@/plugin/plugin";
 
 describe("plugin helpers", () => {
+  // Fresh Plugin per test so channelCapable / pendingNudges /
+  // registeredName can't leak between cases. `undefined` hubEnvUrl
+  // skips WS connection — these unit tests never want one.
+  let plugin: Plugin;
+  beforeEach(() => {
+    plugin = new Plugin(undefined);
+  });
+
   describe("buildDefaultName", () => {
     test("returns session:user@hostname format", () => {
       const session = path.basename(process.cwd());
@@ -123,7 +129,7 @@ describe("plugin helpers", () => {
 
   describe("mapToolToFrame", () => {
     test("register: maps to register action", () => {
-      const frame = mapToolToFrame("register", { name: "myagent" });
+      const frame = plugin.mapToolToFrame("register", { name: "myagent" });
       // channelCapable is module-local state in plugin.ts; mapToolToFrame
       // mirrors it into the frame so manual register() calls carry the
       // same capability flag as the auto-register. The exact value is
@@ -139,7 +145,7 @@ describe("plugin helpers", () => {
     });
 
     test("register: plugin_version is non-empty (FR8)", () => {
-      const frame = mapToolToFrame("register", { name: "myagent" }) as {
+      const frame = plugin.mapToolToFrame("register", { name: "myagent" }) as {
         plugin_version: string;
       };
       // The MCP `Server({ version })` declaration and the register-frame
@@ -150,7 +156,7 @@ describe("plugin helpers", () => {
     });
 
     test("send_message: maps to send action with type message", () => {
-      const frame = mapToolToFrame("send_message", {
+      const frame = plugin.mapToolToFrame("send_message", {
         to: "bob@host",
         content: "hello",
       });
@@ -163,7 +169,7 @@ describe("plugin helpers", () => {
     });
 
     test("send_message: maps to send action with type reply when reply_to provided", () => {
-      const frame = mapToolToFrame("send_message", {
+      const frame = plugin.mapToolToFrame("send_message", {
         to: "bob@host",
         content: "response",
         reply_to: "msg-123",
@@ -178,12 +184,14 @@ describe("plugin helpers", () => {
     });
 
     test("broadcast: maps to broadcast action", () => {
-      const frame = mapToolToFrame("broadcast", { content: "announcement" });
+      const frame = plugin.mapToolToFrame("broadcast", {
+        content: "announcement",
+      });
       expect(frame).toEqual({ action: "broadcast", content: "announcement" });
     });
 
     test("send_team: maps to send_team action with type message", () => {
-      const frame = mapToolToFrame("send_team", {
+      const frame = plugin.mapToolToFrame("send_team", {
         team: "backend",
         content: "heads up",
       });
@@ -196,7 +204,7 @@ describe("plugin helpers", () => {
     });
 
     test("send_team: maps to send_team action with type reply when reply_to provided", () => {
-      const frame = mapToolToFrame("send_team", {
+      const frame = plugin.mapToolToFrame("send_team", {
         team: "backend",
         content: "noted",
         reply_to: "msg-456",
@@ -211,28 +219,31 @@ describe("plugin helpers", () => {
     });
 
     test("join_team: maps to join_team action", () => {
-      const frame = mapToolToFrame("join_team", { team: "frontend" });
+      const frame = plugin.mapToolToFrame("join_team", { team: "frontend" });
       expect(frame).toEqual({ action: "join_team", team: "frontend" });
     });
 
     test("leave_team: maps to leave_team action", () => {
-      const frame = mapToolToFrame("leave_team", { team: "frontend" });
+      const frame = plugin.mapToolToFrame("leave_team", { team: "frontend" });
       expect(frame).toEqual({ action: "leave_team", team: "frontend" });
     });
 
     test("list_agents: maps to list_agents action", () => {
-      const frame = mapToolToFrame("list_agents", {});
+      const frame = plugin.mapToolToFrame("list_agents", {});
       expect(frame).toEqual({ action: "list_agents" });
     });
 
     test("list_teams: maps to list_teams action", () => {
-      const frame = mapToolToFrame("list_teams", {});
+      const frame = plugin.mapToolToFrame("list_teams", {});
       expect(frame).toEqual({ action: "list_teams" });
     });
 
     test("hub_events: no args produces query_events with default since", () => {
       const before = Date.now() - 60 * 60_000 - 100;
-      const frame = mapToolToFrame("hub_events", {}) as Record<string, unknown>;
+      const frame = plugin.mapToolToFrame("hub_events", {}) as Record<
+        string,
+        unknown
+      >;
       expect(frame).not.toBeNull();
       expect(frame.action).toBe("query_events");
       // since should be approximately now - 60 minutes
@@ -244,7 +255,7 @@ describe("plugin helpers", () => {
     });
 
     test("hub_events: filter sets event field", () => {
-      const frame = mapToolToFrame("hub_events", {
+      const frame = plugin.mapToolToFrame("hub_events", {
         filter: "message",
       }) as Record<string, unknown>;
       expect(frame.action).toBe("query_events");
@@ -253,7 +264,7 @@ describe("plugin helpers", () => {
 
     test("hub_events: since_minutes overrides the default window", () => {
       const before = Date.now() - 5 * 60_000 - 200;
-      const frame = mapToolToFrame("hub_events", {
+      const frame = plugin.mapToolToFrame("hub_events", {
         since_minutes: "5",
       }) as Record<string, unknown>;
       expect(frame.since as number).toBeGreaterThan(before);
@@ -261,7 +272,7 @@ describe("plugin helpers", () => {
     });
 
     test("hub_events: limit and agent are forwarded", () => {
-      const frame = mapToolToFrame("hub_events", {
+      const frame = plugin.mapToolToFrame("hub_events", {
         limit: "50",
         agent: "alice",
       }) as Record<string, unknown>;
@@ -270,7 +281,7 @@ describe("plugin helpers", () => {
     });
 
     test("unknown tool: returns null", () => {
-      const frame = mapToolToFrame("unknown_tool", {});
+      const frame = plugin.mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();
     });
   });
@@ -316,57 +327,57 @@ describe("plugin helpers", () => {
 
   describe("drainNudges (nudge queue)", () => {
     afterEach(() => {
-      pendingNudges.length = 0;
+      plugin.pendingNudges.length = 0;
     });
 
     test("returns unchanged result when queue is empty", () => {
       const result = {
         content: [{ type: "text" as const, text: "original" }],
       };
-      const out = drainNudges(result);
+      const out = plugin.drainNudges(result);
       expect(out.content).toHaveLength(1);
       expect(out.content[0]?.text).toBe("original");
     });
 
     test("appends all queued nudges to result.content", () => {
-      pendingNudges.push({ text: "nudge A" }, { text: "nudge B" });
+      plugin.pendingNudges.push({ text: "nudge A" }, { text: "nudge B" });
       const result = {
         content: [{ type: "text" as const, text: "tool output" }],
       };
-      drainNudges(result);
+      plugin.drainNudges(result);
       expect(result.content).toHaveLength(3);
       expect(result.content[1]?.text).toBe("nudge A");
       expect(result.content[2]?.text).toBe("nudge B");
     });
 
     test("removes consumed nudges — fires exactly once", () => {
-      pendingNudges.push({ text: "one-shot" });
+      plugin.pendingNudges.push({ text: "one-shot" });
       const first = { content: [{ type: "text" as const, text: "r1" }] };
-      drainNudges(first);
-      expect(pendingNudges).toHaveLength(0);
+      plugin.drainNudges(first);
+      expect(plugin.pendingNudges).toHaveLength(0);
 
       const second = { content: [{ type: "text" as const, text: "r2" }] };
-      drainNudges(second);
+      plugin.drainNudges(second);
       expect(second.content).toHaveLength(1);
     });
 
     test("skips nudges whose guard returns false", () => {
       let ready = false;
-      pendingNudges.push({ text: "guarded", guard: () => ready });
-      pendingNudges.push({ text: "unguarded" });
+      plugin.pendingNudges.push({ text: "guarded", guard: () => ready });
+      plugin.pendingNudges.push({ text: "unguarded" });
 
       const first = { content: [{ type: "text" as const, text: "r1" }] };
-      drainNudges(first);
+      plugin.drainNudges(first);
       expect(first.content).toHaveLength(2);
       expect(first.content[1]?.text).toBe("unguarded");
-      expect(pendingNudges).toHaveLength(1);
+      expect(plugin.pendingNudges).toHaveLength(1);
 
       ready = true;
       const second = { content: [{ type: "text" as const, text: "r2" }] };
-      drainNudges(second);
+      plugin.drainNudges(second);
       expect(second.content).toHaveLength(2);
       expect(second.content[1]?.text).toBe("guarded");
-      expect(pendingNudges).toHaveLength(0);
+      expect(plugin.pendingNudges).toHaveLength(0);
     });
   });
 
@@ -519,7 +530,7 @@ describe("plugin helpers", () => {
       // include the flag as a boolean and the default (no init yet)
       // must be `false`. Tests running in isolation never complete an
       // MCP initialize handshake, so the default is the observable.
-      const frame = mapToolToFrame("register", { name: "x" }) as {
+      const frame = plugin.mapToolToFrame("register", { name: "x" }) as {
         action: string;
         channel_capable: unknown;
         plugin_version: unknown;

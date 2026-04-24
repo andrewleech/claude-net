@@ -70,9 +70,9 @@ const RECONNECT_MAX_MS = 30_000;
 // with the hub's `PLUGIN_VERSION_CURRENT` — which is sourced from
 // package.json — since the /plugin.ts bundle is served by the hub.
 // When bumping the version: change package.json AND this constant.
-const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.1.0";
 
-const INSTRUCTIONS = `claude-net agent messaging plugin.
+export const INSTRUCTIONS = `claude-net agent messaging plugin.
 
 Inbound messages from other agents arrive as <channel> tags:
   <channel source="claude-net" from="session:user@host" type="message|reply" message_id="..." reply_to="..." team="...">
@@ -578,7 +578,7 @@ function scheduleReconnect(): void {
 
 // ── Tool definitions ──────────────────────────────────────────────────────
 
-const TOOL_DEFINITIONS = [
+export const TOOL_DEFINITIONS = [
   {
     name: "whoami",
     description:

@@ -3,6 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  INSTRUCTIONS,
+  PLUGIN_VERSION,
+  TOOL_DEFINITIONS,
   buildChannelsOffNudge,
   buildDefaultName,
   createChannelNotification,
@@ -432,6 +435,115 @@ describe("plugin helpers", () => {
       const content = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
       expect(content.status).toBe("disconnected");
       expect(content.name).toBe("agent@host");
+    });
+  });
+
+  // ── Phase 1 baseline for the Plugin class refactor ───────────────
+  // These tests pin behaviour that the class extraction must not
+  // change. They are written against the current module-level code
+  // and will continue to hold after the refactor moves state onto a
+  // Plugin instance. See docs/PLUGIN_REFACTOR_PLAN.md.
+  describe("refactor baseline", () => {
+    test("PLUGIN_VERSION is a non-empty semver-shaped string", () => {
+      expect(typeof PLUGIN_VERSION).toBe("string");
+      expect(PLUGIN_VERSION.length).toBeGreaterThan(0);
+      // Loose semver: at least one dot-separated numeric segment.
+      expect(PLUGIN_VERSION).toMatch(/^\d+(\.\d+)+/);
+    });
+
+    test("INSTRUCTIONS string covers every user-facing feature", () => {
+      // If any of these substrings disappears, the system prompt
+      // stops instructing Claude to call the corresponding tool or
+      // to follow the corresponding convention. The refactor must
+      // preserve the full instruction surface.
+      expect(typeof INSTRUCTIONS).toBe("string");
+      const required = [
+        "send_message",
+        "register",
+        "whoami",
+        "broadcast",
+        "send_team",
+        "join_team",
+        "leave_team",
+        "list_agents",
+        "list_teams",
+        "ping",
+        "hub_events",
+        "install-channels",
+      ];
+      for (const phrase of required) {
+        expect(INSTRUCTIONS).toContain(phrase);
+      }
+    });
+
+    test("TOOL_DEFINITIONS has 11 well-formed entries", () => {
+      expect(Array.isArray(TOOL_DEFINITIONS)).toBe(true);
+      expect(TOOL_DEFINITIONS.length).toBe(11);
+      const names = new Set<string>();
+      for (const tool of TOOL_DEFINITIONS as Array<{
+        name: string;
+        description: string;
+        inputSchema: unknown;
+      }>) {
+        expect(typeof tool.name).toBe("string");
+        expect(tool.name.length).toBeGreaterThan(0);
+        expect(typeof tool.description).toBe("string");
+        expect(tool.description.length).toBeGreaterThan(0);
+        expect(tool.inputSchema).toBeDefined();
+        expect(names.has(tool.name)).toBe(false);
+        names.add(tool.name);
+      }
+      // The canonical set — refactor must not silently drop or
+      // rename any of these.
+      expect([...names].sort()).toEqual(
+        [
+          "broadcast",
+          "hub_events",
+          "join_team",
+          "leave_team",
+          "list_agents",
+          "list_teams",
+          "ping",
+          "register",
+          "send_message",
+          "send_team",
+          "whoami",
+        ].sort(),
+      );
+    });
+
+    test("register frame carries channel_capable drawn from plugin state", () => {
+      // Today this value is a module-level `let channelCapable` read
+      // by closure. After the refactor it will be `this.channelCapable`
+      // on the Plugin instance. Either way, the register frame must
+      // include the flag as a boolean and the default (no init yet)
+      // must be `false`. Tests running in isolation never complete an
+      // MCP initialize handshake, so the default is the observable.
+      const frame = mapToolToFrame("register", { name: "x" }) as {
+        action: string;
+        channel_capable: unknown;
+        plugin_version: unknown;
+      };
+      expect(frame.action).toBe("register");
+      expect(typeof frame.channel_capable).toBe("boolean");
+      expect(frame.channel_capable).toBe(false);
+      expect(frame.plugin_version).toBe(PLUGIN_VERSION);
+    });
+
+    test("pure helpers are stateless (identical output for identical input)", () => {
+      // These top-level helpers are declared stateless by the plan
+      // and must remain top-level exports after the refactor. Calling
+      // each twice with the same input must return identical output.
+      expect(buildDefaultName()).toBe(buildDefaultName());
+      expect(withSessionSuffix("a:b@c", 2)).toBe(withSessionSuffix("a:b@c", 2));
+      expect(buildChannelsOffNudge()).toBe(buildChannelsOffNudge());
+      expect(detectChannelCapability(undefined)).toBe(
+        detectChannelCapability(undefined),
+      );
+      expect(detectChannelCapability({ experimental: {} })).toBe(false);
+      expect(
+        detectChannelCapability({ experimental: { "claude/channel": {} } }),
+      ).toBe(true);
     });
   });
 });

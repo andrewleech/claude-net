@@ -953,35 +953,13 @@ export class Plugin {
   }
 }
 
-// ── Module-level backward-compat shims ──────────────────────────────────
-// A single module-scope Plugin instance so existing tests that import
-// `mapToolToFrame`, `drainNudges`, `pendingNudges` continue to work
-// without rewriting them. Phase 3 migrates the tests onto explicit
-// `new Plugin(...)` instantiation; these shims then become removable.
-
-const _plugin = new Plugin(process.env.CLAUDE_NET_HUB);
-
-export function mapToolToFrame(
-  toolName: string,
-  args: Record<string, string>,
-): Record<string, unknown> | null {
-  return _plugin.mapToolToFrame(toolName, args);
-}
-
-export function drainNudges<
-  T extends { content: { type: "text"; text: string }[] },
->(result: T): T {
-  return _plugin.drainNudges(result);
-}
-
-export const pendingNudges = _plugin.pendingNudges;
-
 // ── Entry point ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  await _plugin.start();
-  process.on("SIGINT", () => _plugin.shutdown());
-  process.on("SIGTERM", () => _plugin.shutdown());
+  const plugin = new Plugin(process.env.CLAUDE_NET_HUB);
+  await plugin.start();
+  process.on("SIGINT", () => plugin.shutdown());
+  process.on("SIGTERM", () => plugin.shutdown());
 }
 
 main().catch((err) => {

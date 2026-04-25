@@ -4,6 +4,7 @@ import type {
   DashboardEvent,
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
+  MirrorHistoryRequestFrame,
   MirrorInjectFrame,
   MirrorListCommandsFrame,
   MirrorPasteFrame,
@@ -91,6 +92,15 @@ interface PendingCommandsList {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingHistoryRequest {
+  resolve: (chunk: {
+    frames: MirrorEventFrame[];
+    exhausted: boolean;
+  }) => void;
+  reject: (error: { status: number; message: string }) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class MirrorRegistry {
   readonly sessions = new Map<string, MirrorSessionEntry>();
   private transcriptRing: number;
@@ -104,6 +114,8 @@ export class MirrorRegistry {
   private pendingPastes = new Map<string, PendingPaste>();
   /** Key: `${sid}:${requestId}` — awaiting MirrorCommandsDoneFrame. */
   private pendingCommandsLists = new Map<string, PendingCommandsList>();
+  /** Key: `${sid}:${requestId}` — awaiting MirrorHistoryChunkFrame. */
+  private pendingHistoryRequests = new Map<string, PendingHistoryRequest>();
 
   constructor(options?: MirrorRegistryOptions) {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
@@ -792,6 +804,118 @@ export class MirrorRegistry {
     }
   }
 
+  /**
+   * Ask the session's mirror-agent to read history from its on-disk JSONL
+   * preceding `beforeUuid` (or from EOF if null). Same request/response
+   * WS pattern as relayPaste / relayListCommands.
+   */
+  relayHistoryRequest(
+    sid: string,
+    beforeUuid: string | null,
+    limit: number,
+    timeoutMs: number,
+  ): Promise<
+    | { ok: true; frames: MirrorEventFrame[]; exhausted: boolean }
+    | { ok: false; error: string; status: number }
+  > {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return Promise.resolve({
+        ok: false,
+        error: `Session '${sid}' not found.`,
+        status: 404,
+      });
+    if (!entry.agent)
+      return Promise.resolve({
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      });
+
+    const requestId = crypto.randomUUID();
+    const key = `${sid}:${requestId}`;
+    const frame: MirrorHistoryRequestFrame = {
+      event: "mirror_history_request",
+      sid,
+      requestId,
+      before_uuid: beforeUuid,
+      limit,
+    };
+
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        this.pendingHistoryRequests.delete(key);
+        resolvePromise({
+          ok: false,
+          error: `Mirror-agent did not respond within ${timeoutMs}ms.`,
+          status: 504,
+        });
+      }, timeoutMs);
+      if (typeof timer === "object" && "unref" in timer) timer.unref();
+
+      this.pendingHistoryRequests.set(key, {
+        resolve: (chunk) => {
+          clearTimeout(timer);
+          this.pendingHistoryRequests.delete(key);
+          resolvePromise({
+            ok: true,
+            frames: chunk.frames,
+            exhausted: chunk.exhausted,
+          });
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.pendingHistoryRequests.delete(key);
+          resolvePromise({ ok: false, error: err.message, status: err.status });
+        },
+        timer,
+      });
+
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: null-checked above
+        entry.agent!.ws.send(JSON.stringify(frame));
+      } catch (err) {
+        const pending = this.pendingHistoryRequests.get(key);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingHistoryRequests.delete(key);
+        }
+        resolvePromise({
+          ok: false,
+          error: `Failed to relay to mirror-agent: ${String(err)}`,
+          status: 502,
+        });
+      }
+    });
+  }
+
+  /** Called from ws-mirror-plugin when the agent sends back a
+   *  MirrorHistoryChunkFrame. */
+  resolveHistoryChunk(
+    sid: string,
+    requestId: string,
+    result: {
+      frames?: MirrorEventFrame[];
+      exhausted?: boolean;
+      error?: string;
+    },
+  ): void {
+    const key = `${sid}:${requestId}`;
+    const pending = this.pendingHistoryRequests.get(key);
+    if (!pending) return;
+    if (result.error && (!result.frames || result.frames.length === 0)) {
+      pending.reject({
+        status: 502,
+        message: result.error,
+      });
+      return;
+    }
+    pending.resolve({
+      frames: Array.isArray(result.frames) ? result.frames : [],
+      exhausted: Boolean(result.exhausted),
+    });
+  }
+
   /** Broadcast an ephemeral thinking-status update to a session's
    *  watchers. Not stored in the transcript; purely live-view signal. */
   broadcastThinking(
@@ -1302,11 +1426,60 @@ export function wsMirrorPlugin(
     message(ws: MirrorWs, rawData: unknown) {
       const meta = connMeta.get(ws.raw);
       if (!meta) return;
-      if (meta.role !== "agent") return;
 
       const data =
         typeof rawData === "string" ? safeJsonParse(rawData) : rawData;
-      if (!data || typeof data !== "object" || !("action" in data)) return;
+      if (!data || typeof data !== "object") return;
+
+      // Watcher (dashboard) inbound: only `request_history` is recognized
+      // today. Reply goes only to this watcher's WS so multiple dashboards
+      // viewing the same session don't get cross-routed history.
+      if (meta.role === "watcher" && "action" in data) {
+        const frame = data as { action: string } & Record<string, unknown>;
+        if (frame.action === "request_history") {
+          const beforeUuid =
+            typeof frame.before_uuid === "string" ? frame.before_uuid : null;
+          const limit =
+            typeof frame.limit === "number" && Number.isFinite(frame.limit)
+              ? Math.max(1, Math.min(1000, Math.floor(frame.limit)))
+              : 200;
+          mirrorRegistry
+            .relayHistoryRequest(meta.sid, beforeUuid, limit, 15_000)
+            .then((res) => {
+              if (res.ok) {
+                ws.send(
+                  JSON.stringify({
+                    event: "mirror:history_chunk",
+                    sid: meta.sid,
+                    frames: res.frames,
+                    exhausted: res.exhausted,
+                  }),
+                );
+              } else {
+                ws.send(
+                  JSON.stringify({
+                    event: "mirror:history_error",
+                    sid: meta.sid,
+                    error: res.error,
+                  }),
+                );
+              }
+            })
+            .catch((err: unknown) => {
+              ws.send(
+                JSON.stringify({
+                  event: "mirror:history_error",
+                  sid: meta.sid,
+                  error: String(err),
+                }),
+              );
+            });
+        }
+        return;
+      }
+
+      if (meta.role !== "agent") return;
+      if (!("action" in data)) return;
 
       const frame = data as { action: string } & Record<string, unknown>;
       if (frame.action === "mirror_event" && frame.sid === meta.sid) {
@@ -1332,6 +1505,19 @@ export function wsMirrorPlugin(
           commands: Array.isArray(frame.commands)
             ? (frame.commands as SlashCommand[])
             : undefined,
+          error: typeof frame.error === "string" ? frame.error : undefined,
+        });
+      } else if (
+        frame.action === "mirror_history_chunk" &&
+        frame.sid === meta.sid &&
+        typeof frame.requestId === "string"
+      ) {
+        mirrorRegistry.resolveHistoryChunk(meta.sid, frame.requestId, {
+          frames: Array.isArray(frame.frames)
+            ? (frame.frames as MirrorEventFrame[])
+            : undefined,
+          exhausted:
+            typeof frame.exhausted === "boolean" ? frame.exhausted : undefined,
           error: typeof frame.error === "string" ? frame.error : undefined,
         });
       } else if (frame.action === "mirror_thinking" && frame.sid === meta.sid) {

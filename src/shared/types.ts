@@ -149,6 +149,21 @@ export interface MirrorCommandsDoneFrame {
 }
 
 /**
+ * Agent → hub reply to a MirrorHistoryRequestFrame. Carries up to `limit`
+ * backfilled frames in chronological order (oldest first). `exhausted`
+ * indicates the agent reached the start of its JSONL before filling the
+ * request, so the dashboard can grey the load-earlier button.
+ */
+export interface MirrorHistoryChunkFrame {
+  action: "mirror_history_chunk";
+  sid: string;
+  requestId: string;
+  frames: MirrorEventFrame[];
+  exhausted: boolean;
+  error?: string;
+}
+
+/**
  * Ephemeral "is Claude currently working" signal from the agent. Not
  * stored in the transcript — broadcast-only to watchers. Derived from
  * the Claude Code hook stream:
@@ -184,7 +199,9 @@ export type PluginFrame =
   | MirrorEventFrame
   | MirrorPasteDoneFrame
   | MirrorCommandsDoneFrame
-  | MirrorThinkingFrame;
+  | MirrorHistoryChunkFrame
+  | MirrorThinkingFrame
+  | MirrorStatuslineFrame;
 
 // ── Hub → Plugin frames (discriminated union on `event`) ──────────────────
 
@@ -289,6 +306,21 @@ export interface MirrorListCommandsFrame {
 }
 
 /**
+ * Hub → agent request for backfilled history older than what the hub's
+ * in-memory ring still has. Agent reads its on-disk JSONL, walking
+ * backward from `before_uuid` (or from EOF if null) to gather up to
+ * `limit` records, then converts them to MirrorEventFrame with
+ * kind="history_text" and replies with MirrorHistoryChunkFrame.
+ */
+export interface MirrorHistoryRequestFrame {
+  event: "mirror_history_request";
+  sid: string;
+  requestId: string;
+  before_uuid: string | null;
+  limit: number;
+}
+
+/**
  * Hub → agent request to send an Escape keypress to the session's
  * pane — mirrors the TUI "Esc to interrupt" shortcut. Fire and
  * forget, no correlated ack.
@@ -313,6 +345,7 @@ export type HubFrame =
   | MirrorInjectFrame
   | MirrorPasteFrame
   | MirrorListCommandsFrame
+  | MirrorHistoryRequestFrame
   | MirrorStopFrame
   | MirrorControlFrame;
 
@@ -554,7 +587,8 @@ export type MirrorEventKind =
   | "tool_call"
   | "tool_result"
   | "notification"
-  | "compact";
+  | "compact"
+  | "history_text";
 
 export type MirrorSessionSource = "startup" | "resume" | "clear" | "compact";
 
@@ -613,6 +647,18 @@ export interface MirrorCompactPayload {
   summary?: string;
 }
 
+/**
+ * Backfilled record from the on-disk JSONL — emitted only when the
+ * dashboard explicitly requests history older than the hub's in-memory
+ * ring. Tool calls/results in the backfilled range collapse to inline
+ * `[tool: name]` / `[result]` placeholders within `text`.
+ */
+export interface MirrorHistoryTextPayload {
+  kind: "history_text";
+  role: "user" | "assistant" | "system";
+  text: string;
+}
+
 export type MirrorEventPayload =
   | MirrorSessionStartPayload
   | MirrorSessionEndPayload
@@ -621,7 +667,8 @@ export type MirrorEventPayload =
   | MirrorToolCallPayload
   | MirrorToolResultPayload
   | MirrorNotificationPayload
-  | MirrorCompactPayload;
+  | MirrorCompactPayload
+  | MirrorHistoryTextPayload;
 
 // ── Mirror data models ────────────────────────────────────────────────────
 

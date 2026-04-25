@@ -703,6 +703,43 @@
     padding: 14px 24px;
   }
   .m-evt-end::before, .m-evt-end::after { display: none; }
+
+  /* History-backfill rows — visually distinct from live transcript so
+     the user can see at a glance which content was loaded after the
+     fact. Slightly dimmed; smaller `history` tag in the meta line. */
+  .m-evt-history { opacity: 0.78; }
+  .m-evt-history pre {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+  .m-evt-history-user .m-label { color: var(--accent); }
+  .m-evt-history-assistant .m-label { color: var(--text-dim); }
+  .m-history-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 4px;
+    font-size: 9px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    border: 1px solid var(--border-dim);
+  }
+  .m-evt-history-divider {
+    text-align: center;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 10px 16px;
+  }
+  .m-evt-history-divider::before,
+  .m-evt-history-divider::after { display: none; }
+
   .m-truncated {
     font-family: var(--font-mono);
     font-size: 9px;
@@ -2060,6 +2097,7 @@
                 data-bs-toggle="collapse" data-bs-target="#mirror-tasks-panel"
                 aria-expanded="false" aria-controls="mirror-tasks-panel"
                 title="Show Claude's task list"></button>
+        <button id="mirror-history-btn" class="btn btn-outline-secondary btn-sm" type="button" title="Load earlier history from the on-disk transcript">︽</button>
         <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
       </div>
     </header>
@@ -3192,6 +3230,15 @@
     var rendered = Object.create(null); // uuid → true
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
+    // Anchor for "load earlier history" requests. Set when the first
+    // frame is rendered (live or prepended); updated to the oldest
+    // prepended uuid each time a chunk is loaded.
+    var firstRenderedUuid = null;
+    var historyExhausted = false;
+    var historyInflight = false;
+    // Marker element separating loaded history from the live transcript.
+    // Inserted lazily when the first chunk is prepended.
+    var historyDivider = null;
 
     // ── Task* tool state (tracks Claude Code's harness task list) ────
     // Mirrors the state that TaskListV2 in the real CLI tracks: id →
@@ -4602,9 +4649,25 @@
 
     // ── Main renderEvent ─────────────────────────────────────────────
 
+    function buildHistoryEl(evt) {
+      var payload = evt.payload || {};
+      var ts = formatTime(new Date(evt.ts).toISOString());
+      var role = payload.role || 'system';
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-history m-evt-history-' + role;
+      el.setAttribute('data-uuid', evt.uuid);
+      el.setAttribute('data-ts', ts);
+      el.innerHTML =
+        '<div class="m-evt-meta"><span class="m-label">' + escapeHtml(role) + '</span> ' + ts +
+        ' <span class="m-history-tag">history</span></div>' +
+        '<pre>' + escapeHtml(payload.text || '') + '</pre>';
+      return el;
+    }
+
     function renderEvent(evt) {
       if (!evt || !evt.uuid || rendered[evt.uuid]) return;
       rendered[evt.uuid] = true;
+      if (firstRenderedUuid === null) firstRenderedUuid = evt.uuid;
 
       var kind = evt.kind;
       var payload = evt.payload || {};
@@ -4692,6 +4755,8 @@
         el = document.createElement('div');
         el.className = 'm-evt m-evt-end';
         el.innerHTML = '— session ended (' + escapeHtml(payload.reason || '') + ') —';
+      } else if (kind === 'history_text') {
+        el = buildHistoryEl(evt);
       } else {
         el = document.createElement('div');
         el.className = 'm-evt';
@@ -4708,6 +4773,48 @@
 
       transcriptEl.appendChild(el);
       scrollToBottom();
+    }
+
+    // Insert backfilled history frames (oldest-first) at the top of the
+    // transcript. Preserves scroll-from-top so the user's view doesn't
+    // jump when content is added above.
+    function prependHistoryFrames(frames) {
+      if (!frames || frames.length === 0) return;
+      var prevTop = transcriptEl.scrollTop;
+      var prevHeight = transcriptEl.scrollHeight;
+      // Insertion anchor: keep prepending before whatever is currently
+      // first. We walk frames in order and insertBefore(firstChild) so
+      // the final order matches the input order (oldest at top).
+      if (!historyDivider) {
+        historyDivider = document.createElement('div');
+        historyDivider.className = 'm-evt m-evt-history-divider';
+        historyDivider.textContent = '— earlier history loaded from transcript —';
+        if (transcriptEl.firstChild) {
+          transcriptEl.insertBefore(historyDivider, transcriptEl.firstChild);
+        } else {
+          transcriptEl.appendChild(historyDivider);
+        }
+      }
+      // Build all elements first, then insert them in reverse so the
+      // first frame ends up at the top (above the divider).
+      var els = [];
+      var newOldest = firstRenderedUuid;
+      for (var i = 0; i < frames.length; i++) {
+        var f = frames[i];
+        if (!f || !f.uuid || rendered[f.uuid]) continue;
+        rendered[f.uuid] = true;
+        els.push(buildHistoryEl(f));
+        newOldest = f.uuid;
+      }
+      // Insert in reverse so the oldest frame is at the very top.
+      for (var j = els.length - 1; j >= 0; j--) {
+        transcriptEl.insertBefore(els[j], transcriptEl.firstChild);
+      }
+      if (els.length > 0) firstRenderedUuid = els[0].getAttribute('data-uuid') || newOldest;
+      // Restore scroll: keep the user's view anchored to the same content
+      // they were looking at before the prepend.
+      var added = transcriptEl.scrollHeight - prevHeight;
+      transcriptEl.scrollTop = prevTop + added;
     }
 
     function prefillCompose(text) {
@@ -4877,6 +4984,18 @@
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
         else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool);
+        else if (msg.event === 'mirror:history_chunk') {
+          historyInflight = false;
+          prependHistoryFrames(msg.frames || []);
+          historyExhausted = Boolean(msg.exhausted);
+          updateHistoryBtn();
+        }
+        else if (msg.event === 'mirror:history_error') {
+          historyInflight = false;
+          updateHistoryBtn();
+          statusEl.className = 'mirror-status error';
+          statusEl.textContent = 'history: ' + (msg.error || 'error');
+        }
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
@@ -4919,6 +5038,13 @@
         try {
           bootstrap.Collapse.getOrCreateInstance(taskPanelEl, { toggle: false }).hide();
         } catch (e) { /* ignore */ }
+      }
+      // Reset history button: a fresh attach starts with no anchor and
+      // the button enabled (the initial transcript may have content).
+      var hb = document.getElementById('mirror-history-btn');
+      if (hb) {
+        hb.disabled = false;
+        hb.title = 'Load earlier history from the on-disk transcript';
       }
     };
 
@@ -5335,6 +5461,36 @@
             }
           })
           .catch(function() { stopBtn.disabled = false; });
+      }, { signal: attachSig });
+    }
+
+    var historyBtn = document.getElementById('mirror-history-btn');
+    function updateHistoryBtn() {
+      if (!historyBtn) return;
+      historyBtn.disabled = historyExhausted || historyInflight;
+      historyBtn.title = historyExhausted
+        ? 'No earlier history available'
+        : historyInflight
+          ? 'Loading earlier history…'
+          : 'Load earlier history from the on-disk transcript';
+    }
+    if (historyBtn) {
+      updateHistoryBtn();
+      historyBtn.addEventListener('click', function() {
+        if (historyExhausted || historyInflight) return;
+        if (!mws || mws.readyState !== 1) {
+          statusEl.className = 'mirror-status error';
+          statusEl.textContent = 'history: not connected';
+          return;
+        }
+        historyInflight = true;
+        updateHistoryBtn();
+        statusEl.textContent = '';
+        mws.send(JSON.stringify({
+          action: 'request_history',
+          before_uuid: firstRenderedUuid,
+          limit: 200,
+        }));
       }, { signal: attachSig });
     }
 

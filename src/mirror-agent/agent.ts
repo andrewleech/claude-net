@@ -17,7 +17,9 @@ import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { type HostChannelHandle, startHostChannel } from "./host-channel";
 import { HubClient } from "./hub-client";
+import { readHistoryBefore } from "./jsonl-history";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
+import { jsonlRecordToHistoryFrame } from "./jsonl-to-frame";
 import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
 
@@ -649,6 +651,26 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         typeof data.requestId === "string" ? data.requestId : "";
       if (!requestId) return;
       handleListCommands(session, requestId);
+    } else if (data.event === "mirror_history_request") {
+      const requestId =
+        typeof data.requestId === "string" ? data.requestId : "";
+      if (!requestId) return;
+      const hist = data as unknown as {
+        before_uuid?: unknown;
+        limit?: unknown;
+      };
+      const beforeUuid =
+        typeof hist.before_uuid === "string" ? hist.before_uuid : null;
+      const limit =
+        typeof hist.limit === "number" && Number.isFinite(hist.limit)
+          ? Math.max(1, Math.min(1000, Math.floor(hist.limit)))
+          : 200;
+      void handleHistoryRequest(session, requestId, beforeUuid, limit).catch(
+        (err: unknown) => {
+          log(`[${session.sid}] history handler threw: ${String(err)}`);
+          sendHistoryChunk(session, requestId, [], true, String(err));
+        },
+      );
     } else if (data.event === "mirror_stop") {
       const watcher =
         typeof data.origin?.watcher === "string"
@@ -689,6 +711,64 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       `paste from ${watcher}: saved ${Buffer.byteLength(text, "utf8")} bytes → ${filePath}`,
     );
     sendPasteResponse(session, requestId, { path: filePath });
+  }
+
+  /** Handle a hub-initiated history-backfill request: read up to `limit`
+   *  records from the on-disk JSONL preceding `beforeUuid`, convert them
+   *  to history_text MirrorEventFrames, and reply with a chunk frame. */
+  async function handleHistoryRequest(
+    session: SessionState,
+    requestId: string,
+    beforeUuid: string | null,
+    limit: number,
+  ): Promise<void> {
+    const transcriptPath = session.transcriptPath;
+    if (!transcriptPath) {
+      sendHistoryChunk(
+        session,
+        requestId,
+        [],
+        true,
+        "transcript_path unknown for this session",
+      );
+      return;
+    }
+    const result = await readHistoryBefore(transcriptPath, beforeUuid, limit);
+    const frames: MirrorEventFrame[] = [];
+    for (const rec of result.records) {
+      const frame = jsonlRecordToHistoryFrame(session.sid, rec);
+      if (frame) {
+        redactor.redactFrame(frame);
+        frames.push(frame);
+      }
+    }
+    sendHistoryChunk(
+      session,
+      requestId,
+      frames,
+      result.exhausted,
+      result.anchor_missing ? "anchor_missing" : undefined,
+    );
+  }
+
+  function sendHistoryChunk(
+    session: SessionState,
+    requestId: string,
+    frames: MirrorEventFrame[],
+    exhausted: boolean,
+    error?: string,
+  ): void {
+    const frame = {
+      action: "mirror_history_chunk" as const,
+      sid: session.sid,
+      requestId,
+      frames,
+      exhausted,
+      ...(error ? { error } : {}),
+    };
+    if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
+      log(`[${session.sid}] failed to send history chunk (hub disconnected)`);
+    }
   }
 
   function sendPasteResponse(

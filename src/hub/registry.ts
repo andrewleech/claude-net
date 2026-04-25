@@ -253,6 +253,19 @@ export class Registry {
     return this.agents.get(fullName) ?? null;
   }
 
+  /**
+   * Update an agent's channelCapable flag in place — used when the
+   * plugin's empirical self-test confirms (or refutes) channel
+   * delivery after the initial register has gone through. Returns
+   * false if the agent is not registered.
+   */
+  setChannelCapable(fullName: string, capable: boolean): boolean {
+    const entry = this.agents.get(fullName);
+    if (!entry) return false;
+    entry.channelCapable = capable;
+    return true;
+  }
+
   list(): AgentInfo[] {
     const result: AgentInfo[] = [];
 

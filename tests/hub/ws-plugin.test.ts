@@ -344,6 +344,64 @@ describe("WebSocket Plugin (integration)", () => {
     expect(teamNames).toContain("myteam");
   });
 
+  test("update_channel_capable flips the registry flag in place", async () => {
+    const ws = await connect();
+    // Register false (the wire default after the empirical detection
+    // change) — the registry should reflect that.
+    await registerAgent(ws, "proj:tester@host", false);
+    expect(hub.registry.getByFullName("proj:tester@host")?.channelCapable).toBe(
+      false,
+    );
+
+    const respP = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "update_channel_capable",
+        channel_capable: true,
+        requestId: "upd-1",
+      }),
+    );
+    const resp = await respP;
+    expect(resp.ok).toBe(true);
+    expect((resp.data as { channel_capable: boolean }).channel_capable).toBe(
+      true,
+    );
+    expect(hub.registry.getByFullName("proj:tester@host")?.channelCapable).toBe(
+      true,
+    );
+  });
+
+  test("update_channel_capable rejects non-boolean values", async () => {
+    const ws = await connect();
+    await registerAgent(ws, "proj:badtype@host", false);
+
+    const respP = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "update_channel_capable",
+        channel_capable: "yes",
+        requestId: "upd-2",
+      }),
+    );
+    const resp = await respP;
+    expect(resp.ok).toBe(false);
+    expect(typeof resp.error).toBe("string");
+  });
+
+  test("update_channel_capable requires registration", async () => {
+    const ws = await connect();
+    const respP = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "update_channel_capable",
+        channel_capable: true,
+        requestId: "upd-3",
+      }),
+    );
+    const resp = await respP;
+    expect(resp.ok).toBe(false);
+  });
+
   test("register under a new name renames matching mirror sessions", async () => {
     const ws = await connectWs(port);
     openSockets.push(ws);

@@ -468,6 +468,37 @@ export function wsPlugin(
           break;
         }
 
+        case "update_channel_capable": {
+          const senderName = requireRegistered(ws, requestId);
+          if (!senderName) return;
+          if (typeof data.channel_capable !== "boolean") {
+            sendResponse(
+              ws,
+              requestId,
+              false,
+              undefined,
+              "channel_capable must be a boolean",
+            );
+            return;
+          }
+          const ok = registry.setChannelCapable(
+            senderName,
+            data.channel_capable,
+          );
+          if (!ok) {
+            sendResponse(ws, requestId, false, undefined, "Agent not found");
+            return;
+          }
+          emit("agent.channel_capable_changed", {
+            fullName: senderName,
+            channelCapable: data.channel_capable,
+          });
+          sendResponse(ws, requestId, true, {
+            channel_capable: data.channel_capable,
+          });
+          break;
+        }
+
         default: {
           sendResponse(ws, requestId, false, undefined, "Unknown action");
         }

@@ -7,7 +7,7 @@ import {
   PLUGIN_VERSION,
   Plugin,
   TOOL_DEFINITIONS,
-  buildChannelsOffNudge,
+  buildChannelSelfTestText,
   buildDefaultName,
   createChannelNotification,
   detectChannelCapability,
@@ -286,7 +286,7 @@ describe("plugin helpers", () => {
     });
   });
 
-  describe("detectChannelCapability (FR2)", () => {
+  describe("detectChannelCapability", () => {
     test("true when experimental.claude/channel is an object", () => {
       expect(
         detectChannelCapability({ experimental: { "claude/channel": {} } }),
@@ -322,6 +322,21 @@ describe("plugin helpers", () => {
       expect(
         detectChannelCapability({ experimental: { "claude/channel": 0 } }),
       ).toBe(false);
+    });
+  });
+
+  describe("ackChannel", () => {
+    test("first call returns acked=true and flips channelCapable", async () => {
+      expect(plugin.channelCapable).toBe(false);
+      const result = await plugin.ackChannel();
+      expect(result).toEqual({ acked: true });
+      expect(plugin.channelCapable).toBe(true);
+    });
+
+    test("subsequent calls report already-acked", async () => {
+      await plugin.ackChannel();
+      const second = await plugin.ackChannel();
+      expect(second).toEqual({ acked: true, already: true });
     });
   });
 
@@ -381,14 +396,17 @@ describe("plugin helpers", () => {
     });
   });
 
-  describe("buildChannelsOffNudge (FR2)", () => {
-    test("mentions install-channels and that inbound is broken", () => {
-      const nudge = buildChannelsOffNudge();
-      expect(nudge).toContain("install-channels");
-      expect(nudge.toLowerCase()).toContain("inbound");
-      // One-shot: the text itself should say it only fires once so the
-      // LLM doesn't repeat it.
-      expect(nudge.toLowerCase()).toContain("once");
+  describe("buildChannelSelfTestText", () => {
+    test("includes registered name and instructs single _ack_channel call", () => {
+      const text = buildChannelSelfTestText("git-autosquash:corona@carbon");
+      expect(text).toContain("git-autosquash:corona@carbon");
+      expect(text).toContain("_ack_channel");
+      expect(text.toLowerCase()).toContain("once");
+    });
+
+    test("discourages narrating the result to the user", () => {
+      const text = buildChannelSelfTestText("foo:bar@baz").toLowerCase();
+      expect(text).toContain("not narrate");
     });
   });
 
@@ -487,9 +505,9 @@ describe("plugin helpers", () => {
       }
     });
 
-    test("TOOL_DEFINITIONS has 11 well-formed entries", () => {
+    test("TOOL_DEFINITIONS has 12 well-formed entries", () => {
       expect(Array.isArray(TOOL_DEFINITIONS)).toBe(true);
-      expect(TOOL_DEFINITIONS.length).toBe(11);
+      expect(TOOL_DEFINITIONS.length).toBe(12);
       const names = new Set<string>();
       for (const tool of TOOL_DEFINITIONS as Array<{
         name: string;
@@ -508,6 +526,7 @@ describe("plugin helpers", () => {
       // rename any of these.
       expect([...names].sort()).toEqual(
         [
+          "_ack_channel",
           "broadcast",
           "hub_events",
           "join_team",
@@ -547,7 +566,9 @@ describe("plugin helpers", () => {
       // each twice with the same input must return identical output.
       expect(buildDefaultName()).toBe(buildDefaultName());
       expect(withSessionSuffix("a:b@c", 2)).toBe(withSessionSuffix("a:b@c", 2));
-      expect(buildChannelsOffNudge()).toBe(buildChannelsOffNudge());
+      expect(buildChannelSelfTestText("a:b@c")).toBe(
+        buildChannelSelfTestText("a:b@c"),
+      );
       expect(detectChannelCapability(undefined)).toBe(
         detectChannelCapability(undefined),
       );

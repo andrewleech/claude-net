@@ -64,6 +64,16 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
+/** Delay between successful register and the channel self-test
+ *  notification. Long enough that the user-facing "registered as" line
+ *  has rendered; short enough that the test happens before the user
+ *  triggers any other claude-net work. */
+const CHANNEL_SELF_TEST_DELAY_MS = 2_000;
+/** Window during which we expect the LLM to call `_ack_channel`. After
+ *  this elapses with no ack we accept that channels are off for this
+ *  session and stop expecting it; channel_capable stays false until the
+ *  next plugin launch. */
+const CHANNEL_SELF_TEST_TIMEOUT_MS = 60_000;
 
 // Single source of truth for the plugin version. Consumed by both the
 // MCP `Server({ version })` declaration below AND the register frame
@@ -155,12 +165,13 @@ The from field on all messages is your full session:user@host identity, set by t
 // ── Exported stateless helpers (testable) ────────────────────────────────
 
 /**
- * Inspect an MCP client's advertised capabilities and decide whether the
- * experimental `claude/channel` hook is supported. Accepts any truthy
- * value for `experimental["claude/channel"]` — Claude Code currently
- * sends `{}`, but a boolean `true` or any other truthy shape would
- * also count as "supported". Exported for unit testability; the
- * plugin's `oninitialized` callback calls this internally.
+ * Forward-compatible probe of the MCP `experimental` capabilities for
+ * a future Claude Code build that explicitly advertises channel
+ * support. No build does today — channel-capability is determined
+ * empirically at runtime by sending a self-test notification and
+ * waiting for the LLM to call `_ack_channel`. Exported for unit
+ * testability; left in place so a future Claude Code that does
+ * advertise this flag upgrades cleanly without further plugin work.
  */
 export function detectChannelCapability(
   capabilities: { experimental?: Record<string, unknown> } | undefined | null,
@@ -169,14 +180,15 @@ export function detectChannelCapability(
 }
 
 /**
- * Build the one-shot LLM nudge shown when the plugin detects that
- * Claude Code does not advertise channel support. The text rides on
- * the next tool result's content — it must NOT use
- * `emitSystemNotification` because MCP notifications are the exact
- * channel that's broken on a channels-off client.
+ * Body of the combined registered-as / channel self-test notification
+ * sent to the LLM after register. Single notification on purpose:
+ * minimises chat-noise at startup. If the notification reaches the
+ * user-visible side, the LLM calls `_ack_channel` once and the plugin
+ * confirms `channel_capable` to the hub. Otherwise the tool is never
+ * called and the agent stays `channel_capable: false`.
  */
-export function buildChannelsOffNudge(): string {
-  return "claude-net: this Claude Code binary does not advertise experimental channels. Inbound messages from other agents will not be delivered to this session (outbound tools still work). Ask the user to run `install-channels` on this host, then restart Claude Code. This notice only fires once.";
+export function buildChannelSelfTestText(registeredName: string): string {
+  return `claude-net registered as ${registeredName}. Channel self-test — call \`_ack_channel\` once with no arguments. Do not narrate this to the user; the tool result is silent.`;
 }
 
 export function buildDefaultName(): string {
@@ -387,6 +399,16 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "_ack_channel",
+    description:
+      "Internal startup self-test ack. Call once when prompted; do not narrate the call or its result to the user.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "hub_events",
     description:
       "Query recent hub events — agent connections/disconnections, message delivery outcomes, evictions, version mismatches. Use when diagnosing delivery failures or checking system health.",
@@ -473,6 +495,12 @@ export class Plugin {
   private mcpServer: Server | null = null;
   private mcpInitialized = false;
   channelCapable = false;
+  /** Self-test bookkeeping. `inFlight` blocks duplicate scheduling per
+   *  registered identity; `acked` ensures a confirmation only fires
+   *  once (subsequent _ack_channel calls are accepted but no-op). */
+  private channelSelfTestInFlight = false;
+  private channelSelfTestAcked = false;
+  private channelSelfTestTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── One-shot nudge queue ─────────────────
   // Public & readonly-as-a-reference so tests and external callers can
@@ -596,6 +624,13 @@ export class Plugin {
       );
     }
 
+    // _ack_channel is handled locally — flips channel_capable and
+    // pushes the update to the hub. Idempotent.
+    if (name === "_ack_channel") {
+      const result = await this.ackChannel();
+      return toolResult(result);
+    }
+
     if (!this.hubWsUrl) {
       return notConnectedError(
         "Not connected — CLAUDE_NET_HUB environment variable not set.",
@@ -679,6 +714,70 @@ export class Plugin {
       .catch((err: unknown) =>
         log(`Failed to emit system notification: ${err}`),
       );
+  }
+
+  /**
+   * Send the channel self-test notification a few seconds after
+   * register. If the LLM replies by calling `_ack_channel`, the
+   * resulting handler flips `channelCapable` and pushes the new value
+   * to the hub. If notifications don't reach the LLM, the timer
+   * elapses with no observable effect — `channel_capable` stays
+   * false and the hub correctly NAKs sends to this agent (until the
+   * next launch, when we re-test).
+   */
+  private scheduleChannelSelfTest(registeredName: string): void {
+    if (this.channelSelfTestInFlight) return;
+    if (this.channelCapable) return; // already true via experimental flag
+    this.channelSelfTestInFlight = true;
+    this.channelSelfTestAcked = false;
+    if (this.channelSelfTestTimer) clearTimeout(this.channelSelfTestTimer);
+    this.channelSelfTestTimer = setTimeout(() => {
+      this.emitSystemNotification(buildChannelSelfTestText(registeredName));
+      // Allow a window for the LLM to respond. If it doesn't, the agent
+      // keeps `channel_capable: false` until the next plugin launch.
+      this.channelSelfTestTimer = setTimeout(() => {
+        this.channelSelfTestInFlight = false;
+        this.channelSelfTestTimer = null;
+      }, CHANNEL_SELF_TEST_TIMEOUT_MS);
+      if (
+        typeof this.channelSelfTestTimer === "object" &&
+        "unref" in this.channelSelfTestTimer
+      ) {
+        this.channelSelfTestTimer.unref();
+      }
+    }, CHANNEL_SELF_TEST_DELAY_MS);
+    if (
+      typeof this.channelSelfTestTimer === "object" &&
+      "unref" in this.channelSelfTestTimer
+    ) {
+      this.channelSelfTestTimer.unref();
+    }
+  }
+
+  /**
+   * Handle an `_ack_channel` tool invocation. Idempotent — repeated
+   * calls succeed silently. The first call flips `channel_capable`
+   * locally and pushes the update to the hub so future sends reach
+   * this agent.
+   */
+  async ackChannel(): Promise<{ acked: boolean; already?: boolean }> {
+    if (this.channelSelfTestAcked) return { acked: true, already: true };
+    this.channelSelfTestAcked = true;
+    if (this.channelSelfTestTimer) {
+      clearTimeout(this.channelSelfTestTimer);
+      this.channelSelfTestTimer = null;
+    }
+    this.channelSelfTestInFlight = false;
+    this.channelCapable = true;
+    if (this.isConnected()) {
+      this.request({
+        action: "update_channel_capable",
+        channel_capable: true,
+      }).catch((err: unknown) =>
+        log(`update_channel_capable failed: ${String(err)}`),
+      );
+    }
+    return { acked: true };
   }
 
   private request(frame: Record<string, unknown>): Promise<unknown> {
@@ -779,7 +878,14 @@ export class Plugin {
           hub: this.hubWsUrl,
           cwd: process.cwd(),
         });
-        this.request({ action: "ping" }).catch(() => {});
+        // Empirical channel-capability check: ask the LLM to call
+        // `_ack_channel` once. If notifications reach the user-visible
+        // side, the LLM sees the request and acks; otherwise the tool
+        // is never called and channel_capable stays false. The single
+        // notification doubles as the user-visible "registered as"
+        // confirmation — we deliberately do NOT also emit a separate
+        // hub-side ping echo, which would just add a second line.
+        this.scheduleChannelSelfTest(candidate);
         return;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -914,12 +1020,11 @@ export class Plugin {
       const caps = this.mcpServer?.getClientCapabilities() as
         | { experimental?: Record<string, unknown> }
         | undefined;
+      // Forward-compatible: if a future Claude Code advertises the
+      // experimental flag explicitly, trust it; otherwise we'll wait
+      // for the empirical _ack_channel handshake to flip the bit.
       this.channelCapable = detectChannelCapability(caps);
       this.mcpInitialized = true;
-
-      if (!this.channelCapable) {
-        this.pendingNudges.push({ text: buildChannelsOffNudge() });
-      }
 
       // Flush any register that was waiting on this callback.
       this.maybeSendRegister();

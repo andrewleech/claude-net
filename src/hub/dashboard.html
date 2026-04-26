@@ -3245,10 +3245,13 @@
     var rendered = Object.create(null); // uuid → true
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
-    // Anchor for "load earlier history" requests. Set when the first
-    // frame is rendered (live or prepended); updated to the oldest
-    // prepended uuid each time a chunk is loaded.
-    var firstRenderedUuid = null;
+    // Anchor for "load earlier history" requests — the timestamp of
+    // the oldest frame currently rendered. Set on first renderEvent
+    // (live or backfilled) and lowered as older frames are prepended.
+    // Timestamp-based anchoring is robust against the fact that live
+    // frames carry synthetic uuids that don't necessarily appear in
+    // the on-disk JSONL.
+    var firstRenderedTs = null;
     var historyExhausted = false;
     var historyInflight = false;
     // Marker element separating loaded history from the live transcript.
@@ -4682,7 +4685,10 @@
     function renderEvent(evt) {
       if (!evt || !evt.uuid || rendered[evt.uuid]) return;
       rendered[evt.uuid] = true;
-      if (firstRenderedUuid === null) firstRenderedUuid = evt.uuid;
+      if (typeof evt.ts === 'number' &&
+          (firstRenderedTs === null || evt.ts < firstRenderedTs)) {
+        firstRenderedTs = evt.ts;
+      }
 
       var kind = evt.kind;
       var payload = evt.payload || {};
@@ -4813,19 +4819,20 @@
       // Build all elements first, then insert them in reverse so the
       // first frame ends up at the top (above the divider).
       var els = [];
-      var newOldest = firstRenderedUuid;
       for (var i = 0; i < frames.length; i++) {
         var f = frames[i];
         if (!f || !f.uuid || rendered[f.uuid]) continue;
         rendered[f.uuid] = true;
         els.push(buildHistoryEl(f));
-        newOldest = f.uuid;
+        if (typeof f.ts === 'number' &&
+            (firstRenderedTs === null || f.ts < firstRenderedTs)) {
+          firstRenderedTs = f.ts;
+        }
       }
       // Insert in reverse so the oldest frame is at the very top.
       for (var j = els.length - 1; j >= 0; j--) {
         transcriptEl.insertBefore(els[j], transcriptEl.firstChild);
       }
-      if (els.length > 0) firstRenderedUuid = els[0].getAttribute('data-uuid') || newOldest;
       // Restore scroll: keep the user's view anchored to the same content
       // they were looking at before the prepend.
       var added = transcriptEl.scrollHeight - prevHeight;
@@ -5503,7 +5510,7 @@
         statusEl.textContent = '';
         mws.send(JSON.stringify({
           action: 'request_history',
-          before_uuid: firstRenderedUuid,
+          before_ts: firstRenderedTs,
           limit: 200,
         }));
       }, { signal: attachSig });

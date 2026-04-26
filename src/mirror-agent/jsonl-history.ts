@@ -4,47 +4,51 @@
 // sessions produce JSONLs in the hundreds of MB.
 //
 // Algorithm: read the file once forward, parse each line, push onto a
-// fixed-cap circular buffer. When we hit the line whose record matches
-// `beforeUuid`, the buffer already contains the `limit` preceding
-// records and we stop. EOF without finding the uuid means the request
-// either had no anchor (return what we have — the tail of the file) or
-// the anchor was a stale uuid we don't have on disk (return empty).
+// fixed-cap circular buffer. When we hit the first line whose record
+// timestamp is >= the requested cutoff, the buffer already contains
+// the `limit` preceding records (all strictly older than the cutoff)
+// and we stop. EOF without crossing the cutoff means the cutoff is
+// after every record on disk — return whatever's in the buffer.
+//
+// Time-based anchoring (rather than uuid-based) is robust against the
+// fact that live frames carry synthetic uuids — none of them are
+// guaranteed to be present in the JSONL byte-for-byte.
 
 import * as fs from "node:fs";
 import type { JsonlRecord } from "./jsonl-tail";
 
 export interface ReadHistoryResult {
   records: JsonlRecord[];
-  /** True if the agent reached BOF without filling `limit`. */
+  /** True if the agent reached BOF/EOF without filling `limit`. */
   exhausted: boolean;
-  /** True only when `beforeUuid` was non-null and never appeared in the file. */
-  anchor_missing: boolean;
 }
 
 const READ_CHUNK = 64 * 1024;
 
 /**
- * Read up to `limit` records preceding the line whose `uuid === beforeUuid`,
- * in chronological order (oldest first).
+ * Read up to `limit` records strictly older than `beforeTs` (epoch ms),
+ * in chronological order (oldest first). Records without a parseable
+ * timestamp are kept (they sort to "now" and will be returned only if
+ * the cutoff is null or in the past — see below).
  *
- * If `beforeUuid` is null, returns the last `limit` records from EOF —
+ * If `beforeTs` is null, returns the last `limit` records from EOF —
  * useful for an "empty transcript" case where the dashboard wants to
  * pull the most-recent history without a known anchor.
  */
 export async function readHistoryBefore(
   filePath: string,
-  beforeUuid: string | null,
+  beforeTs: number | null,
   limit: number,
 ): Promise<ReadHistoryResult> {
   if (limit <= 0) {
-    return { records: [], exhausted: true, anchor_missing: false };
+    return { records: [], exhausted: true };
   }
 
   let fd: number;
   try {
     fd = fs.openSync(filePath, "r");
   } catch {
-    return { records: [], exhausted: true, anchor_missing: false };
+    return { records: [], exhausted: true };
   }
 
   // Circular buffer of the most-recent `limit` parsed records.
@@ -69,7 +73,6 @@ export async function readHistoryBefore(
 
   const buf = Buffer.alloc(READ_CHUNK);
   let lineBuf = "";
-  let foundAnchor = false;
   let stopRequested = false;
 
   try {
@@ -90,14 +93,17 @@ export async function readHistoryBefore(
         } catch {
           continue;
         }
-        if (
-          beforeUuid !== null &&
-          typeof rec.uuid === "string" &&
-          rec.uuid === beforeUuid
-        ) {
-          foundAnchor = true;
-          stopRequested = true;
-          break;
+        if (beforeTs !== null) {
+          const recTs =
+            typeof rec.timestamp === "string"
+              ? Date.parse(rec.timestamp)
+              : Number.NaN;
+          // Stop on the first record AT OR AFTER the cutoff. The ring
+          // already holds the strictly-older records we want.
+          if (Number.isFinite(recTs) && recTs >= beforeTs) {
+            stopRequested = true;
+            break;
+          }
         }
         pushRing(rec);
       }
@@ -111,29 +117,8 @@ export async function readHistoryBefore(
     }
   }
 
-  const records = drainRing();
-
-  if (beforeUuid === null) {
-    // Pure tail-from-EOF read: caller can always ask for more later, so
-    // exhaustion is meaningful only if we returned fewer than `limit`.
-    return {
-      records,
-      exhausted: records.length < limit,
-      anchor_missing: false,
-    };
-  }
-
-  if (!foundAnchor) {
-    // Anchor was specified but never found in the file. The dashboard
-    // can decide what to do (most likely: stop trying — the JSONL was
-    // rotated or truncated). Return empty.
-    return { records: [], exhausted: true, anchor_missing: true };
-  }
-
-  // Anchor found: the ring holds up to `limit` records strictly before it.
   return {
-    records,
-    exhausted: records.length < limit,
-    anchor_missing: false,
+    records: drainRing(),
+    exhausted: ringSize < limit,
   };
 }

@@ -656,16 +656,18 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         typeof data.requestId === "string" ? data.requestId : "";
       if (!requestId) return;
       const hist = data as unknown as {
-        before_uuid?: unknown;
+        before_ts?: unknown;
         limit?: unknown;
       };
-      const beforeUuid =
-        typeof hist.before_uuid === "string" ? hist.before_uuid : null;
+      const beforeTs =
+        typeof hist.before_ts === "number" && Number.isFinite(hist.before_ts)
+          ? hist.before_ts
+          : null;
       const limit =
         typeof hist.limit === "number" && Number.isFinite(hist.limit)
           ? Math.max(1, Math.min(1000, Math.floor(hist.limit)))
           : 200;
-      void handleHistoryRequest(session, requestId, beforeUuid, limit).catch(
+      void handleHistoryRequest(session, requestId, beforeTs, limit).catch(
         (err: unknown) => {
           log(`[${session.sid}] history handler threw: ${String(err)}`);
           sendHistoryChunk(session, requestId, [], true, String(err));
@@ -713,12 +715,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   /** Handle a hub-initiated history-backfill request: read up to `limit`
-   *  records from the on-disk JSONL preceding `beforeUuid`, convert them
-   *  to history_text MirrorEventFrames, and reply with a chunk frame. */
+   *  records from the on-disk JSONL strictly older than `beforeTs`,
+   *  convert them to history_text MirrorEventFrames, and reply with a
+   *  chunk frame. */
   async function handleHistoryRequest(
     session: SessionState,
     requestId: string,
-    beforeUuid: string | null,
+    beforeTs: number | null,
     limit: number,
   ): Promise<void> {
     const transcriptPath = session.transcriptPath;
@@ -732,7 +735,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       );
       return;
     }
-    const result = await readHistoryBefore(transcriptPath, beforeUuid, limit);
+    const result = await readHistoryBefore(transcriptPath, beforeTs, limit);
     const frames: MirrorEventFrame[] = [];
     for (const rec of result.records) {
       const frame = jsonlRecordToHistoryFrame(session.sid, rec);
@@ -741,13 +744,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         frames.push(frame);
       }
     }
-    sendHistoryChunk(
-      session,
-      requestId,
-      frames,
-      result.exhausted,
-      result.anchor_missing ? "anchor_missing" : undefined,
-    );
+    sendHistoryChunk(session, requestId, frames, result.exhausted);
   }
 
   function sendHistoryChunk(

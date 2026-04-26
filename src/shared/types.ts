@@ -308,15 +308,21 @@ export interface MirrorListCommandsFrame {
 /**
  * Hub → agent request for backfilled history older than what the hub's
  * in-memory ring still has. Agent reads its on-disk JSONL, walking
- * backward from `before_uuid` (or from EOF if null) to gather up to
- * `limit` records, then converts them to MirrorEventFrame with
- * kind="history_text" and replies with MirrorHistoryChunkFrame.
+ * backward from `before_ts` (or from EOF if null) to gather up to
+ * `limit` records strictly older than that cutoff, then converts them
+ * to MirrorEventFrame with kind="history_text" and replies with
+ * MirrorHistoryChunkFrame.
+ *
+ * Anchor is a timestamp rather than a uuid because every live frame's
+ * uuid is synthetic from the JSONL's perspective (hook frames generate
+ * random uuids, JSONL-derived assistant blocks suffix `-text-N`), so a
+ * uuid match would never succeed. Timestamps work regardless of source.
  */
 export interface MirrorHistoryRequestFrame {
   event: "mirror_history_request";
   sid: string;
   requestId: string;
-  before_uuid: string | null;
+  before_ts: number | null;
   limit: number;
 }
 

@@ -806,12 +806,12 @@ export class MirrorRegistry {
 
   /**
    * Ask the session's mirror-agent to read history from its on-disk JSONL
-   * preceding `beforeUuid` (or from EOF if null). Same request/response
-   * WS pattern as relayPaste / relayListCommands.
+   * strictly older than `beforeTs` (epoch ms; or tail-from-EOF if null).
+   * Same request/response WS pattern as relayPaste / relayListCommands.
    */
   relayHistoryRequest(
     sid: string,
-    beforeUuid: string | null,
+    beforeTs: number | null,
     limit: number,
     timeoutMs: number,
   ): Promise<
@@ -838,7 +838,7 @@ export class MirrorRegistry {
       event: "mirror_history_request",
       sid,
       requestId,
-      before_uuid: beforeUuid,
+      before_ts: beforeTs,
       limit,
     };
 
@@ -1437,14 +1437,17 @@ export function wsMirrorPlugin(
       if (meta.role === "watcher" && "action" in data) {
         const frame = data as { action: string } & Record<string, unknown>;
         if (frame.action === "request_history") {
-          const beforeUuid =
-            typeof frame.before_uuid === "string" ? frame.before_uuid : null;
+          const beforeTs =
+            typeof frame.before_ts === "number" &&
+            Number.isFinite(frame.before_ts)
+              ? frame.before_ts
+              : null;
           const limit =
             typeof frame.limit === "number" && Number.isFinite(frame.limit)
               ? Math.max(1, Math.min(1000, Math.floor(frame.limit)))
               : 200;
           mirrorRegistry
-            .relayHistoryRequest(meta.sid, beforeUuid, limit, 15_000)
+            .relayHistoryRequest(meta.sid, beforeTs, limit, 15_000)
             .then((res) => {
               if (res.ok) {
                 ws.send(

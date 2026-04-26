@@ -706,10 +706,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       });
       return;
     }
-    emitAuditEvent(
-      session,
-      `paste from ${watcher}: saved ${Buffer.byteLength(text, "utf8")} bytes → ${filePath}`,
-    );
+    // Happy-path audit suppressed: the user initiated the paste from the
+    // dashboard, the response carries the path, and the live transcript
+    // shows whatever Claude does with it. The line was just noise.
     sendPasteResponse(session, requestId, { path: filePath });
   }
 
@@ -806,7 +805,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       emitAuditEvent(session, `stop failed (${result.code}): ${result.error}`);
       return;
     }
-    emitAuditEvent(session, `stop from ${watcher}: sent Esc`);
+    // Happy-path audit suppressed — user clicked Stop, Esc was sent;
+    // the next transcript event already reflects the interrupt.
   }
 
   /** Respond to a hub-initiated slash-command catalog query. Scans the
@@ -856,11 +856,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       );
       return;
     }
-    const preview = text.length > 80 ? `${text.slice(0, 77)}…` : text;
-    emitAuditEvent(
-      session,
-      `inject from ${watcher}: ${JSON.stringify(preview)}`,
-    );
+    // Happy-path audit suppressed: the user just typed the text into
+    // the compose box; echoing a preview here was pure repetition.
+    // Failure-path audits below still emit so transmit issues surface.
     // Claude Code prints TUI-level rejections ("Unknown command:", "Args
     // from unknown skill:") directly to the pane without emitting a hook
     // event. Capture the pane after it's had time to redraw and forward

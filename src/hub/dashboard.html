@@ -202,6 +202,21 @@
     font-size: 13px;
     line-height: 1.55;
     animation: event-flash 900ms ease-out;
+    /* Native row-level virtualization: skip layout, style, and paint
+       for rows scrolled out of view until they come back. The
+       contain-intrinsic-size hint keeps the scrollbar stable while
+       a row is virtualized — without it, the browser would treat
+       virtualized rows as zero-height and the scroll position
+       would jump. `auto 80px` is a guess at the typical row
+       height; the browser remembers the real measured height once
+       a row has been laid out, so the hint only matters for
+       never-yet-visible rows. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 80px;
+    /* Scope reflow inside the row: a textarea keystroke or live WS
+       append elsewhere on the page can't trigger a full-document
+       style recalc across hundreds of sibling rows. */
+    contain: layout style paint;
   }
   /* Timestamp lives in the left gutter. Populated by JS via data-ts
      (see renderEvent). Gutter is 98px wide so `HH:MM:SS am` fits on

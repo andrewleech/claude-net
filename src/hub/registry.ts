@@ -14,6 +14,12 @@ export interface AgentEntry {
   connectedAt: Date;
   lastPongAt: number;
   channelCapable: boolean;
+  /**
+   * Claude Code PID announced by the plugin on register. null if the
+   * plugin didn't send `cc_pid` (pre-rollout client). Paired with `host`
+   * in `findByHostPid` to drive the mirror-session rename join.
+   */
+  ccPid: number | null;
 }
 
 export interface DisconnectedEntry {
@@ -60,7 +66,7 @@ export class Registry {
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
-    options: { channelCapable?: boolean } = {},
+    options: { channelCapable?: boolean; ccPid?: number | null } = {},
   ):
     | {
         ok: true;
@@ -71,6 +77,7 @@ export class Registry {
     | { ok: false; error: string } {
     const identity = wsIdentity ?? ws;
     const channelCapable = options.channelCapable ?? false;
+    const ccPid = options.ccPid ?? null;
 
     // Detect rename: same wsIdentity, different name. At most one match
     // is possible because register() maintains the invariant.
@@ -102,6 +109,10 @@ export class Registry {
       // liveness is a property of the transport, not of a re-register.
       existing.ws = ws;
       existing.channelCapable = channelCapable;
+      // Refresh ccPid so a late-arriving identity upgrade (plugin
+      // upgraded mid-session, fresh ppid info) flows into findByHostPid
+      // without needing a reconnect.
+      if (ccPid !== null) existing.ccPid = ccPid;
       return { ok: true, entry: existing, restored: false };
     }
 
@@ -132,9 +143,24 @@ export class Registry {
       connectedAt: new Date(),
       lastPongAt: Date.now(),
       channelCapable,
+      ccPid,
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };
+  }
+
+  /**
+   * Find the connected agent that owns (host, ccPid). Used by
+   * MirrorRegistry to resolve the current mirror-session label from a
+   * live MCP registration — including immediately after a hub restart,
+   * where the plugin has re-announced itself with the same ccPid.
+   */
+  findByHostPid(host: string, ccPid: number): AgentEntry | null {
+    if (!host || !Number.isFinite(ccPid)) return null;
+    for (const entry of this.agents.values()) {
+      if (entry.host === host && entry.ccPid === ccPid) return entry;
+    }
+    return null;
   }
 
   unregister(fullName: string): void {

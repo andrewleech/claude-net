@@ -438,4 +438,74 @@ describe("Registry", () => {
     if (!second.ok) return;
     expect(second.entry.lastPongAt).toBe(initial);
   });
+
+  // ── ccPid + findByHostPid (rename-join) ────────────────────────────
+
+  test("register stores ccPid on the entry", () => {
+    const ws = mockWs();
+    const result = registry.register("pid:alice@host", ws, undefined, {
+      ccPid: 4242,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.entry.ccPid).toBe(4242);
+  });
+
+  test("register defaults ccPid to null when option omitted", () => {
+    const ws = mockWs();
+    const result = registry.register("pid:alice@host", ws);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.entry.ccPid).toBeNull();
+  });
+
+  test("same-identity re-register refreshes ccPid when supplied", () => {
+    const ws = mockWs();
+    const identity = {};
+    registry.register("pid:alice@host", ws, identity, { ccPid: 1000 });
+    const second = registry.register("pid:alice@host", ws, identity, {
+      ccPid: 2000,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.entry.ccPid).toBe(2000);
+  });
+
+  test("same-identity re-register without ccPid keeps the previous value", () => {
+    const ws = mockWs();
+    const identity = {};
+    registry.register("pid:alice@host", ws, identity, { ccPid: 1000 });
+    const second = registry.register("pid:alice@host", ws, identity);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.entry.ccPid).toBe(1000);
+  });
+
+  test("findByHostPid returns the entry matching (host, ccPid)", () => {
+    const wsA = mockWs();
+    const wsB = mockWs();
+    registry.register("a:alice@host1", wsA, {}, { ccPid: 1000 });
+    registry.register("b:alice@host2", wsB, {}, { ccPid: 2000 });
+    expect(registry.findByHostPid("host1", 1000)?.fullName).toBe(
+      "a:alice@host1",
+    );
+    expect(registry.findByHostPid("host2", 2000)?.fullName).toBe(
+      "b:alice@host2",
+    );
+  });
+
+  test("findByHostPid returns null when no entry matches", () => {
+    const ws = mockWs();
+    registry.register("a:alice@host", ws, {}, { ccPid: 1000 });
+    expect(registry.findByHostPid("host", 9999)).toBeNull();
+    expect(registry.findByHostPid("other", 1000)).toBeNull();
+  });
+
+  test("findByHostPid rejects empty host and non-finite ccPid", () => {
+    const ws = mockWs();
+    registry.register("a:alice@host", ws, {}, { ccPid: 1000 });
+    expect(registry.findByHostPid("", 1000)).toBeNull();
+    expect(registry.findByHostPid("host", Number.NaN)).toBeNull();
+    expect(registry.findByHostPid("host", Number.POSITIVE_INFINITY)).toBeNull();
+  });
 });

@@ -141,6 +141,7 @@ describe("plugin helpers", () => {
         name: "myagent",
         channel_capable: expect.any(Boolean),
         plugin_version: expect.any(String),
+        cc_pid: process.ppid,
       });
     });
 

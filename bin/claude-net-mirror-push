@@ -4,7 +4,10 @@
 // Reads a JSON hook payload from stdin, POSTs it to the local mirror-agent
 // on 127.0.0.1. Always exits 0 — a failing mirror must never fail the hook.
 //
-// Budget: 50ms hard timeout. Measured hot-path p99 < 2ms on loopback.
+// Budget: 50ms hard timeout. Linux hot-path p99 < 2ms on loopback. macOS
+// pays ~5ms per Bun.spawnSync(["ps"]) call inside resolveCcPid() and walks
+// up to 4 ancestors, so worst-case macOS p99 is ~20ms before the fetch
+// even starts — still well inside the budget but not the same shape.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -12,6 +15,29 @@ import * as path from "node:path";
 
 const STATE_DIR = "/tmp/claude-net";
 const HOOK_TIMEOUT_MS = 50;
+
+/**
+ * Regex used by `resolveCcPid()` to identify the Claude Code binary
+ * while walking up the process tree. argv[0] of the ancestor process
+ * is tested against this — match on NUL (/proc), whitespace (ps), or
+ * end-of-string to stay robust across Linux and macOS.
+ *
+ * Override with `CLAUDE_NET_CC_BINARY_PATTERN=<regex>` if your install
+ * uses a non-default binary name. Invalid pattern falls back to the
+ * default — pattern-error never breaks the hook.
+ */
+const CC_BINARY_PATTERN_SRC =
+  process.env.CLAUDE_NET_CC_BINARY_PATTERN ??
+  "\\/claude-patched(?:\\x00|\\s|$)";
+const CC_BINARY_PATTERN = safeCompileRegex(CC_BINARY_PATTERN_SRC);
+
+function safeCompileRegex(src: string): RegExp {
+  try {
+    return new RegExp(src);
+  } catch {
+    return /\/claude-patched(?:\x00|\s|$)/;
+  }
+}
 
 async function main(): Promise<void> {
   const payload = await readStdin();
@@ -48,6 +74,7 @@ function enrichPayload(raw: string): string {
       obj._mirror_env = {
         TMUX: process.env.TMUX ?? "",
         TMUX_PANE: process.env.TMUX_PANE ?? "",
+        CC_PID: resolveCcPid(),
       };
       return JSON.stringify(obj);
     }
@@ -93,3 +120,62 @@ main().catch(() => {
 
 // Silence unused-import warnings for os (kept for future use).
 void os;
+
+/**
+ * Walk up the process tree to find Claude Code. `process.ppid` is
+ * unreliable for this because Claude Code runs hooks via `sh -c
+ * "<command>"` — the direct parent is an ephemeral shell that dies
+ * immediately. Walks up to 4 ancestors looking for a cmdline that
+ * matches CC_BINARY_PATTERN; falls back to process.ppid if nothing
+ * matches.
+ */
+function resolveCcPid(): number {
+  const direct = process.ppid;
+  let pid = direct;
+  for (let i = 0; i < 4; i++) {
+    const info = readProcessInfo(pid);
+    if (CC_BINARY_PATTERN.test(info.cmdline)) {
+      return pid;
+    }
+    if (!info.ppid || info.ppid <= 1) break;
+    pid = info.ppid;
+  }
+  return direct;
+}
+
+/**
+ * Read a process's ppid + cmdline. Linux reads /proc directly (no
+ * subprocess cost); macOS/BSD shells out to `ps -o ppid=,command=`
+ * (~5 ms per call).
+ */
+function readProcessInfo(pid: number): { ppid: number; cmdline: string } {
+  if (process.platform === "linux") {
+    try {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = status.match(/^PPid:\s*(\d+)/m);
+      return {
+        ppid: m?.[1] ? Number.parseInt(m[1], 10) : 0,
+        cmdline,
+      };
+    } catch {
+      return { ppid: 0, cmdline: "" };
+    }
+  }
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["ps", "-o", "ppid=,command=", "-p", String(pid)],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = new TextDecoder().decode(result.stdout).trim();
+    const m = out.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m?.[1]) return { ppid: 0, cmdline: "" };
+    return {
+      ppid: Number.parseInt(m[1], 10),
+      cmdline: m[2] ?? "",
+    };
+  } catch {
+    return { ppid: 0, cmdline: "" };
+  }
+}

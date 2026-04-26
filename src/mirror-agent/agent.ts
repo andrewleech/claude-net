@@ -41,6 +41,12 @@ interface SessionState {
   sid: string;
   ownerAgent: string;
   cwd: string;
+  /** Host this mirror-agent is running on — sent with every session POST
+   *  so the hub can join mirror sessions to MCP agents by (host, ccPid). */
+  host: string;
+  /** PID of the Claude Code process that owns this session. null if the
+   *  hook wrapper didn't supply it (pre-CC_PID rollout). */
+  ccPid: number | null;
   transcriptPath: string | null;
   ws: HubClient | null;
   seenUuids: Set<string>;
@@ -254,6 +260,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         ingested.cwd,
         ingested.transcriptPath,
         ingested.tmuxPane,
+        ingested.ccPid,
       );
       if (!session) {
         return new Response("hub unavailable", { status: 503 });
@@ -269,6 +276,38 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // Update tmux pane on each hook — if the user moves panes, we track it.
       if (ingested.tmuxPane && session.tmuxPane !== ingested.tmuxPane) {
         session.tmuxPane = ingested.tmuxPane;
+      }
+      // The Claude Code PID on an existing sid changes when the user
+      // --continues a session under a fresh CC process. Pick it up and
+      // re-POST so the hub's rename-join matches the current plugin,
+      // not a dead pid from the previous CC. We mutate session.ccPid
+      // ONLY on a successful POST — otherwise a transient hub blip
+      // would advance local state past the hub's, and the next-hook
+      // check below would see them equal and never retry.
+      if (
+        typeof ingested.ccPid === "number" &&
+        Number.isFinite(ingested.ccPid) &&
+        session.ccPid !== ingested.ccPid
+      ) {
+        const newPid = ingested.ccPid;
+        fetch(`${hubUrl}/api/mirror/session`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_agent: session.ownerAgent,
+            cwd: session.cwd,
+            sid: session.sid,
+            host: session.host,
+            cc_pid: newPid,
+          }),
+        })
+          .then((res) => {
+            if (res.ok) session.ccPid = newPid;
+          })
+          .catch(() => {
+            // Best-effort; next hook retries because we left
+            // session.ccPid stale.
+          });
       }
     }
 
@@ -353,13 +392,23 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     cwd: string | undefined,
     transcriptPath: string | undefined,
     tmuxPane: string | undefined,
+    ccPid: number | undefined,
   ): Promise<SessionState | null> {
     const ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
+    const host = os.hostname() || "host";
+    const resolvedPid =
+      typeof ccPid === "number" && Number.isFinite(ccPid) ? ccPid : null;
     try {
       const res = await fetch(`${hubUrl}/api/mirror/session`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ owner_agent: ownerAgent, cwd: cwd ?? "", sid }),
+        body: JSON.stringify({
+          owner_agent: ownerAgent,
+          cwd: cwd ?? "",
+          sid,
+          host,
+          cc_pid: resolvedPid,
+        }),
       });
       if (!res.ok) {
         log(`session create failed: HTTP ${res.status} ${await res.text()}`);
@@ -375,6 +424,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       sid,
       ownerAgent,
       cwd: cwd ?? "",
+      host,
+      ccPid: resolvedPid,
       transcriptPath: transcriptPath ?? null,
       ws: null,
       seenUuids: new Set(),
@@ -429,6 +480,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             owner_agent: session.ownerAgent,
             cwd: session.cwd,
             sid: session.sid,
+            host: session.host,
+            cc_pid: session.ccPid,
           }),
         }).catch(() => {
           // WS onClose will retry; nothing to do here.
@@ -494,6 +547,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
               owner_agent: session.ownerAgent,
               cwd: session.cwd,
               sid: session.sid,
+              host: session.host,
+              cc_pid: session.ccPid,
             }),
           });
           if (res.ok) {

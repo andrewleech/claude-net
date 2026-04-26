@@ -163,10 +163,19 @@ export function wsPlugin(
               ? data.channel_capable
               : false;
 
+          // Plugins from before the (host, cc_pid) join landed don't
+          // send `cc_pid`. Treat as null — the rename-join silently
+          // no-ops for that session until the plugin upgrades.
+          const ccPid =
+            typeof data.cc_pid === "number" && Number.isFinite(data.cc_pid)
+              ? data.cc_pid
+              : null;
+
           // Use ws itself as the sendable reference — it persists and can send.
           // Use ws.raw for identity comparison in registry.
           const result = registry.register(data.name, ws, ws.raw, {
             channelCapable,
+            ccPid,
           });
           if (!result.ok) {
             sendResponse(ws, requestId, false, undefined, result.error);
@@ -214,8 +223,11 @@ export function wsPlugin(
           });
 
           // If this was a rename (same WS, new name), tell every
-          // dashboard to drop the old name and propagate the rename
-          // into mirror sessions so sidebar labels update in place.
+          // dashboard to drop the old agent name. Mirror-session
+          // relabel happens via the (host, cc_pid) join below — the
+          // old wsIdentity-based renameOwner path is gone because it
+          // matched by ownerAgent string and would broad-rename fork
+          // siblings sharing a cwd-derived owner.
           if (result.renamedFrom) {
             dashboardBroadcastFn({
               event: "agent:disconnected",
@@ -226,8 +238,17 @@ export function wsPlugin(
               fullName: result.renamedFrom,
               reason: "renamed",
             });
-            mirrorRegistry?.renameOwner(
-              result.renamedFrom,
+          }
+
+          // (host, cc_pid) join: rewrite every mirror session whose
+          // identity matches this agent's, so a rename via register()
+          // propagates to the dashboard's mirror-row label even after
+          // a hub restart (where wsIdentity-based rename detection
+          // can't fire). Silent no-op when ccPid is null.
+          if (mirrorRegistry && ccPid !== null) {
+            mirrorRegistry.attachAgent(
+              result.entry.host,
+              ccPid,
               result.entry.fullName,
             );
           }

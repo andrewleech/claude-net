@@ -71,4 +71,57 @@ describe("mirror session loss + recovery", () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]?.sid).toBe("rewind-sid");
   });
+
+  test("POST /api/mirror/session round-trips host + cc_pid", async () => {
+    const res = await fetch(`http://localhost:${port}/api/mirror/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        owner_agent: "skydeck:alice@laptop",
+        cwd: "/work/sky",
+        sid: "wire-sid",
+        host: "laptop",
+        cc_pid: 4242,
+      }),
+    });
+    expect(res.ok).toBe(true);
+    const entry = reg.sessions.get("wire-sid");
+    expect(entry?.host).toBe("laptop");
+    expect(entry?.ccPid).toBe(4242);
+  });
+
+  test("hub-restart rename flow: agent's pre-registered name re-applies to a freshly-POSTed session", () => {
+    // Simulate the hub-restart sequence end-to-end at the registry level:
+    //   1. MCP plugin re-registers with its chosen name + cc_pid.
+    //   2. Mirror-agent re-POSTs the session (cwd-derived owner) with
+    //      the same (host, cc_pid).
+    //   3. Hub's agentLookup at session-creation time pulls the
+    //      registered name and the session is born already-relabeled.
+    // No persisted state — the join is rebuilt from live announcements.
+
+    // Step 1: register the agent first.
+    const namesByIdentity = new Map<string, string>();
+    namesByIdentity.set("laptop|4242", "yos:alice@laptop");
+    reg.setAgentLookup(
+      (host, ccPid) => namesByIdentity.get(`${host}|${ccPid}`) ?? null,
+    );
+
+    // Step 2: mirror-agent POSTs the session (cwd-derived owner).
+    const result = reg.createSession(
+      "skydeck:alice@laptop",
+      "/work/sky",
+      "post-restart-sid",
+      "laptop",
+      4242,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Step 3: session is born under the registered name, not the
+    // cwd-derived default. No mirror:owner_renamed broadcast needed
+    // because the rename happened at session-creation time.
+    expect(result.entry.ownerAgent).toBe("yos:alice@laptop");
+    expect(result.entry.host).toBe("laptop");
+    expect(result.entry.ccPid).toBe(4242);
+  });
 });

@@ -29,6 +29,11 @@ function createHub() {
     }
   });
 
+  // Forward half of the (host, cc_pid) join — same wiring as prod.
+  mirror.setAgentLookup(
+    (host, ccPid) => registry.findByHostPid(host, ccPid)?.fullName ?? null,
+  );
+
   const eventLog = new EventLog(100);
   let app = new Elysia();
   app = wsPlugin(app, registry, teams, router, eventLog, mirror);
@@ -402,44 +407,65 @@ describe("WebSocket Plugin (integration)", () => {
     expect(resp.ok).toBe(false);
   });
 
-  test("register under a new name renames matching mirror sessions", async () => {
+  test("register with matching cc_pid relabels mirror sessions via attachAgent", async () => {
     const ws = await connectWs(port);
     openSockets.push(ws);
 
-    // Initial register as "skydeck:alice@host"
-    const p1 = waitForMessage(ws);
-    ws.send(
-      JSON.stringify({
-        action: "register",
-        name: "skydeck:alice@host",
-        channel_capable: true,
-        requestId: "r1",
-      }),
-    );
-    await p1;
-
-    // Seed a mirror session under that ownerAgent.
-    hub.mirror.createSession("skydeck:alice@host", "/work/skydeck", "sid-1");
-    expect(hub.mirror.sessions.get("sid-1")?.ownerAgent).toBe(
+    // Seed a mirror session tagged with the (host, cc_pid) the
+    // plugin will announce below — back half of the join arrives
+    // before the front half.
+    hub.mirror.createSession(
       "skydeck:alice@host",
+      "/work/skydeck",
+      "sid-1",
+      "host",
+      4242,
     );
 
-    // Re-register as "thisisnew:alice@host" — rename path.
-    const p2 = collectMessages(ws, 2);
+    // Register with cc_pid: attachAgent fires and rewrites the session.
+    const p1 = waitForMessage(ws);
     ws.send(
       JSON.stringify({
         action: "register",
         name: "thisisnew:alice@host",
         channel_capable: true,
-        requestId: "r2",
+        cc_pid: 4242,
+        requestId: "r1",
       }),
     );
-    await p2;
+    await p1;
 
     expect(hub.mirror.sessions.get("sid-1")?.ownerAgent).toBe(
       "thisisnew:alice@host",
     );
-    expect(hub.registry.agents.has("skydeck:alice@host")).toBe(false);
     expect(hub.registry.agents.has("thisisnew:alice@host")).toBe(true);
+  });
+
+  test("register without cc_pid leaves mirror sessions alone (pre-rollout client)", async () => {
+    const ws = await connectWs(port);
+    openSockets.push(ws);
+
+    hub.mirror.createSession(
+      "skydeck:old@host",
+      "/work/skydeck",
+      "sid-noPid",
+      "host",
+      5555,
+    );
+
+    const p1 = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "register",
+        name: "renamed:old@host",
+        channel_capable: true,
+        requestId: "nopid-1",
+      }),
+    );
+    await p1;
+
+    expect(hub.mirror.sessions.get("sid-noPid")?.ownerAgent).toBe(
+      "skydeck:old@host",
+    );
   });
 });

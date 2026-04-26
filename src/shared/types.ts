@@ -30,6 +30,15 @@ export interface RegisterFrame {
    * register; on mismatch or missing it returns an `upgrade_hint` in the
    * register response data.   */
   plugin_version: string;
+  /**
+   * Claude Code PID (plugin's `process.ppid` — the plugin is `exec`-
+   * replaced from bash so its parent IS Claude Code itself). Paired
+   * with the @host suffix of the agent name, the hub uses this to join
+   * mirror sessions to MCP agents on register so a `register("foo")`
+   * rename propagates to the dashboard's mirror-session label even
+   * across hub restarts. Optional — pre-rollout plugins won't send it.
+   */
+  cc_pid?: number;
   requestId?: string;
 }
 

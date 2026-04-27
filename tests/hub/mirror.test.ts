@@ -128,6 +128,148 @@ describe("MirrorRegistry", () => {
     expect(r.entry.watchers.size).toBe(0);
   });
 
+  test("activityState transitions: fresh session is awaiting_input", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("activityState: user_prompt → busy, Stop → awaiting_input", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(sid, makeFrame(sid, "u-prompt"));
+    expect(r.entry.activityState).toBe("busy");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-stop", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "end_turn",
+        },
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("activityState: SubagentStop preserves busy state", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(sid, makeFrame(sid, "u-prompt"));
+    expect(r.entry.activityState).toBe("busy");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-sub-stop", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "sub done",
+          stop_reason: "end_turn",
+          subagent: true,
+        },
+      }),
+    );
+    // Parent agent still busy — subagent stop is a no-op.
+    expect(r.entry.activityState).toBe("busy");
+  });
+
+  test("activityState: SubagentStop while already awaiting stays awaiting", () => {
+    // A subagent can finish AFTER the parent has already stopped (e.g. a
+    // background Task whose stream lags the top-level Stop). The dot must
+    // not flicker back to busy in that window.
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-stop", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "end_turn",
+        },
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-sub-late", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "sub late",
+          stop_reason: "end_turn",
+          subagent: true,
+        },
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("activityState: restored session preserves prior state", () => {
+    // After a transient agent disconnect we re-bind the same sid; the
+    // stored activityState should carry across so the dot doesn't reset
+    // to a misleading default.
+    const r = reg.createSession("a:u@h", "/a", "sid-restore");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    reg.recordEvent(r.entry.sid, makeFrame(r.entry.sid, "u-prompt"));
+    expect(r.entry.activityState).toBe("busy");
+    const r2 = reg.createSession("a:u@h", "/a", "sid-restore");
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.restored).toBe(true);
+    expect(r2.entry.activityState).toBe("busy");
+  });
+
+  test("activityState: notification flips to awaiting_input", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(sid, makeFrame(sid, "u-prompt"));
+    expect(r.entry.activityState).toBe("busy");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-note", {
+        kind: "notification",
+        payload: { kind: "notification", text: "Permission required" },
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("activity broadcast carries activity_state to dashboards", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const dashSent: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((evt) => dashSent.push(evt));
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "u-stop", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "end_turn",
+        },
+      }),
+    );
+    const activity = dashSent.find((m) => m.event === "mirror:activity");
+    expect(activity).toBeDefined();
+    expect(activity?.activity_state).toBe("awaiting_input");
+  });
+
   test("closeSession emits session_end event to watchers", () => {
     const r = reg.createSession("a:u@h", "/a");
     expect(r.ok).toBe(true);

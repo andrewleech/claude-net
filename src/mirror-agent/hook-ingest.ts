@@ -126,6 +126,7 @@ function hookToPayload(
         text: value,
         stop_reason: stringField(p.stop_reason) ?? "",
         ...(truncated ? { truncated: true } : {}),
+        ...(hook === "SubagentStop" ? { subagent: true } : {}),
       };
     }
 

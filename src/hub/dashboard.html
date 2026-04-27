@@ -4803,19 +4803,6 @@
       var el;
       var ts = formatTime(new Date(evt.ts).toISOString());
 
-      // claude-net's _ack_channel is a silent self-test handshake — the
-      // hub's notification text even tells the LLM "Do not narrate this
-      // to the user; the tool result is silent." Rendering it as a
-      // tool-call card with collapsible INPUT/RESULT panels in the
-      // mirror transcript is just clutter. Drop both halves on the
-      // floor.
-      if (
-        (kind === 'tool_call' || kind === 'tool_result') &&
-        payload.tool_name === 'mcp__claude-net___ack_channel'
-      ) {
-        return;
-      }
-
       if (kind === 'user_prompt') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-user';

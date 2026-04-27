@@ -63,6 +63,13 @@ type HubFrame =
 const REQUEST_TIMEOUT_MS = 10_000;
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+// If we receive nothing from the hub for this long, treat the socket as
+// dead and force-close it. The hub pings every 5s and evicts after 30s
+// of silence; this threshold sits just past that so the hub gets first
+// shot at a clean close. Without this, a suspend/resume can leave the
+// kernel TCP socket in a zombie ESTAB state — readyState stays OPEN, no
+// close fires, and reconnect never runs.
+const WATCHDOG_TIMEOUT_MS = 31_000;
 const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
 /** Delay between successful register and the channel self-test
  *  notification. Long enough that the user-facing "registered as" line
@@ -480,6 +487,7 @@ export class Plugin {
   private hubWsUrl = "";
   private reconnectDelay = RECONNECT_INITIAL_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
 
   // ── Identity ─────────────────────────────
@@ -946,6 +954,7 @@ export class Plugin {
     this.ws.on("open", () => {
       log("Connected to hub");
       this.reconnectDelay = RECONNECT_INITIAL_MS;
+      this.resetWatchdog();
 
       // Defer register until MCP `initialize` has completed — otherwise
       // `channel_capable` on the wire would be the `false` default and
@@ -954,11 +963,19 @@ export class Plugin {
     });
 
     this.ws.on("message", (data: WebSocket.Data) => {
+      this.resetWatchdog();
       this.handleHubFrame(data.toString());
+    });
+
+    // The hub sends native WS pings every 5s. The `ws` library auto-replies
+    // with pongs, but we also use the ping arrival as a liveness signal.
+    this.ws.on("ping", () => {
+      this.resetWatchdog();
     });
 
     this.ws.on("close", () => {
       log("Disconnected from hub");
+      this.clearWatchdog();
       this.ws = null;
       if (this.registeredName) {
         writeSessionState({
@@ -974,6 +991,28 @@ export class Plugin {
     this.ws.on("error", (err: Error) => {
       log(`WebSocket error: ${err.message}`);
     });
+  }
+
+  private resetWatchdog(): void {
+    if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+    this.watchdogTimer = setTimeout(() => {
+      this.watchdogTimer = null;
+      log(`No hub traffic for ${WATCHDOG_TIMEOUT_MS}ms — terminating socket`);
+      // terminate() bypasses the close handshake and synthesizes the
+      // close event locally, which drives scheduleReconnect.
+      try {
+        this.ws?.terminate();
+      } catch {
+        // ignore — the close handler will still run
+      }
+    }, WATCHDOG_TIMEOUT_MS).unref();
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {
@@ -1050,6 +1089,7 @@ export class Plugin {
   shutdown(): void {
     deleteSessionState();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.clearWatchdog();
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();

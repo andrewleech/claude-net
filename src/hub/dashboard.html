@@ -367,6 +367,20 @@
   }
   .m-evt-tool.is-error::after { background: var(--accent); }
 
+  /* claude-net's _ack_channel: collapse the standard tool card to a
+     single muted line. No headline padding, no status badge, no
+     INPUT/RESULT details. */
+  .m-evt-tool.m-evt-ack {
+    padding: 2px 0;
+    color: var(--text-muted);
+    font-size: 11px;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .m-evt-tool.m-evt-ack .m-tool-name { color: var(--gold); }
+  .m-evt-tool.m-evt-ack .m-ack-text { letter-spacing: 0.4px; }
+
   /* Shared tool-card grammar. Every tool renders the same way:
      `[TAG]  target-string          STATUS` with optional sub-line. */
   .m-tool-headline {
@@ -3813,6 +3827,22 @@
     }
 
     var TOOL_RENDERERS = {
+      // claude-net's _ack_channel is the silent channel-liveness
+      // handshake. The default unknown-tool render gives a full card
+      // with collapsible INPUT (RAW) / RESULT (RAW) panels, which
+      // bloats the transcript for what's a once-per-session ack. Render
+      // as a single muted line instead.
+      "mcp__claude-net___ack_channel": {
+        call: function(_p, el) {
+          el.classList.add("m-evt-ack");
+          el.innerHTML =
+            '<span class="m-tool-name">claude-net</span>' +
+            '<span class="m-ack-text">channel ack</span>';
+        },
+        result: function() {
+          // No-op — the call line is already the whole story.
+        },
+      },
       Read: {
         call: function(p, el) {
           var fp = p.input && p.input.file_path;

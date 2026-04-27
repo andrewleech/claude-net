@@ -73,6 +73,22 @@ describe("ingestHook", () => {
       throw new Error("wrong kind");
     expect(out.frame.payload.text).toBe("done");
     expect(out.frame.payload.stop_reason).toBe("end_turn");
+    expect(out.frame.payload.subagent).toBeUndefined();
+  });
+
+  test("SubagentStop tags payload with subagent: true", () => {
+    const out = ingestHook({
+      hook_event_name: "SubagentStop",
+      session_id: "s-1",
+      last_assistant_message: "subdone",
+      stop_reason: "end_turn",
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.kind).toBe("assistant_message");
+    if (out.frame.payload.kind !== "assistant_message")
+      throw new Error("wrong kind");
+    expect(out.frame.payload.subagent).toBe(true);
   });
 
   test("PreToolUse → tool_call payload", () => {

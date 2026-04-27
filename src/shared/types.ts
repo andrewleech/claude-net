@@ -433,10 +433,20 @@ export interface MirrorWatcherLeftEvent {
  * bump last_event_at and re-sort the sidebar without receiving full
  * per-session payloads (which can be KB-sized).
  */
+/**
+ * Coarse "is the agent busy or waiting on the user?" state, derived
+ * from frame kinds the hub has already seen. The dashboard uses it to
+ * draw an attention pulse on the session-row dot when the agent has
+ * stopped working and is waiting on input — without any new hooks.
+ */
+export type MirrorActivityState = "busy" | "awaiting_input";
+
 export interface MirrorActivityEvent {
   event: "mirror:activity";
   sid: string;
   ts: number;
+  /** Latest derived activity state for the session. */
+  activity_state: MirrorActivityState;
 }
 
 /**
@@ -621,6 +631,12 @@ export interface MirrorAssistantMessagePayload {
   text: string;
   stop_reason: string;
   truncated?: boolean;
+  /**
+   * True when this frame originated from Claude Code's SubagentStop hook
+   * rather than the top-level Stop. The parent agent is still busy, so
+   * the hub does not flip session activity state to awaiting_input.
+   */
+  subagent?: boolean;
 }
 
 export interface MirrorToolCallPayload {
@@ -688,4 +704,6 @@ export interface MirrorSessionSummary {
   closed_at: string | null;
   watcher_count: number;
   transcript_len: number;
+  /** Coarse derived state used to color the dashboard session-row dot. */
+  activity_state: MirrorActivityState;
 }

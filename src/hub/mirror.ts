@@ -2,8 +2,10 @@ import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import type {
   DashboardEvent,
+  MirrorActivityState,
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
+  MirrorEventPayload,
   MirrorHistoryRequestFrame,
   MirrorInjectFrame,
   MirrorListCommandsFrame,
@@ -64,6 +66,46 @@ export interface MirrorSessionEntry {
   nextInjectSeq: number;
   closedAt: Date | null;
   retentionTimerId: ReturnType<typeof setTimeout> | null;
+  /**
+   * Derived from the kinds of frames that have flowed through. A fresh
+   * session is `awaiting_input` (Claude hasn't been prompted yet); a
+   * UserPromptSubmit / tool call flips to `busy`; the top-level Stop
+   * hook (assistant_message without `subagent`) or a Notification flips
+   * back to `awaiting_input`.
+   */
+  activityState: MirrorActivityState;
+}
+
+/**
+ * State machine that maps a frame kind/payload onto the next activity
+ * state. Pure function so it's trivially unit-testable.
+ *
+ * SubagentStop is intentionally a no-op: the parent agent is still
+ * running, so the row dot should keep its current state until the
+ * top-level Stop arrives.
+ */
+export function nextActivityState(
+  prev: MirrorActivityState,
+  kind: MirrorEventFrame["kind"],
+  payload: MirrorEventPayload,
+): MirrorActivityState {
+  switch (kind) {
+    case "user_prompt":
+    case "tool_call":
+    case "tool_result":
+    case "compact":
+      return "busy";
+    case "assistant_message":
+      // SubagentStop preserves prev state — parent is still working.
+      if (payload.kind === "assistant_message" && payload.subagent === true) {
+        return prev;
+      }
+      return "awaiting_input";
+    case "notification":
+      return "awaiting_input";
+    default:
+      return prev;
+  }
 }
 
 export interface MirrorRegistryOptions {
@@ -226,6 +268,7 @@ export class MirrorRegistry {
       nextInjectSeq: 0,
       closedAt: null,
       retentionTimerId: null,
+      activityState: "awaiting_input",
     };
     this.sessions.set(actualSid, entry);
 
@@ -284,6 +327,11 @@ export class MirrorRegistry {
       entry.transcript.splice(0, entry.transcript.length - this.transcriptRing);
     }
     entry.lastEventAt = new Date();
+    entry.activityState = nextActivityState(
+      entry.activityState,
+      frame.kind,
+      frame.payload,
+    );
 
     // Durable write-through. NullStore is a no-op.
     try {
@@ -318,6 +366,7 @@ export class MirrorRegistry {
       event: "mirror:activity",
       sid,
       ts: frame.ts,
+      activity_state: entry.activityState,
     });
 
     return { ok: true, duplicate: false };
@@ -953,6 +1002,7 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
     watcher_count: entry.watchers.size,
     transcript_len: entry.transcript.length,
+    activity_state: entry.activityState,
   };
 }
 
@@ -1031,6 +1081,10 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           created_at: entry.createdAt.toISOString(),
           last_event_at: entry.lastEventAt.toISOString(),
           closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
+          // activity_state intentionally omitted — the dashboard
+          // sidebar reads it from MirrorSessionSummary (via
+          // /sessions/all) and mirror:activity broadcasts. Keeping it
+          // out of init/transcript avoids a second source of truth.
           transcript: entry.transcript.map((f) => ({
             uuid: f.uuid,
             kind: f.kind,
@@ -1413,6 +1467,10 @@ export function wsMirrorPlugin(
           created_at: entry.createdAt.toISOString(),
           last_event_at: entry.lastEventAt.toISOString(),
           closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
+          // activity_state intentionally omitted — the dashboard
+          // sidebar reads it from MirrorSessionSummary (via
+          // /sessions/all) and mirror:activity broadcasts. Keeping it
+          // out of init/transcript avoids a second source of truth.
           transcript: entry.transcript.map((f) => ({
             uuid: f.uuid,
             kind: f.kind,

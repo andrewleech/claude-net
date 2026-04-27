@@ -1490,6 +1490,26 @@
     30% { opacity: 0.25; }
   }
 
+  /* Brief double-blink for session-row dots when the agent is waiting
+     on user input. Distinct rhythm from live-pulse so the meaning is
+     "needs your attention" rather than "stream is live". The dot stays
+     mostly solid (~70% of the cycle) and dips twice in quick
+     succession, then rests.
+
+     Infinite by design: renderAgents() rebuilds the sidebar via
+     innerHTML on every mirror:activity, which would restart any
+     iteration-capped animation across ALL sessions whenever ANY
+     session emits a frame — making a finite count behave erratically.
+     Letting it run continuously keeps the visual urgency until the
+     transition back to busy happens naturally. */
+  @keyframes dot-attention {
+    0%, 14%, 28%, 100% { opacity: 1; }
+    7%, 21% { opacity: 0.2; }
+  }
+  .agent-dot.online.awaiting {
+    animation: dot-attention 2.4s ease-in-out infinite;
+  }
+
   /* ── Misc ── */
   /* Panel-body scrollable area inside sidebar/teams panels. */
   .panel-body { padding: 0; }
@@ -1501,6 +1521,7 @@
   @media (prefers-reduced-motion: reduce) {
     .m-evt { animation: none; }
     header h1::before, #mirror-conn::before { animation: none; }
+    .agent-dot.online.awaiting { animation: none; }
   }
 
   /* ── Unified shell ────────────────────────────────────────────────
@@ -2384,6 +2405,7 @@
         const entry = mirrorBySid.get(event.sid);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
+          if (event.activity_state) entry.activity_state = event.activity_state;
           renderAgents();
         }
         break;
@@ -2658,12 +2680,14 @@
     var parts = cwd.split('/').filter(Boolean);
     var cwdShort = parts.length <= 2 ? cwd : '…/' + parts.slice(-2).join('/');
     var age = relativeTime(sess.last_event_at);
+    var awaiting = sess.activity_state === 'awaiting_input' && !sess.closed_at;
+    var dotCls = 'agent-dot online' + (awaiting ? ' awaiting' : '');
     return (
       '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + '"'
       + ' href="#agent=' + encodeURIComponent(sess.sid) + '"'
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
-      + '<span class="agent-dot online"></span>'
+      + '<span class="' + dotCls + '"' + (awaiting ? ' title="Waiting for user input"' : '') + '></span>'
       + '<div class="cn-session-body">'
       +   '<div class="cn-session-title">' + escapeHtml(label) + suffix + '</div>'
       +   '<div class="cn-session-sub">'

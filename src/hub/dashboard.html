@@ -3228,6 +3228,13 @@
   var activeAgentSid = null;
   var mirrorTeardown = null;
 
+  // Per-sid scroll memory so switching back to a session puts the user
+  // back where they were reading instead of at the top (or wrong place).
+  // Cleared on page reload — that's fine; this is a within-tab convenience,
+  // not durable history. Stored as { atBottom, scrollTop } so we can
+  // distinguish "stay glued to bottom" from "exact pixel restore".
+  var mirrorScrollMemory = new Map();
+
   function detachMirror() {
     if (typeof mirrorTeardown === 'function') {
       try { mirrorTeardown(); } catch (e) { /* ignore */ }
@@ -3291,10 +3298,58 @@
     var taskState = new Map();
     var pendingTaskCreates = new Map(); // tool_use_id → {subject, ...}
 
+    // Debounced save of the current scroll position so that switching
+    // back to this session restores the user's reading place.
+    var scrollSaveTimer = null;
+    function captureScrollState() {
+      var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+      var atBottom = distance <= SCROLL_LOCK_THRESHOLD;
+      mirrorScrollMemory.set(sid, { atBottom: atBottom, scrollTop: transcriptEl.scrollTop });
+    }
+
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
+      if (scrollSaveTimer) clearTimeout(scrollSaveTimer);
+      scrollSaveTimer = setTimeout(captureScrollState, 200);
     }, { signal: attachSig });
+
+    // Initial-replay tail-snap loop. content-visibility on .m-evt rows
+    // means scrollHeight is an estimate at first; as bottom rows paint
+    // for real on entering the viewport, scrollHeight grows and a single
+    // rAF snap lands short of the true bottom. We re-snap each frame
+    // until either the height stabilizes for a few frames in a row, the
+    // user scrolls up, or a safety timeout expires.
+    var tailLoopActive = false;
+    function disconnectTailObserver() {
+      tailLoopActive = false;
+    }
+    function startTailObserver() {
+      tailLoopActive = true;
+      var lastHeight = -1;
+      var stableFrames = 0;
+      var startedAt = performance.now();
+      function tick() {
+        if (!tailLoopActive) return;
+        if (userScrolledUp) { tailLoopActive = false; return; }
+        var h = transcriptEl.scrollHeight;
+        transcriptEl.scrollTop = h;
+        if (h === lastHeight) {
+          if (++stableFrames >= 6) { tailLoopActive = false; return; }
+        } else {
+          stableFrames = 0;
+          lastHeight = h;
+        }
+        // Hard 2s cap so we don't keep running on a transcript that
+        // never settles (e.g. long-running session under continuous load).
+        if (performance.now() - startedAt > 2000) {
+          tailLoopActive = false;
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
 
     function scrollToBottom() {
       if (userScrolledUp) return;
@@ -4993,7 +5048,10 @@
       }
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
-      userScrolledUp = false;  // fresh init → start at bottom
+      disconnectTailObserver();
+      var memory = mirrorScrollMemory.get(sid);
+      var followTail = !memory || memory.atBottom;
+      userScrolledUp = !followTail;
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
@@ -5003,7 +5061,19 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
-      scrollToBottom();
+      if (followTail) {
+        // Snap to the bottom and keep snapping while content-visibility
+        // resolves the actual heights of the bottom rows.
+        scrollToBottom();
+        startTailObserver();
+      } else {
+        // Restore the exact position the user was last reading. Use
+        // rAF so the layout pass after innerHTML has run.
+        var target = memory.scrollTop;
+        requestAnimationFrame(function() {
+          transcriptEl.scrollTop = target;
+        });
+      }
     }
 
     var mws = null;
@@ -5063,6 +5133,11 @@
     // firing handlers for the previous sid.
     mirrorTeardown = function() {
       teardownCalled = true;
+      // Capture final scroll position before we wipe the transcript so
+      // a re-attach can restore the user's reading place.
+      try { captureScrollState(); } catch (e) { /* ignore */ }
+      if (scrollSaveTimer) { clearTimeout(scrollSaveTimer); scrollSaveTimer = null; }
+      disconnectTailObserver();
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }

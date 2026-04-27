@@ -202,21 +202,21 @@
     font-size: 13px;
     line-height: 1.55;
     animation: event-flash 900ms ease-out;
-    /* Native row-level virtualization: skip layout, style, and paint
-       for rows scrolled out of view until they come back. The
-       contain-intrinsic-size hint keeps the scrollbar stable while
-       a row is virtualized — without it, the browser would treat
-       virtualized rows as zero-height and the scroll position
-       would jump. `auto 80px` is a guess at the typical row
-       height; the browser remembers the real measured height once
-       a row has been laid out, so the hint only matters for
-       never-yet-visible rows. */
-    content-visibility: auto;
-    contain-intrinsic-size: auto 80px;
     /* Scope reflow inside the row: a textarea keystroke or live WS
        append elsewhere on the page can't trigger a full-document
        style recalc across hundreds of sibling rows. */
     contain: layout style paint;
+  }
+  /* Native row-level virtualization: skip layout/style/paint for rows
+     scrolled out of view. Gated behind .is-virtualized on the parent
+     so it can be enabled only AFTER initial replay has scrolled to
+     the user's intended position — content-visibility makes
+     scrollHeight an estimate, and "scroll to end" is unreliable when
+     the estimate is wrong (especially on mobile). The transcript JS
+     adds .is-virtualized once the position has settled. */
+  .mirror-transcript.is-virtualized .m-evt {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 80px;
   }
   /* Timestamp lives in the left gutter. Populated by JS via data-ts
      (see renderEvent). Gutter is 98px wide so `HH:MM:SS am` fits on
@@ -3314,39 +3314,23 @@
       scrollSaveTimer = setTimeout(captureScrollState, 200);
     }, { signal: attachSig });
 
-    // Initial-replay tail-snap loop. content-visibility on .m-evt rows
-    // means scrollHeight is an estimate at first; as bottom rows paint
-    // for real on entering the viewport, scrollHeight grows and a single
-    // rAF snap lands short of the true bottom. We re-snap each frame
-    // until either the height stabilizes for a few frames in a row, the
-    // user scrolls up, or a safety timeout expires.
+    // Initial-replay tail-snap loop. Virtualization is OFF during
+    // replay (the .is-virtualized class is added later — see applyInit),
+    // so scrollHeight is real and a couple of rAF snaps suffice. The
+    // small loop guards against any remaining one-frame layout lag.
     var tailLoopActive = false;
     function disconnectTailObserver() {
       tailLoopActive = false;
     }
     function startTailObserver() {
       tailLoopActive = true;
-      var lastHeight = -1;
-      var stableFrames = 0;
-      var startedAt = performance.now();
+      var attempts = 0;
       function tick() {
         if (!tailLoopActive) return;
         if (userScrolledUp) { tailLoopActive = false; return; }
-        var h = transcriptEl.scrollHeight;
-        transcriptEl.scrollTop = h;
-        if (h === lastHeight) {
-          if (++stableFrames >= 6) { tailLoopActive = false; return; }
-        } else {
-          stableFrames = 0;
-          lastHeight = h;
-        }
-        // Hard 2s cap so we don't keep running on a transcript that
-        // never settles (e.g. long-running session under continuous load).
-        if (performance.now() - startedAt > 2000) {
-          tailLoopActive = false;
-          return;
-        }
-        requestAnimationFrame(tick);
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        if (++attempts < 4) requestAnimationFrame(tick);
+        else tailLoopActive = false;
       }
       requestAnimationFrame(tick);
     }
@@ -5046,6 +5030,11 @@
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
       }
+      // Turn virtualization OFF during initial replay so scrollHeight
+      // is accurate (content-visibility's estimated heights make
+      // "scroll to end" land on the wrong place — especially on
+      // mobile). Re-enabled below once the viewport has settled.
+      transcriptEl.classList.remove('is-virtualized');
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       disconnectTailObserver();
@@ -5062,8 +5051,6 @@
         hidePromptBanner();
       }
       if (followTail) {
-        // Snap to the bottom and keep snapping while content-visibility
-        // resolves the actual heights of the bottom rows.
         scrollToBottom();
         startTailObserver();
       } else {
@@ -5074,6 +5061,13 @@
           transcriptEl.scrollTop = target;
         });
       }
+      // Re-enable virtualization once the initial scroll has stuck.
+      // 800ms is generous enough for the rAF snap loop above (≤4
+      // frames) plus mobile paint settling, well under typical
+      // session-switch reaction time.
+      setTimeout(function() {
+        transcriptEl.classList.add('is-virtualized');
+      }, 800);
     }
 
     var mws = null;

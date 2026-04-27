@@ -10,6 +10,13 @@ import WebSocket from "ws";
 
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+// If we receive nothing from the hub for this long, treat the socket as
+// dead and force-close it. The hub pings every 5s and evicts after 30s
+// of silence; this threshold sits just past that. Without this, a
+// suspend/resume can leave the kernel TCP socket in a zombie ESTAB
+// state — readyState stays OPEN, no close fires, and reconnect never
+// runs.
+const WATCHDOG_TIMEOUT_MS = 31_000;
 
 export interface HubClientOptions {
   url: string;
@@ -30,6 +37,7 @@ export class HubClient {
   private ws: WebSocket | null = null;
   private reconnectDelay = RECONNECT_INITIAL_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private closing = false;
   private opts: HubClientOptions;
 
@@ -49,6 +57,7 @@ export class HubClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.clearWatchdog();
     if (this.ws) {
       try {
         this.ws.close();
@@ -85,15 +94,24 @@ export class HubClient {
 
     this.ws.on("open", () => {
       this.reconnectDelay = RECONNECT_INITIAL_MS;
+      this.resetWatchdog();
       this.opts.onOpen?.();
     });
 
     this.ws.on("message", (data: Buffer) => {
+      this.resetWatchdog();
       this.opts.onMessage?.(data.toString());
+    });
+
+    // The hub sends native WS pings every 5s. The `ws` library auto-replies
+    // with pongs, but we also use the ping arrival as a liveness signal.
+    this.ws.on("ping", () => {
+      this.resetWatchdog();
     });
 
     this.ws.on("close", (code: number, reason: Buffer) => {
       const reasonStr = reason?.toString?.() ?? "";
+      this.clearWatchdog();
       this.opts.onClose?.(code, reasonStr);
       this.ws = null;
       if (!this.closing) this.scheduleReconnect();
@@ -103,6 +121,37 @@ export class HubClient {
       this.opts.onError?.(err);
       // close will fire after — reconnect is scheduled there.
     });
+  }
+
+  private resetWatchdog(): void {
+    if (this.watchdogTimer) clearTimeout(this.watchdogTimer);
+    this.watchdogTimer = setTimeout(() => {
+      this.watchdogTimer = null;
+      this.logError(
+        `No hub traffic for ${WATCHDOG_TIMEOUT_MS}ms — terminating socket`,
+      );
+      // terminate() bypasses the close handshake and synthesizes the
+      // close event locally, which drives scheduleReconnect.
+      try {
+        this.ws?.terminate();
+      } catch {
+        // ignore — the close handler will still run
+      }
+    }, WATCHDOG_TIMEOUT_MS);
+    if (
+      this.watchdogTimer &&
+      typeof this.watchdogTimer === "object" &&
+      "unref" in this.watchdogTimer
+    ) {
+      this.watchdogTimer.unref();
+    }
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

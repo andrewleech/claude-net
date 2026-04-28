@@ -11,12 +11,16 @@ import WebSocket from "ws";
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 // If we receive nothing from the hub for this long, treat the socket as
-// dead and force-close it. The hub pings every 5s and evicts after 30s
-// of silence; this threshold sits just past that. Without this, a
-// suspend/resume can leave the kernel TCP socket in a zombie ESTAB
-// state — readyState stays OPEN, no close fires, and reconnect never
-// runs.
+// dead and force-close it. Without this, a suspend/resume can leave the
+// kernel TCP socket in a zombie ESTAB state — readyState stays OPEN, no
+// close fires, and reconnect never runs.
 const WATCHDOG_TIMEOUT_MS = 31_000;
+// The hub only sends native pings on /ws (plugin) connections, not on
+// /ws/mirror or /ws/host. So this client drives its own keepalive: it
+// pings every PING_INTERVAL_MS and resets the watchdog on the auto-pong
+// the server (Bun) sends back. Interval is well under the watchdog so a
+// single missed pong does not trip it.
+const PING_INTERVAL_MS = 5_000;
 
 export interface HubClientOptions {
   url: string;
@@ -38,6 +42,7 @@ export class HubClient {
   private reconnectDelay = RECONNECT_INITIAL_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingIntervalTimer: ReturnType<typeof setInterval> | null = null;
   private closing = false;
   private opts: HubClientOptions;
 
@@ -58,6 +63,7 @@ export class HubClient {
       this.reconnectTimer = null;
     }
     this.clearWatchdog();
+    this.clearPingInterval();
     if (this.ws) {
       try {
         this.ws.close();
@@ -95,6 +101,7 @@ export class HubClient {
     this.ws.on("open", () => {
       this.reconnectDelay = RECONNECT_INITIAL_MS;
       this.resetWatchdog();
+      this.startPingInterval();
       this.opts.onOpen?.();
     });
 
@@ -103,15 +110,16 @@ export class HubClient {
       this.opts.onMessage?.(data.toString());
     });
 
-    // The hub sends native WS pings every 5s. The `ws` library auto-replies
-    // with pongs, but we also use the ping arrival as a liveness signal.
-    this.ws.on("ping", () => {
+    // /ws/mirror and /ws/host don't get hub-side pings, so this client
+    // pings the hub itself; Bun's WebSocket auto-replies with a pong.
+    this.ws.on("pong", () => {
       this.resetWatchdog();
     });
 
     this.ws.on("close", (code: number, reason: Buffer) => {
       const reasonStr = reason?.toString?.() ?? "";
       this.clearWatchdog();
+      this.clearPingInterval();
       this.opts.onClose?.(code, reasonStr);
       this.ws = null;
       if (!this.closing) this.scheduleReconnect();
@@ -151,6 +159,31 @@ export class HubClient {
     if (this.watchdogTimer) {
       clearTimeout(this.watchdogTimer);
       this.watchdogTimer = null;
+    }
+  }
+
+  private startPingInterval(): void {
+    this.clearPingInterval();
+    this.pingIntervalTimer = setInterval(() => {
+      try {
+        this.ws?.ping();
+      } catch {
+        // ignore — watchdog will catch a truly dead socket
+      }
+    }, PING_INTERVAL_MS);
+    if (
+      this.pingIntervalTimer &&
+      typeof this.pingIntervalTimer === "object" &&
+      "unref" in this.pingIntervalTimer
+    ) {
+      this.pingIntervalTimer.unref();
+    }
+  }
+
+  private clearPingInterval(): void {
+    if (this.pingIntervalTimer) {
+      clearInterval(this.pingIntervalTimer);
+      this.pingIntervalTimer = null;
     }
   }
 

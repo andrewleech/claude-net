@@ -788,6 +788,11 @@
     display: flex;
     align-items: stretch;
     flex: 1;
+    /* Without min-width: 0 a flex item can't shrink below its
+       content's intrinsic min-content width — a long unbroken word
+       in the textarea would push this frame wider and shove the
+       Send button off the right edge on iOS. */
+    min-width: 0;
     background: var(--bg);
     border: 1px solid var(--border);
     transition: border-color 0.1s, box-shadow 0.1s;
@@ -821,6 +826,14 @@
 
   .mirror-compose textarea {
     flex: 1;
+    /* Same shrink-below-content fix as the frame, plus force-wrap so
+       a long URL or unbroken token breaks mid-character instead of
+       growing the box. iOS Safari was failing to wrap and pushing
+       the Send button off-screen; desktop Chromium wraps anyway via
+       its `field-sizing: content` interaction, but anywhere is the
+       portable belt-and-suspenders. */
+    min-width: 0;
+    overflow-wrap: anywhere;
     field-sizing: content;
     min-height: 46px;
     max-height: 50vh;
@@ -1370,8 +1383,18 @@
     font-size: 8px;
     letter-spacing: 4px;
   }
+  .md-body .md-table-scroll {
+    /* Per-table horizontal scroll — the page is horizontally clipped
+       (to kill iOS rubber-band), so wide tables need their own scroll
+       container or they'd get cut off with nothing reachable. */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    max-width: 100%;
+    margin: 10px 0;
+    -webkit-overflow-scrolling: touch;
+  }
   .md-body table {
-    border-collapse: collapse; margin: 10px 0;
+    border-collapse: collapse; margin: 0;
     font-family: var(--font-mono);
     font-size: 12px;
   }
@@ -1586,6 +1609,14 @@
     border-bottom: 1px solid var(--border);
     font-family: var(--font-mono);
     font-size: 12px;
+    /* iOS PWA in standalone mode renders edge-to-edge under the
+       dynamic island / notch (viewport-fit=cover). env(safe-area-
+       inset-top) is 0 on devices without one, so this only affects
+       affected hardware. !important is required to beat Bootstrap's
+       `py-1` utility class on the <nav>, which carries !important
+       and would otherwise pin padding-top to 0.25rem. The max() keeps
+       the original 0.25rem when env() resolves to 0. */
+    padding-top: max(env(safe-area-inset-top), 0.25rem) !important;
   }
   /* Broadcast callsign: mono + uppercase with a pulsing accent dot. */
   nav[data-cn-navbar] .navbar-brand {
@@ -1634,7 +1665,9 @@
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
-    height: calc(100vh - 48px); /* navbar height */
+    /* navbar height + the iOS safe-area top inset that the navbar
+       absorbs (0 on devices without a notch). */
+    height: calc(100vh - 48px - env(safe-area-inset-top));
   }
 
   #sidebar {
@@ -1653,7 +1686,14 @@
   }
   @media (max-width: 767.98px) {
     /* Below md: behave as offcanvas overlay (Bootstrap handles it). */
-    #sidebar { width: 82vw; max-width: 320px; }
+    /* iOS PWA: when the offcanvas opens it covers the whole viewport
+       including the safe area, so push the sidebar header below the
+       dynamic island. env() is 0 on devices without one. */
+    #sidebar {
+      width: 82vw;
+      max-width: 320px;
+      padding-top: env(safe-area-inset-top);
+    }
   }
 
   .cn-sidebar-header {
@@ -1755,19 +1795,23 @@
   }
   #agent-list .list-group-item:hover { background: var(--bg-hover); color: var(--text); }
   #agent-list .list-group-item.active {
+    position: relative;
     background: var(--accent-ink);
     border-bottom-color: var(--accent);
     color: var(--text);
     font-weight: 600;
   }
+  /* Left-edge accent bar. Absolute-positioned so it's flush with the
+     row's border box regardless of which padding override (base /
+     cn-session-row / cn-host-child) is in effect. */
   #agent-list .list-group-item.active::before {
     content: "";
-    display: block;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
     width: 3px;
-    align-self: stretch;
     background: var(--accent);
-    margin: -8px 0 -8px -14px;
-    margin-right: 6px;
   }
   /* Rows without an active mirror: show them but make clear they're not
      clickable. Tooltip explains why. */
@@ -1985,7 +2029,63 @@
     color: var(--text-dim);
   }
   #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
+  #mirror-conn.is-warn { color: var(--gold); }
   #mirror-conn.is-error { color: var(--red); }
+
+  /* Live statusline snapshot from the mirror-agent: context bar.
+     Sits to the left of the spacer (i.e., left of the Tasks/Stop
+     cluster) so it reads as session status, not an action button. */
+  .cn-mirror-stats {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    margin-left: 14px;
+  }
+  .cn-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .cn-stat .cn-stat-num {
+    color: var(--text);
+    font-feature-settings: "tnum";
+    white-space: nowrap;
+  }
+  /* Override Bootstrap's default .progress so it matches the terminal
+     chrome: slim, darker background, animated width transition. */
+  .cn-stat-progress {
+    width: 80px;
+    height: 6px;
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    overflow: hidden;
+  }
+  .cn-stat-progress .progress-bar {
+    transition: width 0.35s ease, background-color 0.2s;
+    background-color: var(--green);
+  }
+  .cn-stat-progress .progress-bar.bar-mid { background-color: var(--gold); }
+  .cn-stat-progress .progress-bar.bar-high { background-color: var(--red); }
+
+  /* Mobile: wrap stats onto their own row below the title, but keep
+     each stat compact so they fit side-by-side. */
+  @media (max-width: 767.98px) {
+    .cn-mirror-stats {
+      order: 4;
+      flex-basis: 100%;
+      margin-left: 0;
+      padding-top: 2px;
+      gap: 10px;
+    }
+    .cn-stat { font-size: 9px; gap: 6px; }
+    .cn-stat-progress { width: 70px; height: 5px; }
+  }
 
   /* ── Task panel ───────────────────────────────────────────────
      Bootstrap's .collapse handles the show/hide and transition;
@@ -2128,6 +2228,14 @@
         <span class="cn-header-title" id="mirror-owner"></span>
         <span class="cn-header-sub cwd" id="mirror-cwd"></span>
         <span id="mirror-conn">connecting…</span>
+        <div class="cn-mirror-stats d-none" id="mirror-stats" aria-hidden="true">
+          <div class="cn-stat" id="mirror-stat-ctx-wrap" title="Context window usage">
+            <div class="progress cn-stat-progress">
+              <div class="progress-bar" id="mirror-stat-ctx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+            <span class="cn-stat-num" id="mirror-stat-ctx-num"></span>
+          </div>
+        </div>
         <span class="cn-header-spacer ms-auto"></span>
         <button id="mirror-tasks-btn" class="btn btn-outline-secondary btn-sm d-none" type="button"
                 data-bs-toggle="collapse" data-bs-target="#mirror-tasks-panel"
@@ -3253,13 +3361,29 @@
     var statusEl = document.getElementById('mirror-status');
     var transcriptEl = document.getElementById('mirror-transcript');
 
-    // Broadcast-style states: CONNECTING / LIVE / OFFLINE / ERROR.
+    // Broadcast-style states:
+    //   CONNECTING — establishing watcher WS to hub
+    //   LIVE       — watcher connected AND source mirror-agent attached
+    //   NO AGENT   — watcher connected but source has no mirror-agent
+    //                (owning Claude Code is offline / mirror-agent gone)
+    //   OFFLINE    — watcher WS closed
+    //   ERROR      — watcher WS error
+    //
+    // Tracked as two independent booleans so either side toggling alone
+    // flips the composite state correctly.
+    var watcherConnected = false;
+    var agentAttached = true;  // optimistic until we learn otherwise
     function setConnState(state) {
-      connEl.classList.remove('is-live', 'is-error');
+      connEl.classList.remove('is-live', 'is-error', 'is-warn');
       if (state === 'live') { connEl.textContent = 'LIVE'; connEl.classList.add('is-live'); }
+      else if (state === 'no-agent') { connEl.textContent = 'NO AGENT'; connEl.classList.add('is-warn'); }
       else if (state === 'offline') { connEl.textContent = 'OFFLINE'; }
       else if (state === 'connecting') { connEl.textContent = 'CONNECTING'; }
       else if (state === 'error') { connEl.textContent = 'ERROR'; connEl.classList.add('is-error'); }
+    }
+    function refreshConnState() {
+      if (!watcherConnected) return; // leave CONNECTING / OFFLINE / ERROR as-is
+      setConnState(agentAttached ? 'live' : 'no-agent');
     }
     setConnState('connecting');
     if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
@@ -3589,7 +3713,12 @@
     function parseCreatedTaskId(resp) {
       if (!resp) return null;
       if (typeof resp === 'object' && resp !== null) {
-        return resp.taskId || resp.id || null;
+        // TaskCreate's actual response shape is { task: { id, subject } };
+        // older code paths may use `taskId` or `id` at the top level.
+        if (resp.task && (resp.task.id != null)) return String(resp.task.id);
+        if (resp.taskId != null) return String(resp.taskId);
+        if (resp.id != null) return String(resp.id);
+        return null;
       }
       var s = String(resp);
       var m = s.match(/[Tt]ask\s*#?(\d+)/);
@@ -3713,6 +3842,21 @@
     }
 
     var TOOL_RENDERERS = {
+      // claude-net's _ack_channel is the silent channel-liveness
+      // handshake. Render as a one-line notification rather than the
+      // standard tool card: swap the m-evt-tool wrapper class for
+      // m-evt-notif so it picks up the same single-line layout the
+      // notification kind uses.
+      "mcp__claude-net___ack_channel": {
+        call: function(_p, el) {
+          el.className = "m-evt m-evt-notif";
+          el.removeAttribute("data-tool-use-id");
+          el.textContent = "claude-net · channel ack";
+        },
+        result: function() {
+          // No-op — the call line is already the whole story.
+        },
+      },
       Read: {
         call: function(p, el) {
           var fp = p.input && p.input.file_path;
@@ -4720,6 +4864,15 @@
       } catch (e) {
         return '<pre>' + escapeHtml(text) + '</pre>';
       }
+      // Wrap tables in a horizontal-scroll container. The page itself
+      // has `overflow-x: clip` (to kill the iOS rubber-band pan), so a
+      // wider-than-viewport table would otherwise get silently chopped
+      // on mobile with no way to reach the right-hand columns. Each
+      // table scrolls in isolation — the page is still horizontally
+      // locked.
+      html = html
+        .replace(/<table(\s|>)/g, '<div class="md-table-scroll"><table$1')
+        .replace(/<\/table>/g, '</table></div>');
       if (purifyReady) {
         // Keep links target=_self by default but allow href/title; drop
         // scripts/iframes/event-handlers.
@@ -4826,7 +4979,11 @@
         // Fire the permission-banner side-effect for attention-
         // getting notifications. Inline card still renders as
         // history; the banner is the at-a-glance affordance.
-        onNotificationEvent(payload.text || '');
+        // Skip mirror-agent audit events ("inject from web: …",
+        // "paste from …") — their text can quote user input that
+        // happens to contain the permission regex keywords, which
+        // would misfire the banner on the user's own message.
+        onNotificationEvent(payload.text || '', payload.source || '');
       } else if (kind === 'compact') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-compact';
@@ -4961,6 +5118,47 @@
       renderThinking();
     }
 
+    // ── Statusline snapshot (context bar) ──────────────────────────
+    // Bootstrap progress bar updated from the mirror-agent whenever a
+    // JSONL usage row appears. Width animates via CSS transition;
+    // colour flips green/gold/red at 50/80.
+    var statsEl = document.getElementById('mirror-stats');
+    var statsCtxBar = document.getElementById('mirror-stat-ctx-bar');
+    var statsCtxNum = document.getElementById('mirror-stat-ctx-num');
+    var statsState = null;
+
+    function setBarClass(el, pct) {
+      el.classList.remove('bar-mid', 'bar-high');
+      if (pct >= 80) el.classList.add('bar-high');
+      else if (pct >= 50) el.classList.add('bar-mid');
+    }
+
+    function fmtTokens(n) {
+      if (!n) return '0K';
+      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+      if (n >= 10000) return Math.round(n / 1000) + 'K';
+      return (n / 1000).toFixed(1) + 'K';
+    }
+
+    function renderStatslineSnapshot() {
+      if (!statsEl || !statsState) return;
+      var s = statsState;
+      statsEl.classList.remove('d-none');
+      var cPct = Math.max(0, Math.min(100, Math.round(s.ctx_pct || 0)));
+      statsCtxBar.style.width = cPct + '%';
+      statsCtxBar.setAttribute('aria-valuenow', String(cPct));
+      setBarClass(statsCtxBar, cPct);
+      // Auto-detected context-window tier is a guess, so don't assert
+      // a specific max or percent — just show the current token count.
+      // The bar fill still reflects tokens-vs-tier visually.
+      statsCtxNum.textContent = fmtTokens(s.ctx_tokens);
+    }
+
+    function renderStatusline(msg) {
+      statsState = msg;
+      renderStatslineSnapshot();
+    }
+
     // ── Permission-prompt banner ────────────────────────────────
     // Claude Code fires a Notification hook when it needs user
     // attention (tool-permission prompt, idle wait). We already
@@ -4982,7 +5180,13 @@
       promptBannerEl.setAttribute('hidden', '');
       promptTextEl.textContent = '';
     }
-    function onNotificationEvent(text) {
+    function onNotificationEvent(text, source) {
+      // Audit events emitted by the mirror-agent ("inject from web: …",
+      // "paste from web: …", "stop from …", "tmux pane reported: …")
+      // carry source="mirror-agent" and often quote raw user input.
+      // Those must not fire the permission banner — it's for Claude
+      // Code's own Notification hook only.
+      if (source === 'mirror-agent') return;
       if (!text || !PROMPT_RE.test(text)) return;
       showPromptBanner(text);
     }
@@ -5025,7 +5229,11 @@
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
-      setConnState('live');
+      // `agent_attached` is omitted by pre-rollout hubs — default to true
+      // so we don't falsely show NO AGENT against an old server.
+      agentAttached = msg.agent_attached === undefined ? true : !!msg.agent_attached;
+      watcherConnected = true;
+      refreshConnState();
       if (msg.closed_at) {
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
@@ -5050,6 +5258,10 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
+      // Snapshot of the most recent context-usage broadcast, so the bar
+      // shows up immediately on attach instead of waiting for the next
+      // assistant message.
+      if (msg.statusline) renderStatusline(msg.statusline);
       if (followTail) {
         scrollToBottom();
         startTailObserver();
@@ -5085,7 +5297,12 @@
         statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
         return;
       }
-      mws.onopen = function() { setConnState('live'); statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
+      mws.onopen = function() {
+        watcherConnected = true;
+        refreshConnState();
+        statusEl.textContent = '';
+        statusEl.className = 'mirror-status';
+      };
       mws.onmessage = function(e) {
         // Guard against late frames from a prior attach.
         if (activeAgentSid !== sid) return;
@@ -5094,6 +5311,7 @@
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
         else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool);
+        else if (msg.event === 'mirror:statusline') renderStatusline(msg);
         else if (msg.event === 'mirror:history_chunk') {
           historyInflight = false;
           prependHistoryFrames(msg.frames || []);
@@ -5106,12 +5324,17 @@
           statusEl.className = 'mirror-status error';
           statusEl.textContent = 'history: ' + (msg.error || 'error');
         }
+        else if (msg.event === 'mirror:agent_state') {
+          agentAttached = !!msg.attached;
+          refreshConnState();
+        }
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
         }
       };
       mws.onclose = function() {
+        watcherConnected = false;
         setConnState('offline');
         if (teardownCalled) return;
         if (mReconnectTimer) return;
@@ -5140,6 +5363,10 @@
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
       if (transcriptEl) transcriptEl.innerHTML = '';
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
+      if (statsEl) statsEl.classList.add('d-none');
+      if (statsCtxBar) { statsCtxBar.style.width = '0%'; statsCtxBar.classList.remove('bar-mid', 'bar-high'); }
+      if (statsCtxNum) statsCtxNum.textContent = '';
+      statsState = null;
       hidePromptBanner();
       // Task panel is shared DOM, but taskState is per-attach. Wipe
       // the rendered rows + button so the next session doesn't inherit

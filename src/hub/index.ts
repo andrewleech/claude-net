@@ -86,6 +86,14 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
   hostRegistry.setDashboardBroadcast(broadcastToDashboards);
 
+  // Forward half of the (host, cc_pid) join: when a mirror-agent opens
+  // a session, the hub looks up whether an MCP agent has already
+  // registered with that identity and uses its chosen name as the
+  // session's owner label.
+  mirrorRegistry.setAgentLookup(
+    (host, ccPid) => registry.findByHostPid(host, ccPid)?.fullName ?? null,
+  );
+
   // Broadcast every event log entry to dashboard clients in real-time.
   eventLog.setListener((entry) => {
     broadcastToDashboards({

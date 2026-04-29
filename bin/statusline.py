@@ -45,7 +45,6 @@ rl = (data.get("rate_limits") or {}).get("five_hour") or {}
 rl_pct = rl.get("used_percentage")  # None if missing
 resets_at = rl.get("resets_at")  # Unix epoch seconds, None if missing
 
-
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def fmt_tokens(n):

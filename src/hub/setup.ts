@@ -55,7 +55,7 @@ SETTINGS="\$HOME/.claude/settings.json"
 
 mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude"
 
-echo "[1/4] Downloading claude-channels + mirror binaries from \${HUB}…"
+echo "[1/5] Downloading claude-channels + mirror binaries from \${HUB}…"
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
          patch-binary.py mirror-agent.bundle.js; do
     curl -fsSL "\$HUB/bin/\$f" -o "\$INSTALL_DIR/\$f"
@@ -63,6 +63,12 @@ done
 chmod +x "\$INSTALL_DIR/claude-channels" \\
          "\$INSTALL_DIR/claude-net-mirror-push" \\
          "\$INSTALL_DIR/claude-net-mirror-agent"
+
+# Statusline script lives in ~/.claude/ because that's where Claude Code
+# resolves relative paths from in settings.json.statusLine.command.
+echo "[1b/5] Installing statusline script…"
+curl -fsSL "\$HUB/bin/statusline.py" -o "\$HOME/.claude/statusline.py"
+chmod +x "\$HOME/.claude/statusline.py"
 
 # Symlink into PATH (idempotent)
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent; do
@@ -76,7 +82,7 @@ done
 pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
 rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
-echo "[2/4] Registering claude-net MCP server…"
+echo "[2/5] Registering claude-net MCP server…"
 # Remove any previous entry first — 'claude mcp add' refuses to
 # overwrite, so on re-install the existing server (which may point at
 # a stale hub URL) would otherwise silently survive. 'remove' exits
@@ -88,7 +94,7 @@ claude mcp add \\
     --transport stdio \\
     claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"'
 
-echo "[3/4] Merging mirror hooks + launch config into \${SETTINGS}…"
+echo "[3/5] Merging mirror hooks + launch config into \${SETTINGS}…"
 if [ ! -f "\$SETTINGS" ]; then
     echo '{}' > "\$SETTINGS"
 fi
@@ -130,7 +136,36 @@ with open(tmp, "w") as f:
 os.replace(tmp, settings_path)
 PY
 
-echo "[4/4] Done."
+echo "[4/5] Configuring statusline in \${SETTINGS}…"
+python3 - "\$SETTINGS" "\$HOME/.claude/statusline.py" <<'PY'
+import json, sys
+settings_path, script = sys.argv[1], sys.argv[2]
+with open(settings_path) as f:
+    d = json.load(f)
+command = f'python3 "{script}"'
+cur = d.get("statusLine") or {}
+cur_cmd = cur.get("command", "")
+if cur_cmd == command:
+    print(f"  Statusline already points at {script!s} — no change.")
+elif cur_cmd and "statusline.py" not in cur_cmd:
+    # User already has a custom statusLine — don't stomp on it. They
+    # miss out on the dashboard's live context/5h indicator; the
+    # mirror-agent accepts POSTs from any process so a motivated user
+    # can wire forward_to_mirror_agent() into their own script.
+    print(
+        "  WARN: a custom statusLine.command is already set; "
+        "leaving it in place. Remove it from settings.json and re-run "
+        "/setup to opt in to the claude-net statusline."
+    )
+else:
+    d["statusLine"] = {"type": "command", "command": command}
+    with open(settings_path, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\\n")
+    print("  Installed claude-net statusline.")
+PY
+
+echo "[5/5] Done."
 echo ""
 echo "Launch with 'claude-channels' instead of 'claude' to start a mirrored"
 echo "session — the mirror-agent auto-starts and the session will appear on"

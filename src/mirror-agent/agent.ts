@@ -41,6 +41,12 @@ interface SessionState {
   sid: string;
   ownerAgent: string;
   cwd: string;
+  /** Host this mirror-agent is running on — sent with every session POST
+   *  so the hub can join mirror sessions to MCP agents by (host, ccPid). */
+  host: string;
+  /** PID of the Claude Code process that owns this session. null if the
+   *  hook wrapper didn't supply it (pre-CC_PID rollout). */
+  ccPid: number | null;
   transcriptPath: string | null;
   ws: HubClient | null;
   seenUuids: Set<string>;
@@ -51,6 +57,14 @@ interface SessionState {
   tmuxPane: string | null;
   /** Set while a recovery round-trip is in flight to avoid duplicate recoveries. */
   recovering: boolean;
+  /** Highest context-window size we've inferred for this session (auto-
+   *  upgrades from 200k → 1M the first time a usage row crosses 200k). */
+  ctxWindow: number;
+  /** Last ctx_pct sent to the hub, to avoid re-sending unchanged values. */
+  lastCtxPct: number;
+  /** Most-recent usage row seen in the JSONL; re-emitted on WS reconnect
+   *  so a hub restart doesn't leave the dashboard without a snapshot. */
+  lastUsage: Record<string, unknown> | null;
 }
 
 export interface AgentHandle {
@@ -232,6 +246,45 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     return new Response("not found", { status: 404 });
   }
 
+  /**
+   * Emit a context-usage snapshot derived from the JSONL transcript.
+   * Called from the tail's onRecord callback whenever a new `usage` row
+   * appears. Window auto-upgrades from 200k to 1M the first time a
+   * usage row crosses 200k, so both standard and 1m-context sessions
+   * render correctly without any client config.
+   */
+  function emitCtxFromUsage(
+    session: SessionState,
+    usage: Record<string, unknown>,
+  ): void {
+    session.lastUsage = usage;
+    if (!session.ws) return;
+    const input = Number(usage.input_tokens) || 0;
+    const creation = Number(usage.cache_creation_input_tokens) || 0;
+    const read = Number(usage.cache_read_input_tokens) || 0;
+    const tokens = input + creation + read;
+    if (tokens <= 0) return;
+    if (tokens > session.ctxWindow) {
+      // Jump to the next known tier so the bar doesn't overflow.
+      session.ctxWindow = tokens > 1_000_000 ? 2_000_000 : 1_000_000;
+    }
+    const pct = Math.min(100, Math.round((tokens / session.ctxWindow) * 100));
+    if (pct === session.lastCtxPct) return;
+    session.lastCtxPct = pct;
+    session.ws.send(
+      JSON.stringify({
+        action: "mirror_statusline",
+        sid: session.sid,
+        ctx_pct: pct,
+        ctx_tokens: tokens,
+        ctx_window: session.ctxWindow,
+        rl_pct: null,
+        rl_resets_at: null,
+        ts: Date.now(),
+      }),
+    );
+  }
+
   async function handleHookPost(req: Request): Promise<Response> {
     let payload: RawHookPayload;
     try {
@@ -254,6 +307,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         ingested.cwd,
         ingested.transcriptPath,
         ingested.tmuxPane,
+        ingested.ccPid,
       );
       if (!session) {
         return new Response("hub unavailable", { status: 503 });
@@ -269,6 +323,38 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // Update tmux pane on each hook — if the user moves panes, we track it.
       if (ingested.tmuxPane && session.tmuxPane !== ingested.tmuxPane) {
         session.tmuxPane = ingested.tmuxPane;
+      }
+      // The Claude Code PID on an existing sid changes when the user
+      // --continues a session under a fresh CC process. Pick it up and
+      // re-POST so the hub's rename-join matches the current plugin,
+      // not a dead pid from the previous CC. We mutate session.ccPid
+      // ONLY on a successful POST — otherwise a transient hub blip
+      // would advance local state past the hub's, and the next-hook
+      // check below would see them equal and never retry.
+      if (
+        typeof ingested.ccPid === "number" &&
+        Number.isFinite(ingested.ccPid) &&
+        session.ccPid !== ingested.ccPid
+      ) {
+        const newPid = ingested.ccPid;
+        fetch(`${hubUrl}/api/mirror/session`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_agent: session.ownerAgent,
+            cwd: session.cwd,
+            sid: session.sid,
+            host: session.host,
+            cc_pid: newPid,
+          }),
+        })
+          .then((res) => {
+            if (res.ok) session.ccPid = newPid;
+          })
+          .catch(() => {
+            // Best-effort; next hook retries because we left
+            // session.ccPid stale.
+          });
       }
     }
 
@@ -306,6 +392,23 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
 
+    // Permission-prompt follow-up: Claude Code's Notification hook only
+    // carries the title ("Claude needs your permission to use Write"),
+    // not the numbered menu options. After a beat, scrape them off the
+    // tmux pane and emit a second notification so the dashboard banner
+    // actually tells the user which digit does what.
+    if (
+      ingested.frame.kind === "notification" &&
+      session.tmuxPane &&
+      isPermissionNotification(ingested.frame.payload)
+    ) {
+      void capturePermissionMenu(session, ingested.frame.payload).catch(
+        (err: unknown) => {
+          log(`[${session.sid}] capturePermissionMenu threw: ${String(err)}`);
+        },
+      );
+    }
+
     // Drive the thinking indicator purely off hook transitions.
     if (ingested.frame.kind === "user_prompt") {
       onTurnStart(session);
@@ -336,13 +439,23 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     cwd: string | undefined,
     transcriptPath: string | undefined,
     tmuxPane: string | undefined,
+    ccPid: number | undefined,
   ): Promise<SessionState | null> {
     const ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
+    const host = os.hostname() || "host";
+    const resolvedPid =
+      typeof ccPid === "number" && Number.isFinite(ccPid) ? ccPid : null;
     try {
       const res = await fetch(`${hubUrl}/api/mirror/session`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ owner_agent: ownerAgent, cwd: cwd ?? "", sid }),
+        body: JSON.stringify({
+          owner_agent: ownerAgent,
+          cwd: cwd ?? "",
+          sid,
+          host,
+          cc_pid: resolvedPid,
+        }),
       });
       if (!res.ok) {
         log(`session create failed: HTTP ${res.status} ${await res.text()}`);
@@ -358,6 +471,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       sid,
       ownerAgent,
       cwd: cwd ?? "",
+      host,
+      ccPid: resolvedPid,
       transcriptPath: transcriptPath ?? null,
       ws: null,
       seenUuids: new Set(),
@@ -367,6 +482,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       closed: false,
       tmuxPane: tmuxPane ?? null,
       recovering: false,
+      ctxWindow: 200_000,
+      lastCtxPct: -1,
+      lastUsage: null,
     };
     sessions.set(sid, session);
 
@@ -412,6 +530,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             owner_agent: session.ownerAgent,
             cwd: session.cwd,
             sid: session.sid,
+            host: session.host,
+            cc_pid: session.ccPid,
           }),
         }).catch(() => {
           // WS onClose will retry; nothing to do here.
@@ -419,6 +539,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);
+        // Fresh hub (e.g. post-restart) has no cached statusline. Re-emit
+        // the last known usage so the dashboard's bar lights up on attach
+        // instead of waiting for the next assistant turn.
+        if (session.lastUsage) {
+          session.lastCtxPct = -1; // force re-send
+          emitCtxFromUsage(session, session.lastUsage);
+        }
       },
       onMessage: (raw) => handleHubMessage(session, raw),
       onClose: (code, reason) => {
@@ -477,6 +604,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
               owner_agent: session.ownerAgent,
               cwd: session.cwd,
               sid: session.sid,
+              host: session.host,
+              cc_pid: session.ccPid,
             }),
           });
           if (res.ok) {
@@ -527,7 +656,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           rec.message &&
           typeof rec.message === "object"
         ) {
-          const msg = rec.message as { content?: unknown };
+          const msg = rec.message as {
+            content?: unknown;
+            usage?: Record<string, unknown>;
+          };
           const content = Array.isArray(msg.content) ? msg.content : [];
           for (let i = 0; i < content.length; i++) {
             const block = content[i] as
@@ -541,6 +673,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             ) {
               emitAssistantTextFromJsonl(session, rec, i, block.text);
             }
+          }
+          if (msg.usage && typeof msg.usage === "object") {
+            emitCtxFromUsage(session, msg.usage);
           }
         }
       },
@@ -884,6 +1019,63 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     }
     if (matches.length === 0) return;
     emitAuditEvent(session, `tmux pane reported: ${matches.join(" · ")}`);
+  }
+
+  function isPermissionNotification(payload: unknown): boolean {
+    if (!payload || typeof payload !== "object") return false;
+    const text =
+      typeof (payload as { text?: unknown }).text === "string"
+        ? (payload as { text: string }).text
+        : "";
+    if (!text) return false;
+    return /permission|approval|allow|needs your/i.test(text);
+  }
+
+  /**
+   * Claude Code's Notification hook fires BEFORE the modal text is
+   * drawn and only carries the title, so the numbered menu options
+   * (1. Yes / 2. Yes, always / 3. No …) never reach the dashboard.
+   * After a short delay we capture the pane, extract any numbered
+   * menu rows, and emit a second notification carrying them. The
+   * dashboard's banner picks up the later (richer) notification
+   * because it still matches the permission regex.
+   */
+  async function capturePermissionMenu(
+    session: SessionState,
+    payload: unknown,
+  ): Promise<void> {
+    if (!session.tmuxPane) return;
+    const original =
+      payload && typeof payload === "object" && "text" in payload
+        ? String((payload as { text?: unknown }).text ?? "")
+        : "";
+    await sleep(600);
+    const cap = await injector.capturePane(session.tmuxPane, 40);
+    if (!cap.ok) return;
+    const boxRx = /[│┃|┆╎╌╍┄┅─━╭╮╰╯╷╵╴╶❯>]/g;
+    const menuRx = /^\s*(\d)\.\s+(.+?)\s*$/;
+    const menu: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of cap.output.split("\n")) {
+      const cleaned = raw.replace(boxRx, "").trimEnd();
+      const m = cleaned.match(menuRx);
+      if (!m?.[1] || !m[2]) continue;
+      const key = `${m[1]}|${m[2].trim()}`;
+      if (seen.has(key)) continue; // modal sometimes renders twice
+      seen.add(key);
+      menu.push(`${m[1]}. ${m[2].trim()}`);
+    }
+    if (menu.length === 0) return;
+    const augmented = `${original}\n\n${menu.join("\n")}`;
+    const frame: MirrorEventFrame = {
+      action: "mirror_event",
+      sid: session.sid,
+      uuid: crypto.randomUUID(),
+      kind: "notification",
+      ts: Date.now(),
+      payload: { kind: "notification", text: augmented },
+    };
+    queueEvent(session, frame);
   }
 
   // ── Thinking indicator ──────────────────────────────────────────────

@@ -37,6 +37,8 @@ export interface RawHookPayload {
   _mirror_env?: {
     TMUX?: string;
     TMUX_PANE?: string;
+    /** PPID of the hook wrapper — the Claude Code process itself. */
+    CC_PID?: number;
   };
   // Forward-compatible: allow unknown keys.
   [key: string]: unknown;
@@ -48,6 +50,7 @@ export interface IngestedEvent {
   transcriptPath: string | undefined;
   cwd: string | undefined;
   tmuxPane: string | undefined;
+  ccPid: number | undefined;
 }
 
 /**
@@ -89,6 +92,10 @@ export function ingestHook(payload: RawHookPayload): IngestedEvent | null {
     tmuxPane:
       typeof payload._mirror_env?.TMUX_PANE === "string"
         ? payload._mirror_env.TMUX_PANE
+        : undefined,
+    ccPid:
+      typeof payload._mirror_env?.CC_PID === "number"
+        ? payload._mirror_env.CC_PID
         : undefined,
   };
 }

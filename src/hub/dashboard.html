@@ -1615,6 +1615,11 @@
     border-bottom: 1px solid var(--border);
     font-family: var(--font-mono);
     font-size: 12px;
+    /* iOS PWA in standalone mode renders edge-to-edge under the
+       dynamic island / notch (viewport-fit=cover). env(safe-area-
+       inset-top) is 0 on devices without one, so this only affects
+       affected hardware. */
+    padding-top: env(safe-area-inset-top);
   }
   /* Broadcast callsign: mono + uppercase with a pulsing accent dot. */
   nav[data-cn-navbar] .navbar-brand {
@@ -1663,7 +1668,9 @@
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
-    height: calc(100vh - 48px); /* navbar height */
+    /* navbar height + the iOS safe-area top inset that the navbar
+       absorbs (0 on devices without a notch). */
+    height: calc(100vh - 48px - env(safe-area-inset-top));
   }
 
   #sidebar {
@@ -1682,7 +1689,14 @@
   }
   @media (max-width: 767.98px) {
     /* Below md: behave as offcanvas overlay (Bootstrap handles it). */
-    #sidebar { width: 82vw; max-width: 320px; }
+    /* iOS PWA: when the offcanvas opens it covers the whole viewport
+       including the safe area, so push the sidebar header below the
+       dynamic island. env() is 0 on devices without one. */
+    #sidebar {
+      width: 82vw;
+      max-width: 320px;
+      padding-top: env(safe-area-inset-top);
+    }
   }
 
   .cn-sidebar-header {

@@ -90,6 +90,15 @@ export interface MirrorSessionEntry {
    * back to `awaiting_input`.
    */
   activityState: MirrorActivityState;
+  /** Most recent context-usage snapshot from the mirror-agent, so new
+   *  watchers see the current bar value at attach time rather than
+   *  waiting for the next assistant response. */
+  lastStatusline: {
+    ctx_pct: number;
+    ctx_tokens: number;
+    ctx_window: number;
+    ts: number;
+  } | null;
 }
 
 /**
@@ -406,6 +415,7 @@ export class MirrorRegistry {
       agent: null,
       nextInjectSeq: 0,
       closedAt: null,
+      lastStatusline: null,
       retentionTimerId: null,
       activityState: "awaiting_input",
     };
@@ -1132,6 +1142,46 @@ export class MirrorRegistry {
     });
   }
 
+  /** Forward a live statusline snapshot (context usage) to the
+   *  session's watchers. Purely ephemeral — not stored in the
+   *  transcript or fanned out to every dashboard, just the
+   *  dashboards currently watching this session. */
+  broadcastStatusline(
+    sid: string,
+    payload: {
+      ctx_pct: number;
+      ctx_tokens: number;
+      ctx_window: number;
+      ts: number;
+    },
+  ): void {
+    const entry = this.sessions.get(sid);
+    if (!entry) return;
+    // Cache the snapshot so new watchers see the current value on
+    // attach, instead of waiting for the next usage row.
+    entry.lastStatusline = {
+      ctx_pct: payload.ctx_pct,
+      ctx_tokens: payload.ctx_tokens,
+      ctx_window: payload.ctx_window,
+      ts: payload.ts,
+    };
+    const msg = JSON.stringify({
+      event: "mirror:statusline",
+      sid,
+      ctx_pct: payload.ctx_pct,
+      ctx_tokens: payload.ctx_tokens,
+      ctx_window: payload.ctx_window,
+      ts: payload.ts,
+    });
+    for (const w of entry.watchers) {
+      try {
+        w.ws.send(msg);
+      } catch {
+        // ignore per-watcher send failures
+      }
+    }
+  }
+
   /** Broadcast an ephemeral thinking-status update to a session's
    *  watchers. Not stored in the transcript; purely live-view signal. */
   broadcastThinking(
@@ -1659,6 +1709,7 @@ export function wsMirrorPlugin(
               payload: f.payload,
             })),
           agent_attached: entry.agent !== null,
+          statusline: entry.lastStatusline,
         }),
       );
     },
@@ -1769,6 +1820,18 @@ export function wsMirrorPlugin(
           startedAt:
             typeof frame.startedAt === "number" ? frame.startedAt : undefined,
           tool: typeof frame.tool === "string" ? frame.tool : null,
+        });
+      } else if (
+        frame.action === "mirror_statusline" &&
+        frame.sid === meta.sid
+      ) {
+        mirrorRegistry.broadcastStatusline(meta.sid, {
+          ctx_pct: typeof frame.ctx_pct === "number" ? frame.ctx_pct : 0,
+          ctx_tokens:
+            typeof frame.ctx_tokens === "number" ? frame.ctx_tokens : 0,
+          ctx_window:
+            typeof frame.ctx_window === "number" ? frame.ctx_window : 0,
+          ts: typeof frame.ts === "number" ? frame.ts : Date.now(),
         });
       }
     },

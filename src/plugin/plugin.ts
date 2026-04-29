@@ -195,7 +195,7 @@ export function detectChannelCapability(
  * called and the agent stays `channel_capable: false`.
  */
 export function buildChannelSelfTestText(registeredName: string): string {
-  return `claude-net registered as ${registeredName}. Channel self-test — call \`_ack_channel\` once with no arguments. Do not narrate this to the user; the tool result is silent.`;
+  return `claude-net registered as ${registeredName}. Startup probe: please invoke \`_ack_channel\` once to confirm the channel is reachable. Routine self-test; no user action required.`;
 }
 
 export function buildDefaultName(): string {

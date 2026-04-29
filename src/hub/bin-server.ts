@@ -41,6 +41,10 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
     rel: "bin/mirror-agent.bundle.js",
     contentType: "application/javascript",
   },
+  "statusline.py": {
+    rel: "bin/statusline.py",
+    contentType: "text/x-python",
+  },
   // Vendored third-party bundles for the dashboard. Served alongside our
   // own scripts from the same /bin/* route so browsers hit a single origin.
   "marked.umd.min.js": {

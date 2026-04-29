@@ -1618,8 +1618,11 @@
     /* iOS PWA in standalone mode renders edge-to-edge under the
        dynamic island / notch (viewport-fit=cover). env(safe-area-
        inset-top) is 0 on devices without one, so this only affects
-       affected hardware. */
-    padding-top: env(safe-area-inset-top);
+       affected hardware. !important is required to beat Bootstrap's
+       `py-1` utility class on the <nav>, which carries !important
+       and would otherwise pin padding-top to 0.25rem. The max() keeps
+       the original 0.25rem when env() resolves to 0. */
+    padding-top: max(env(safe-area-inset-top), 0.25rem) !important;
   }
   /* Broadcast callsign: mono + uppercase with a pulsing accent dot. */
   nav[data-cn-navbar] .navbar-brand {

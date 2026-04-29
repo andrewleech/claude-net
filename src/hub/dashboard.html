@@ -5027,9 +5027,9 @@
         statusEl.textContent = 'session closed at ' + msg.closed_at;
       }
       // Reset history state — a fresh init (including reconnect) starts
-      // clean. has_more=true means the hub truncated the init window and
-      // the history button should be enabled from the start.
-      historyExhausted = !msg.has_more;
+      // clean. Always enable the history button; has_more only tells us
+      // the init window was truncated, not whether the JSONL has content.
+      historyExhausted = false;
       historyInflight = false;
       firstRenderedTs = null;
       historyDivider = null;

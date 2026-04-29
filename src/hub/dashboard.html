@@ -3848,11 +3848,8 @@
             '<span title="' + escapeAttr(fp || '') + '">✎ ' + escapeHtml(shortPath(fp || '')) + '</span>');
           if (oldS || newS) {
             var diff = renderRichDiff(oldS, newS);
-            // Diff details open by default — you almost always want to see
-            // the change inline. Other tool renderers stay collapsed.
             appendDetails(el, diffSummary(diff),
-              '<div class="m-diff-v2">' + diff.html + '</div>',
-              { open: true });
+              '<div class="m-diff-v2">' + diff.html + '</div>');
           }
         },
         result: function(p, el) {
@@ -3873,8 +3870,7 @@
             body += renderDiffLine('add', escapeHtml(lines[i]));
           }
           appendDetails(el, '+' + lines.length + ' / −0',
-            '<div class="m-diff-v2">' + body + '</div>',
-            { open: true });
+            '<div class="m-diff-v2">' + body + '</div>');
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'written');
@@ -3904,7 +3900,7 @@
           }
           var summary = '−' + totalRemoved + ' / +' + totalAdded +
             ' across ' + edits.length + ' edit' + (edits.length === 1 ? '' : 's');
-          appendDetails(el, summary, body, { open: true });
+          appendDetails(el, summary, body);
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'saved');
@@ -5030,6 +5026,14 @@
         statusEl.className = 'mirror-status';
         statusEl.textContent = 'session closed at ' + msg.closed_at;
       }
+      // Reset history state — a fresh init (including reconnect) starts
+      // clean. has_more=true means the hub truncated the init window and
+      // the history button should be enabled from the start.
+      historyExhausted = !msg.has_more;
+      historyInflight = false;
+      firstRenderedTs = null;
+      historyDivider = null;
+      updateHistoryBtn();
       // Turn virtualization OFF during initial replay so scrollHeight
       // is accurate (content-visibility's estimated heights make
       // "scroll to end" land on the wrong place — especially on

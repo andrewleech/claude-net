@@ -26,6 +26,7 @@ import { RateLimiter } from "./rate-limit";
 // ── Defaults ──────────────────────────────────────────────────────────────
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
+const INIT_TRANSCRIPT_WINDOW = 200;
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 /**
  * A session is considered "orphaned" when no daemon-agent WS has been
@@ -1471,12 +1472,17 @@ export function wsMirrorPlugin(
           // sidebar reads it from MirrorSessionSummary (via
           // /sessions/all) and mirror:activity broadcasts. Keeping it
           // out of init/transcript avoids a second source of truth.
-          transcript: entry.transcript.map((f) => ({
-            uuid: f.uuid,
-            kind: f.kind,
-            ts: f.ts,
-            payload: f.payload,
-          })),
+          // Only the tail of the ring buffer is sent; the rest is
+          // available via request_history (on-disk JSONL backfill).
+          transcript: entry.transcript
+            .slice(-INIT_TRANSCRIPT_WINDOW)
+            .map((f) => ({
+              uuid: f.uuid,
+              kind: f.kind,
+              ts: f.ts,
+              payload: f.payload,
+            })),
+          has_more: entry.transcript.length > INIT_TRANSCRIPT_WINDOW,
         }),
       );
     },

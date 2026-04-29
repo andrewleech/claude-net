@@ -788,6 +788,11 @@
     display: flex;
     align-items: stretch;
     flex: 1;
+    /* Without min-width: 0 a flex item can't shrink below its
+       content's intrinsic min-content width — a long unbroken word
+       in the textarea would push this frame wider and shove the
+       Send button off the right edge on iOS. */
+    min-width: 0;
     background: var(--bg);
     border: 1px solid var(--border);
     transition: border-color 0.1s, box-shadow 0.1s;
@@ -821,6 +826,14 @@
 
   .mirror-compose textarea {
     flex: 1;
+    /* Same shrink-below-content fix as the frame, plus force-wrap so
+       a long URL or unbroken token breaks mid-character instead of
+       growing the box. iOS Safari was failing to wrap and pushing
+       the Send button off-screen; desktop Chromium wraps anyway via
+       its `field-sizing: content` interaction, but anywhere is the
+       portable belt-and-suspenders. */
+    min-width: 0;
+    overflow-wrap: anywhere;
     field-sizing: content;
     min-height: 46px;
     max-height: 50vh;

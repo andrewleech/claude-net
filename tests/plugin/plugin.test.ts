@@ -405,9 +405,16 @@ describe("plugin helpers", () => {
       expect(text.toLowerCase()).toContain("once");
     });
 
-    test("discourages narrating the result to the user", () => {
+    test("avoids prompt-injection-shaped phrasing", () => {
+      // Older wording asked the LLM to invoke a tool *and* hide it from
+      // the user — exactly the pattern Anthropic alignment training
+      // flags as injection. Stricter models (Opus 4.7+) refuse. The
+      // tool description on `_ack_channel` itself carries the
+      // suppress-narration intent (tool metadata is harness config,
+      // not data), so the wrapper notification doesn't need it.
       const text = buildChannelSelfTestText("foo:bar@baz").toLowerCase();
-      expect(text).toContain("not narrate");
+      expect(text).not.toContain("not narrate");
+      expect(text).not.toContain("do not");
     });
   });
 

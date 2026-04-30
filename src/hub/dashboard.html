@@ -3228,13 +3228,6 @@
   var activeAgentSid = null;
   var mirrorTeardown = null;
 
-  // Per-sid scroll memory so switching back to a session puts the user
-  // back where they were reading instead of at the top (or wrong place).
-  // Cleared on page reload — that's fine; this is a within-tab convenience,
-  // not durable history. Stored as { atBottom, scrollTop } so we can
-  // distinguish "stay glued to bottom" from "exact pixel restore".
-  var mirrorScrollMemory = new Map();
-
   function detachMirror() {
     if (typeof mirrorTeardown === 'function') {
       try { mirrorTeardown(); } catch (e) { /* ignore */ }
@@ -3298,20 +3291,9 @@
     var taskState = new Map();
     var pendingTaskCreates = new Map(); // tool_use_id → {subject, ...}
 
-    // Debounced save of the current scroll position so that switching
-    // back to this session restores the user's reading place.
-    var scrollSaveTimer = null;
-    function captureScrollState() {
-      var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
-      var atBottom = distance <= SCROLL_LOCK_THRESHOLD;
-      mirrorScrollMemory.set(sid, { atBottom: atBottom, scrollTop: transcriptEl.scrollTop });
-    }
-
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
-      if (scrollSaveTimer) clearTimeout(scrollSaveTimer);
-      scrollSaveTimer = setTimeout(captureScrollState, 200);
     }, { signal: attachSig });
 
     // Initial-replay tail-snap loop. Virtualization is OFF during
@@ -5042,9 +5024,12 @@
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       disconnectTailObserver();
-      var memory = mirrorScrollMemory.get(sid);
-      var followTail = !memory || memory.atBottom;
-      userScrolledUp = !followTail;
+      // Always snap to the tail on attach. Pixel-position memory is
+      // unreliable now that init only sends the last 200 frames — new
+      // frames shift content, and loaded history is cleared on detach,
+      // so a saved scrollTop points to the wrong place. Land at the
+      // bottom; use the history button to read back.
+      userScrolledUp = false;
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
@@ -5054,17 +5039,8 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
-      if (followTail) {
-        scrollToBottom();
-        startTailObserver();
-      } else {
-        // Restore the exact position the user was last reading. Use
-        // rAF so the layout pass after innerHTML has run.
-        var target = memory.scrollTop;
-        requestAnimationFrame(function() {
-          transcriptEl.scrollTop = target;
-        });
-      }
+      scrollToBottom();
+      startTailObserver();
       // Re-enable virtualization once the initial scroll has stuck.
       // 800ms is generous enough for the rAF snap loop above (≤4
       // frames) plus mobile paint settling, well under typical
@@ -5131,10 +5107,6 @@
     // firing handlers for the previous sid.
     mirrorTeardown = function() {
       teardownCalled = true;
-      // Capture final scroll position before we wipe the transcript so
-      // a re-attach can restore the user's reading place.
-      try { captureScrollState(); } catch (e) { /* ignore */ }
-      if (scrollSaveTimer) { clearTimeout(scrollSaveTimer); scrollSaveTimer = null; }
       disconnectTailObserver();
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }

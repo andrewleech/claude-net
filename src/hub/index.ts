@@ -110,15 +110,19 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   let dashboardParsersCache: string | null = null;
 
   // Embedded at startup so the UI can confirm which build is running.
-  const commitHash = (() => {
-    try {
-      return Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"])
-        .stdout.toString()
-        .trim();
-    } catch {
-      return "dev";
-    }
-  })();
+  // GIT_COMMIT is set by the deploy command before `docker compose restart`
+  // so it's available even when git isn't installed in the container.
+  const commitHash =
+    process.env.CLAUDE_NET_VERSION ??
+    (() => {
+      try {
+        return Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"])
+          .stdout.toString()
+          .trim();
+      } catch {
+        return "dev";
+      }
+    })();
 
   async function getDashboardHtml(): Promise<string> {
     if (!dashboardCache) {

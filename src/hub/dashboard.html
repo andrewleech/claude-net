@@ -182,6 +182,11 @@
        nested horizontal-scroll blocks (diff, code) — use `hidden` here
        so those keep their own overflow. */
     overflow-x: hidden;
+    /* Disable browser scroll anchoring. We manage scroll position
+       manually; anchoring fires when is-virtualized toggles content-
+       visibility, changing scrollHeight and adjusting scrollTop, which
+       spuriously sets userScrolledUp and breaks auto-follow. */
+    overflow-anchor: none;
     padding: 8px 0 16px 0;
     display: flex;
     flex-direction: column;
@@ -3300,6 +3305,10 @@
     // Marker element separating loaded history from the live transcript.
     // Inserted lazily when the first chunk is prepended.
     var historyDivider = null;
+    // Timer handle for the deferred is-virtualized re-enable. Tracked so
+    // teardown can cancel it; otherwise a fast session-switch leaves a
+    // pending timer that fires on the next session's transcript.
+    var virtualizationTimer = null;
 
     // ── Task* tool state (tracks Claude Code's harness task list) ────
     // Mirrors the state that TaskListV2 in the real CLI tracks: id →
@@ -5112,7 +5121,9 @@
       // 800ms is generous enough for the rAF snap loop above (≤4
       // frames) plus mobile paint settling, well under typical
       // session-switch reaction time.
-      setTimeout(function() {
+      if (virtualizationTimer) clearTimeout(virtualizationTimer);
+      virtualizationTimer = setTimeout(function() {
+        virtualizationTimer = null;
         transcriptEl.classList.add('is-virtualized');
       }, 800);
     }
@@ -5175,6 +5186,7 @@
     mirrorTeardown = function() {
       teardownCalled = true;
       disconnectTailObserver();
+      if (virtualizationTimer) { clearTimeout(virtualizationTimer); virtualizationTimer = null; }
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }

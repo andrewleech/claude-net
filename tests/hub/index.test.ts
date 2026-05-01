@@ -57,7 +57,7 @@ describe("hub server", () => {
     expect(response.headers.get("content-type")).toContain("javascript");
     expect(response.headers.get("cache-control")).toBe("no-cache");
     const body = await response.text();
-    expect(body).toContain("claude-net-shell-v1");
+    expect(body).toContain("claude-net-shell-v2");
     expect(body).toContain("addEventListener");
   });
 

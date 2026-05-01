@@ -13,7 +13,7 @@
 // assets. Bumping CACHE invalidates the set atomically — the activate
 // handler drops every other cache key.
 
-const CACHE = "claude-net-shell-v1";
+const CACHE = "claude-net-shell-v2";
 
 // Pre-cached at install; also the exclusive allowlist for writes from
 // the fetch handler. Keep this list in lockstep with what

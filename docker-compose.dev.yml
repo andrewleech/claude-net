@@ -6,6 +6,7 @@ services:
     environment:
       - CLAUDE_NET_PORT=4815
       - CLAUDE_NET_UPLOADS_DIR=/data/uploads
+      - CLAUDE_NET_VERSION=${GIT_COMMIT:-dev}
     volumes:
       - ./src:/app/src
       - cn-uploads-dev:/data/uploads

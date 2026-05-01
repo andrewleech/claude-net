@@ -1137,6 +1137,33 @@
   .mirror-status.error { color: var(--accent); }
   .mirror-status:empty { padding: 0; }
 
+  /* Jump-to-latest button: floats above the compose box whenever the user
+     has scrolled up so the feed isn't following new content. Fixed
+     position so it clears the compose box on any screen size and
+     respects the iOS safe-area inset. Hidden in teardown. */
+  .mirror-jump-btn {
+    position: fixed;
+    bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+    right: 20px;
+    z-index: 200;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    background: var(--accent);
+    color: var(--on-accent);
+    border: none;
+    border-radius: 20px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.6px;
+    cursor: pointer;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.55);
+    transition: opacity 0.15s;
+  }
+  .mirror-jump-btn.is-visible { display: flex; }
+  .mirror-jump-btn:hover { opacity: 0.85; }
+
   /* ── Permission prompt banner ────────────────────────────────
      Appears when Claude Code's Notification hook fires with a
      permission-shaped message. Shows the text + one-key inject
@@ -2163,6 +2190,7 @@
           <div id="mirror-tasks-list"></div>
         </div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
+        <button class="mirror-jump-btn" id="mirror-jump-btn" type="button">↓ latest</button>
         <div class="mirror-thinking" id="mirror-thinking"></div>
         <!-- Sticky banner that appears when Claude Code fires a
              Notification hook (tool permission prompt, "waiting for
@@ -3269,6 +3297,7 @@
     var connEl = document.getElementById('mirror-conn');
     var statusEl = document.getElementById('mirror-status');
     var transcriptEl = document.getElementById('mirror-transcript');
+    var jumpBtn = document.getElementById('mirror-jump-btn');
 
     // Broadcast-style states: CONNECTING / LIVE / OFFLINE / ERROR.
     function setConnState(state) {
@@ -3292,7 +3321,7 @@
 
     var rendered = Object.create(null); // uuid → true
     var userScrolledUp = false;
-    var SCROLL_LOCK_THRESHOLD = 80;
+    var SCROLL_LOCK_THRESHOLD = 200;
     // Anchor for "load earlier history" requests — the timestamp of
     // the oldest frame currently rendered. Set on first renderEvent
     // (live or backfilled) and lowered as older frames are prepended.
@@ -3319,6 +3348,19 @@
     var taskState = new Map();
     var pendingTaskCreates = new Map(); // tool_use_id → {subject, ...}
 
+    function setScrolledUp(val) {
+      userScrolledUp = val;
+      if (jumpBtn) jumpBtn.classList.toggle('is-visible', !!val);
+    }
+
+    if (jumpBtn) {
+      jumpBtn.addEventListener('click', function() {
+        setScrolledUp(false);
+        setScrollState(sid, { scrolledUp: false });
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }, { signal: attachSig });
+    }
+
     // Compute uuid anchor: walk upward from scrollTop to find the
     // topmost fully-or-partially-visible .m-evt element, then record
     // how far into it the scroll position sits.
@@ -3337,7 +3379,7 @@
 
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
-      userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
+      setScrolledUp(distance > SCROLL_LOCK_THRESHOLD);
       var state = { scrolledUp: userScrolledUp };
       if (userScrolledUp) {
         // Only capture anchor when scrolled-up; at-bottom state needs
@@ -3370,7 +3412,7 @@
           // authoritative; any intervening event that set userScrolledUp
           // during the loop did so on stale scroll geometry.
           tailLoopActive = false;
-          userScrolledUp = false;
+          setScrolledUp(false);
         }
       }
       requestAnimationFrame(tick);
@@ -5090,7 +5132,7 @@
       var scrollState = sessionScrollState.get(sid);
       // Set userScrolledUp before the render loop so that scrollToBottom()
       // calls inside renderEvent no-op when we intend to restore position.
-      userScrolledUp = !!(scrollState && scrollState.scrolledUp);
+      setScrolledUp(!!(scrollState && scrollState.scrolledUp));
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
@@ -5114,13 +5156,13 @@
             transcriptEl.scrollTop = target.offsetTop + anchorOffset;
           } else {
             // Anchor not in current window; fall through to tail.
-            userScrolledUp = false;
+            setScrolledUp(false);
             transcriptEl.scrollTop = transcriptEl.scrollHeight;
             startTailObserver();
           }
         });
       } else {
-        userScrolledUp = false;
+        setScrolledUp(false);
         scrollToBottom();
         startTailObserver();
       }
@@ -5132,6 +5174,19 @@
       virtualizationTimer = setTimeout(function() {
         virtualizationTimer = null;
         transcriptEl.classList.add('is-virtualized');
+        // is-virtualized changes estimated scrollHeight via content-visibility:auto.
+        // If scrollTop was pinned to the old scrollHeight, the new estimate may
+        // differ enough to trigger a scroll event that sets userScrolledUp = true.
+        // Re-snap to tail in a rAF after the class change so any such noise is
+        // overridden before the user can interact.
+        if (!userScrolledUp) {
+          requestAnimationFrame(function() {
+            if (!userScrolledUp) {
+              transcriptEl.scrollTop = transcriptEl.scrollHeight;
+              setScrolledUp(false);
+            }
+          });
+        }
       }, 800);
     }
 
@@ -5200,6 +5255,7 @@
       try { if (mws) mws.close(); } catch (e) { /* ignore */ }
       mws = null;
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
+      if (jumpBtn) jumpBtn.classList.remove('is-visible');
       if (transcriptEl) {
         // Capture final scroll state before wiping DOM so re-attach can restore it.
         var dist = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;

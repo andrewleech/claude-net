@@ -1482,7 +1482,6 @@ export function wsMirrorPlugin(
               ts: f.ts,
               payload: f.payload,
             })),
-          has_more: entry.transcript.length > INIT_TRANSCRIPT_WINDOW,
         }),
       );
     },

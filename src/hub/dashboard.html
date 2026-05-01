@@ -3232,7 +3232,20 @@
   // and cleared when they scroll back to the bottom. Persists across
   // session switches so re-attaching a session resumes where they left
   // off. Cleared on page reload (in-memory only).
+  // Keyed by sid → { scrolledUp, anchorUuid, anchorOffset }.
+  // anchorUuid is the data-uuid of the topmost visible frame; anchorOffset
+  // is scrollTop relative to that element's offsetTop. Using a content
+  // anchor instead of a raw pixel survives content-shift from new frames.
+  // Capped at 50 entries (insertion order eviction) to bound memory.
   var sessionScrollState = new Map();
+  var SESSION_SCROLL_MAX = 50;
+  function setScrollState(id, state) {
+    sessionScrollState.delete(id); // re-insert at end for LRU order
+    sessionScrollState.set(id, state);
+    if (sessionScrollState.size > SESSION_SCROLL_MAX) {
+      sessionScrollState.delete(sessionScrollState.keys().next().value);
+    }
+  }
 
   function detachMirror() {
     if (typeof mirrorTeardown === 'function') {
@@ -3297,16 +3310,33 @@
     var taskState = new Map();
     var pendingTaskCreates = new Map(); // tool_use_id → {subject, ...}
 
+    // Compute uuid anchor: walk upward from scrollTop to find the
+    // topmost fully-or-partially-visible .m-evt element, then record
+    // how far into it the scroll position sits.
+    function captureAnchor() {
+      var els = transcriptEl.querySelectorAll('.m-evt[data-uuid]');
+      var st = transcriptEl.scrollTop;
+      var anchor = null;
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].offsetTop + els[i].offsetHeight > st) {
+          anchor = { uuid: els[i].getAttribute('data-uuid'), offset: st - els[i].offsetTop };
+          break;
+        }
+      }
+      return anchor;
+    }
+
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
-      // Persist scroll-back state for this session so re-attaching
-      // can restore it. Written on every scroll event — no debounce
-      // needed since the Map write is cheap.
-      sessionScrollState.set(sid, {
-        scrolledUp: userScrolledUp,
-        scrollTop: transcriptEl.scrollTop,
-      });
+      var state = { scrolledUp: userScrolledUp };
+      if (userScrolledUp) {
+        // Only capture anchor when scrolled-up; at-bottom state needs
+        // no anchor (next init will snap to tail).
+        var a = captureAnchor();
+        if (a) { state.anchorUuid = a.uuid; state.anchorOffset = a.offset; }
+      }
+      setScrollState(sid, state);
     }, { signal: attachSig });
 
     // Initial-replay tail-snap loop. Virtualization is OFF during
@@ -4845,6 +4875,7 @@
       if (el && !el.classList.contains('m-evt-compact') && !el.classList.contains('m-evt-end')) {
         el.setAttribute('data-ts', ts);
       }
+      if (el) el.setAttribute('data-uuid', evt.uuid);
 
       transcriptEl.appendChild(el);
       scrollToBottom();
@@ -5041,6 +5072,8 @@
       // scrolled up in this session, preserve that and restore their
       // position; otherwise snap to the tail.
       var scrollState = sessionScrollState.get(sid);
+      // Set userScrolledUp before the render loop so that scrollToBottom()
+      // calls inside renderEvent no-op when we intend to restore position.
       userScrolledUp = !!(scrollState && scrollState.scrolledUp);
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
@@ -5051,14 +5084,25 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
-      if (userScrolledUp && scrollState) {
-        // Restore position after layout. Use an IIFE to capture the
-        // value (scrollState could be mutated by a scroll event).
-        (function(target) {
-          requestAnimationFrame(function() {
-            transcriptEl.scrollTop = target;
-          });
-        })(scrollState.scrollTop);
+      if (userScrolledUp && scrollState && scrollState.anchorUuid) {
+        // Restore by content anchor: find the frame the user was reading
+        // and scroll to the same offset within it. Falls back to tail if
+        // the frame is no longer in the rendered window (e.g. it was
+        // loaded history that wasn't re-requested, or was outside the
+        // 200-frame init window).
+        var anchorUuid = scrollState.anchorUuid;
+        var anchorOffset = scrollState.anchorOffset || 0;
+        requestAnimationFrame(function() {
+          var target = transcriptEl.querySelector('[data-uuid="' + anchorUuid + '"]');
+          if (target) {
+            transcriptEl.scrollTop = target.offsetTop + anchorOffset;
+          } else {
+            // Anchor not in current window; fall through to tail.
+            userScrolledUp = false;
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            startTailObserver();
+          }
+        });
       } else {
         userScrolledUp = false;
         scrollToBottom();
@@ -5140,10 +5184,13 @@
       if (transcriptEl) {
         // Capture final scroll state before wiping DOM so re-attach can restore it.
         var dist = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
-        sessionScrollState.set(sid, {
-          scrolledUp: dist > SCROLL_LOCK_THRESHOLD,
-          scrollTop: transcriptEl.scrollTop,
-        });
+        var scrolledUp = dist > SCROLL_LOCK_THRESHOLD;
+        var teardownState = { scrolledUp: scrolledUp };
+        if (scrolledUp) {
+          var anchor = captureAnchor();
+          if (anchor) { teardownState.anchorUuid = anchor.uuid; teardownState.anchorOffset = anchor.offset; }
+        }
+        setScrollState(sid, teardownState);
         transcriptEl.innerHTML = '';
       }
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }

@@ -3227,6 +3227,12 @@
   // for the currently-attached session.
   var activeAgentSid = null;
   var mirrorTeardown = null;
+  // Per-sid scroll state: { scrolledUp: bool, scrollTop: number }.
+  // scrolledUp is set when the user explicitly scrolls up in a session
+  // and cleared when they scroll back to the bottom. Persists across
+  // session switches so re-attaching a session resumes where they left
+  // off. Cleared on page reload (in-memory only).
+  var sessionScrollState = new Map();
 
   function detachMirror() {
     if (typeof mirrorTeardown === 'function') {
@@ -3294,6 +3300,13 @@
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
+      // Persist scroll-back state for this session so re-attaching
+      // can restore it. Written on every scroll event — no debounce
+      // needed since the Map write is cheap.
+      sessionScrollState.set(sid, {
+        scrolledUp: userScrolledUp,
+        scrollTop: transcriptEl.scrollTop,
+      });
     }, { signal: attachSig });
 
     // Initial-replay tail-snap loop. Virtualization is OFF during
@@ -5024,12 +5037,11 @@
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       disconnectTailObserver();
-      // Always snap to the tail on attach. Pixel-position memory is
-      // unreliable now that init only sends the last 200 frames — new
-      // frames shift content, and loaded history is cleared on detach,
-      // so a saved scrollTop points to the wrong place. Land at the
-      // bottom; use the history button to read back.
-      userScrolledUp = false;
+      // Restore per-session scroll-back state. If the user previously
+      // scrolled up in this session, preserve that and restore their
+      // position; otherwise snap to the tail.
+      var scrollState = sessionScrollState.get(sid);
+      userScrolledUp = !!(scrollState && scrollState.scrolledUp);
       if (Array.isArray(msg.transcript)) {
         for (var i = 0; i < msg.transcript.length; i++) {
           renderEvent(msg.transcript[i]);
@@ -5039,8 +5051,19 @@
         // historical — hide it so it only shows for live ones.
         hidePromptBanner();
       }
-      scrollToBottom();
-      startTailObserver();
+      if (userScrolledUp && scrollState) {
+        // Restore position after layout. Use an IIFE to capture the
+        // value (scrollState could be mutated by a scroll event).
+        (function(target) {
+          requestAnimationFrame(function() {
+            transcriptEl.scrollTop = target;
+          });
+        })(scrollState.scrollTop);
+      } else {
+        userScrolledUp = false;
+        scrollToBottom();
+        startTailObserver();
+      }
       // Re-enable virtualization once the initial scroll has stuck.
       // 800ms is generous enough for the rAF snap loop above (≤4
       // frames) plus mobile paint settling, well under typical
@@ -5114,7 +5137,15 @@
       try { if (mws) mws.close(); } catch (e) { /* ignore */ }
       mws = null;
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
-      if (transcriptEl) transcriptEl.innerHTML = '';
+      if (transcriptEl) {
+        // Capture final scroll state before wiping DOM so re-attach can restore it.
+        var dist = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+        sessionScrollState.set(sid, {
+          scrolledUp: dist > SCROLL_LOCK_THRESHOLD,
+          scrollTop: transcriptEl.scrollTop,
+        });
+        transcriptEl.innerHTML = '';
+      }
       if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
       hidePromptBanner();
       // Task panel is shared DOM, but taskState is per-attach. Wipe

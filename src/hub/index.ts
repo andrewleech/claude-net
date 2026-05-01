@@ -109,10 +109,21 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   let dashboardCache: string | null = null;
   let dashboardParsersCache: string | null = null;
 
+  // Embedded at startup so the UI can confirm which build is running.
+  const commitHash = (() => {
+    try {
+      return Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"])
+        .stdout.toString()
+        .trim();
+    } catch {
+      return "dev";
+    }
+  })();
+
   async function getDashboardHtml(): Promise<string> {
     if (!dashboardCache) {
       const file = Bun.file(dashboardPath);
-      dashboardCache = await file.text();
+      dashboardCache = (await file.text()).replace("__COMMIT__", commitHash);
     }
     return dashboardCache;
   }

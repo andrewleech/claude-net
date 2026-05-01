@@ -2103,7 +2103,7 @@
 <nav class="navbar navbar-expand py-1" data-cn-navbar>
   <div class="container-fluid gap-2">
     <button class="btn btn-outline-secondary btn-sm" type="button" id="sidebar-toggle" title="Toggle sidebar">☰</button>
-    <a class="navbar-brand mb-0 h1 me-auto" href="#">claude-net</a>
+    <a class="navbar-brand mb-0 h1 me-auto" href="#" title="claude-net hub">claude-net <span style="font-size:9px;opacity:0.4;font-weight:normal;letter-spacing:0">__COMMIT__</span></a>
     <span class="badge" id="agent-count">0 agents</span>
     <span class="d-flex align-items-center gap-1 small"><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
     <button type="button" class="btn btn-outline-secondary btn-sm" data-theme-toggle title="Switch theme">◐ DARK</button>
@@ -3363,8 +3363,15 @@
         if (!tailLoopActive) return;
         if (userScrolledUp) { tailLoopActive = false; return; }
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
-        if (++attempts < 4) requestAnimationFrame(tick);
-        else tailLoopActive = false;
+        if (++attempts < 4) {
+          requestAnimationFrame(tick);
+        } else {
+          // Final tick: forcibly clear the flag. The rAF snap above is
+          // authoritative; any intervening event that set userScrolledUp
+          // during the loop did so on stale scroll geometry.
+          tailLoopActive = false;
+          userScrolledUp = false;
+        }
       }
       requestAnimationFrame(tick);
     }

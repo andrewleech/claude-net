@@ -273,7 +273,39 @@ except Exception:
     done
 }
 
-start_mirror_agent || true
+start_mirror_agent_watchdog() {
+    local uid log_file port_file sentinel
+    uid="$(id -u)"
+    log_file="/tmp/claude-net/mirror-agent-${uid}.log"
+    port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+    sentinel="/tmp/claude-net/mirror-agent-${uid}.stopped"
+
+    start_mirror_agent || return 1
+
+    # Detached background subshell: polls every 5 s and respawns if the agent
+    # is gone. Exits cleanly when the sentinel file appears (written by the
+    # agent on idle-shutdown so we don't restart intentional stops).
+    (
+        while true; do
+            sleep 5
+            # Sentinel: agent stopped intentionally — don't restart.
+            [ -f "$sentinel" ] && exit 0
+            # Port file present + health check passing: all good.
+            local port
+            port="$(cat "$port_file" 2>/dev/null || true)"
+            if [ -n "$port" ] && curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                continue
+            fi
+            # Agent is gone without a sentinel — crashed. Restart it.
+            rm -f "$port_file" 2>/dev/null || true
+            echo "[claude-net/mirror] watchdog: agent down, restarting" >> "$log_file" 2>&1
+            start_mirror_agent >> "$log_file" 2>&1 || true
+        done
+    ) </dev/null >>"$log_file" 2>&1 &
+    disown $! 2>/dev/null || true
+}
+
+start_mirror_agent_watchdog || true
 
 # Warn if tmux is needed but missing. Without tmux there's no pane for
 # the mirror-agent to send-keys into, so web inject lands as:

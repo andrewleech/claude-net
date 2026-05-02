@@ -182,11 +182,6 @@
        nested horizontal-scroll blocks (diff, code) — use `hidden` here
        so those keep their own overflow. */
     overflow-x: hidden;
-    /* Disable browser scroll anchoring. We manage scroll position
-       manually; anchoring fires when is-virtualized toggles content-
-       visibility, changing scrollHeight and adjusting scrollTop, which
-       spuriously sets userScrolledUp and breaks auto-follow. */
-    overflow-anchor: none;
     padding: 8px 0 16px 0;
     display: flex;
     flex-direction: column;

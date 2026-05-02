@@ -157,6 +157,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     throw new Error("mirror-agent must bind to loopback only");
   }
 
+  removeSentinelFile(stateDir);
   writePortFile(stateDir, server.port);
   log(
     `mirror-agent listening on http://${bindHost}:${server.port} (hub=${hubUrl})`,
@@ -1016,6 +1017,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     }
     server.stop();
     removePortFile(stateDir);
+    writeSentinelFile(stateDir);
   }
 
   return {
@@ -1059,6 +1061,26 @@ function removePortFile(stateDir: string): void {
   }
 }
 
+function writeSentinelFile(stateDir: string): void {
+  const uid = process.getuid?.() ?? 0;
+  const sentinel = path.join(stateDir, `mirror-agent-${uid}.stopped`);
+  try {
+    fs.writeFileSync(sentinel, new Date().toISOString(), { mode: 0o600 });
+  } catch {
+    // ignore
+  }
+}
+
+function removeSentinelFile(stateDir: string): void {
+  const uid = process.getuid?.() ?? 0;
+  const sentinel = path.join(stateDir, `mirror-agent-${uid}.stopped`);
+  try {
+    fs.unlinkSync(sentinel);
+  } catch {
+    // ignore
+  }
+}
+
 function log(msg: string): void {
   process.stderr.write(`[claude-net/mirror] ${msg}\n`);
 }
@@ -1069,7 +1091,77 @@ if (import.meta.main) {
   const hub = process.env.CLAUDE_NET_HUB || "http://localhost:4815";
   const portEnv = process.env.CLAUDE_NET_MIRROR_AGENT_PORT;
   const bindPort = portEnv ? Number.parseInt(portEnv, 10) || 0 : 0;
+  const uid = process.getuid?.() ?? 0;
+  const stateDir = "/tmp/claude-net";
+  const logPath = `${stateDir}/mirror-agent-${uid}.log`;
+
+  function writeCrashRecord(kind: string, err: unknown): void {
+    const record = {
+      kind,
+      ts: new Date().toISOString(),
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? (err.stack ?? "") : "",
+    };
+    try {
+      fs.appendFileSync(
+        logPath,
+        `[claude-net/mirror] CRASH ${JSON.stringify(record)}\n`,
+      );
+    } catch {
+      // nowhere left to report
+    }
+  }
+
+  function notifyCrashToHub(record: Record<string, unknown>): void {
+    try {
+      const body = JSON.stringify({
+        action: "mirror_agent_crash",
+        host_id: `${os.userInfo().username}@${os.hostname()}`,
+        ...record,
+      });
+      // Bun has no synchronous fetch; use curl as a fire-and-forget
+      // subprocess so we get the notification out before exit.
+      Bun.spawnSync(
+        [
+          "curl",
+          "-fsS",
+          "-m",
+          "2",
+          "-H",
+          "content-type: application/json",
+          "-d",
+          body,
+          `${hub}/api/mirror/agent-crash`,
+        ],
+        { stdout: "ignore", stderr: "ignore" },
+      );
+    } catch {
+      // best-effort only
+    }
+  }
+
+  process.on("uncaughtException", (err: Error) => {
+    writeCrashRecord("uncaughtException", err);
+    // Sync hub notification omitted: process is in unknown state after an
+    // uncaught exception; blocking on a curl fork risks hangs. The watchdog
+    // will respawn and the agent-log endpoint exposes the crash record.
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (reason: unknown) => {
+    const record = {
+      kind: "unhandledRejection",
+      ts: new Date().toISOString(),
+      message: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? (reason.stack ?? "") : "",
+    };
+    writeCrashRecord("unhandledRejection", reason);
+    notifyCrashToHub(record);
+    process.exit(1);
+  });
+
   startAgent({ hubUrl: hub, bindPort }).catch((err: unknown) => {
+    writeCrashRecord("startupError", err);
     process.stderr.write(
       `[claude-net/mirror] startup failed: ${String(err)}\n`,
     );

@@ -101,6 +101,18 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
       watcher = fs.watch(filePath, { persistent: false }, () => {
         readMore();
       });
+      // FSWatcher emits "error" on WSL2 / network filesystems. Without a
+      // handler this is an uncaught exception that kills the process.
+      watcher.on("error", (err: Error) => {
+        opts.onError?.(err);
+        try {
+          watcher?.close();
+        } catch {
+          /* ignore */
+        }
+        watcher = null;
+        // Poller will re-create the watcher on the next tick.
+      });
     } catch {
       // fs.watch may not be available (e.g. file doesn't exist); rely on poller.
     }

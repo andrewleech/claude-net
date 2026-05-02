@@ -5174,19 +5174,6 @@
       virtualizationTimer = setTimeout(function() {
         virtualizationTimer = null;
         transcriptEl.classList.add('is-virtualized');
-        // is-virtualized changes estimated scrollHeight via content-visibility:auto.
-        // If scrollTop was pinned to the old scrollHeight, the new estimate may
-        // differ enough to trigger a scroll event that sets userScrolledUp = true.
-        // Re-snap to tail in a rAF after the class change so any such noise is
-        // overridden before the user can interact.
-        if (!userScrolledUp) {
-          requestAnimationFrame(function() {
-            if (!userScrolledUp) {
-              transcriptEl.scrollTop = transcriptEl.scrollHeight;
-              setScrolledUp(false);
-            }
-          });
-        }
       }, 800);
     }
 

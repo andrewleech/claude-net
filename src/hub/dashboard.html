@@ -54,6 +54,7 @@
     --gold: #d4a04d;
     --green: #55c27a;
     --red: #ff4d2e;       /* alias of --accent so existing error styles keep working */
+    --text-accent: #ff6535; /* accent hue shifted orange for text — more legible in low light */
     --blue: #6fb0d4;      /* desaturated, not the 'main' colour any more */
     --cyan: #6fc3d9;
     --orange: #ff9e64;
@@ -95,6 +96,7 @@
     --gold: #8a6a28;
     --green: #3f8f52;
     --red: #c53518;
+    --text-accent: var(--accent); /* light theme accent is already legible as text */
     --blue: #3a7594;
     --cyan: #3a7594;
     --orange: #c55a18;
@@ -279,7 +281,7 @@
     color: var(--text);
     text-align: left;
   }
-  .m-evt-user .m-label { color: var(--accent); }
+  .m-evt-user .m-label { color: var(--text-accent); }
 
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
      just a thin left rule anchoring the row to the timeline. The
@@ -298,7 +300,7 @@
     );
   }
   .m-evt-assistant::after { background: var(--accent); width: 9px; }
-  .m-evt-assistant .m-label { color: var(--accent); }
+  .m-evt-assistant .m-label { color: var(--text-accent); }
 
   @media (max-width: 700px) {
     /* Narrow screens: the left timeline gutter eats too much width,
@@ -410,10 +412,10 @@
   }
   .m-tool-badge.pending { background: rgba(224,175,104,0.20); color: var(--yellow); }
   .m-tool-badge.ok { background: rgba(158,206,106,0.15); color: var(--green); }
-  .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--red); }
+  .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--text-accent); }
   .m-tool-badge.pending { border-color: var(--gold); color: var(--gold); }
-  .m-tool-badge.ok { border-color: var(--accent); color: var(--accent); }
-  .m-tool-badge.error { border-color: var(--accent); color: var(--accent); background: var(--accent-ink); }
+  .m-tool-badge.ok { border-color: var(--text-accent); color: var(--text-accent); }
+  .m-tool-badge.error { border-color: var(--text-accent); color: var(--text-accent); background: var(--accent-ink); }
   .m-tool-badge.nosupport { border-color: var(--border); color: var(--text-muted); }
 
   /* ── BASH — terminal prompt metaphor. The command is rendered with
@@ -425,7 +427,7 @@
   }
   .m-bash-cmd::before {
     content: "$ ";
-    color: var(--accent);
+    color: var(--text-accent);
     font-weight: 600;
   }
   .m-bash-cmd-full {
@@ -444,7 +446,7 @@
   .m-bash-err {
     font-family: var(--font-mono);
     font-size: 12px; line-height: 1.55; white-space: pre-wrap;
-    color: var(--accent); margin: 6px 0 0;
+    color: var(--text-accent); margin: 6px 0 0;
     padding: 8px 10px;
     background: rgba(255, 77, 46, 0.05);
     border: 1px solid var(--accent-dim);
@@ -452,7 +454,7 @@
   }
   .m-bash-label {
     font-family: var(--font-mono);
-    font-size: 9px; font-weight: 700; color: var(--accent);
+    font-size: 9px; font-weight: 700; color: var(--text-accent);
     text-transform: uppercase; letter-spacing: 1.4px;
     margin-top: 8px;
   }
@@ -568,8 +570,8 @@
   }
   .m-diff-content { flex: 1; white-space: pre-wrap; word-break: break-word; }
   .m-diff-del { background: rgba(255, 77, 46, 0.06); }
-  .m-diff-del .m-diff-gutter { color: var(--accent); }
-  .m-diff-del .m-diff-content { color: var(--accent); }
+  .m-diff-del .m-diff-gutter { color: var(--text-accent); }
+  .m-diff-del .m-diff-content { color: var(--text-accent); }
   .m-diff-add { background: rgba(85, 194, 122, 0.05); }
   .m-diff-add .m-diff-gutter { color: var(--green); }
   .m-diff-add .m-diff-content { color: var(--green); }
@@ -631,7 +633,7 @@
   .m-q-body code {
     background: var(--bg); padding: 1px 4px;
     font-family: var(--font-mono); font-size: 12px;
-    color: var(--accent);
+    color: var(--text-accent);
   }
   .m-q-body pre {
     background: var(--bg); padding: 8px 10px; margin: 6px 0;
@@ -649,11 +651,11 @@
     text-align: left;
     transition: border-color 0.1s, color 0.1s, background 0.1s;
   }
-  .m-q-action:hover { border-color: var(--accent); color: var(--accent); }
+  .m-q-action:hover { border-color: var(--text-accent); color: var(--text-accent); }
   .m-q-action.primary {
     background: var(--accent-ink);
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: var(--text-accent);
+    color: var(--text-accent);
   }
   .m-q-action.primary:hover { background: var(--accent); color: var(--on-accent); }
   .m-q-action .m-q-action-desc {
@@ -699,7 +701,7 @@
   .m-evt-compact::before, .m-evt-compact::after { display: none; }
   .m-evt-end {
     text-align: center;
-    color: var(--accent);
+    color: var(--text-accent);
     font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 700;
@@ -721,7 +723,7 @@
     font-size: 12px;
     color: var(--text);
   }
-  .m-evt-history-user .m-label { color: var(--accent); }
+  .m-evt-history-user .m-label { color: var(--text-accent); }
   .m-evt-history-assistant .m-label { color: var(--text-dim); }
   .m-history-tag {
     display: inline-block;
@@ -784,7 +786,7 @@
     position: relative;
   }
   .mirror-compose-frame:focus-within {
-    border-color: var(--accent);
+    border-color: var(--text-accent);
     box-shadow: 0 0 0 1px var(--accent), 0 0 18px var(--accent-glow);
   }
 
@@ -800,7 +802,7 @@
     font-family: var(--font-mono);
     font-size: 14px;
     font-weight: 700;
-    color: var(--accent);
+    color: var(--text-accent);
     border-right: 1px solid var(--border);
     user-select: none;
     flex-shrink: 0;
@@ -950,13 +952,13 @@
   .mirror-slash-item:hover,
   .mirror-slash-item.is-active {
     background: var(--accent-ink);
-    border-left-color: var(--accent);
+    border-left-color: var(--text-accent);
   }
   .mirror-slash-name {
     font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--text-accent);
     flex-shrink: 0;
     white-space: nowrap;
   }
@@ -997,7 +999,7 @@
 
   #mirror-compose-send {
     background: transparent;
-    color: var(--accent);
+    color: var(--text-accent);
     border: 1px solid var(--accent);
     padding: 0 16px;
     font-family: var(--font-mono);
@@ -1033,7 +1035,7 @@
   .mirror-compose-err {
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--accent);
+    color: var(--text-accent);
     padding: 6px 20px;
     min-height: 22px;
     letter-spacing: 0.3px;
@@ -1064,7 +1066,7 @@
     transition: color 0.1s, background 0.1s;
   }
   .mirror-attach-btn:hover {
-    color: var(--accent);
+    color: var(--text-accent);
     background: var(--accent-ink);
   }
   .mirror-attach-btn:focus-visible {
@@ -1072,7 +1074,7 @@
     outline-offset: -2px;
   }
   .mirror-attach-btn.is-uploading {
-    color: var(--accent);
+    color: var(--text-accent);
     animation: live-pulse 1.4s ease-in-out infinite;
   }
   .mirror-attach-btn svg {
@@ -1090,7 +1092,7 @@
   }
   /* Drag-over highlight on the compose frame itself. */
   .mirror-compose-frame.is-dragover {
-    border-color: var(--accent);
+    border-color: var(--text-accent);
     box-shadow: 0 0 0 1px var(--accent), 0 0 24px var(--accent-glow);
   }
   .mirror-compose-frame.is-dragover::after {
@@ -1104,7 +1106,7 @@
     font-size: 11px;
     letter-spacing: 2px;
     text-transform: uppercase;
-    color: var(--accent);
+    color: var(--text-accent);
     background: var(--bg);
     opacity: 0.9;
     pointer-events: none;
@@ -1119,7 +1121,7 @@
     color: var(--text-muted);
     text-transform: uppercase;
   }
-  .mirror-status.error { color: var(--accent); }
+  .mirror-status.error { color: var(--text-accent); }
   .mirror-status:empty { padding: 0; }
 
   /* Jump-to-latest button: floats above the compose box whenever the user
@@ -1222,7 +1224,7 @@
     border-top: 1px dashed var(--border);
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--accent);
+    color: var(--text-accent);
     letter-spacing: 0.4px;
     animation: live-pulse 2.4s ease-in-out infinite;
   }
@@ -1269,7 +1271,7 @@
   }
   .mirror-list-item:hover {
     background: var(--bg-hover);
-    border-left-color: var(--accent);
+    border-left-color: var(--text-accent);
   }
   .mirror-list-item .mli-owner {
     font-family: var(--font-mono);
@@ -1305,7 +1307,7 @@
     margin-top: 5px;
   }
   .mirror-list-item .mli-watchers {
-    color: var(--accent);
+    color: var(--text-accent);
     font-weight: 700;
   }
 
@@ -1333,7 +1335,7 @@
     padding: 1px 6px;
     font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--accent);
+    color: var(--text-accent);
   }
   .md-body pre {
     background: var(--bg-code);
@@ -1363,12 +1365,12 @@
   .md-body strong { font-weight: 600; color: var(--text); }
   .md-body em { font-style: italic; }
   .md-body a {
-    color: var(--accent);
+    color: var(--text-accent);
     text-decoration: none;
     border-bottom: 1px solid var(--accent-dim);
     transition: border-color 0.1s;
   }
-  .md-body a:hover { border-bottom-color: var(--accent); }
+  .md-body a:hover { border-bottom-color: var(--text-accent); }
   .md-body hr {
     border: 0;
     border-top: 1px solid var(--border);
@@ -1383,7 +1385,7 @@
     transform: translateX(-50%);
     background: var(--bg);
     padding: 0 10px;
-    color: var(--accent);
+    color: var(--text-accent);
     font-size: 8px;
     letter-spacing: 4px;
   }
@@ -1403,7 +1405,7 @@
     letter-spacing: 0.6px;
     text-transform: uppercase;
     font-size: 10px;
-    color: var(--accent);
+    color: var(--text-accent);
   }
 
   /* ── TodoWrite ── */
@@ -1436,7 +1438,7 @@
   }
   .m-todo .m-checkbox.checked {
     background: var(--accent);
-    border-color: var(--accent);
+    border-color: var(--text-accent);
     color: var(--on-accent);
   }
   .m-todo .m-checkbox.in-progress {
@@ -1470,11 +1472,11 @@
   .m-task-line.m-task-pending .m-task-subject { color: var(--text); }
   .m-task-line.m-task-in_progress .m-task-glyph { color: var(--gold); }
   .m-task-line.m-task-in_progress .m-task-subject { color: var(--text); font-weight: 600; }
-  .m-task-line.m-task-completed .m-task-glyph { color: var(--accent); }
+  .m-task-line.m-task-completed .m-task-glyph { color: var(--text-accent); }
   .m-task-line.m-task-completed .m-task-subject {
     color: var(--text-muted); text-decoration: line-through; opacity: 0.85;
   }
-  .m-task-line.m-task-deleted .m-task-glyph { color: var(--accent); }
+  .m-task-line.m-task-deleted .m-task-glyph { color: var(--text-accent); }
   .m-task-line.m-task-deleted .m-task-subject {
     color: var(--text-dim); text-decoration: line-through;
   }
@@ -1492,7 +1494,7 @@
   @keyframes event-flash {
     0% {
       background-color: var(--accent-ink);
-      border-left-color: var(--accent);
+      border-left-color: var(--text-accent);
     }
     100% {
       background-color: transparent;
@@ -1559,7 +1561,7 @@
     --bs-tertiary-bg: var(--bg-panel);
     --bs-secondary-color: var(--text-dim);
     --bs-emphasis-color: var(--text);
-    --bs-link-color: var(--accent);
+    --bs-link-color: var(--text-accent);
     --bs-link-hover-color: var(--accent-dim);
     --bs-offcanvas-bg: var(--bg-panel);
     --bs-offcanvas-color: var(--text);
@@ -1773,7 +1775,7 @@
   #agent-list .list-group-item:hover { background: var(--bg-hover); color: var(--text); }
   #agent-list .list-group-item.active {
     background: var(--accent-ink);
-    border-bottom-color: var(--accent);
+    border-bottom-color: var(--text-accent);
     color: var(--text);
     font-weight: 600;
   }
@@ -1831,7 +1833,7 @@
   .cn-host-row .cn-host-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cn-launch-btn {
     background: transparent;
-    color: var(--accent);
+    color: var(--text-accent);
     border: 1px solid var(--accent-dim);
     padding: 2px 8px;
     font-family: var(--font-mono);
@@ -1910,7 +1912,7 @@
     padding: 0 8px;
     cursor: pointer;
   }
-  .cn-launch-close:hover { color: var(--accent); border-color: var(--accent); }
+  .cn-launch-close:hover { color: var(--text-accent); border-color: var(--text-accent); }
   .cn-launch-body { padding: 10px 14px; display: flex; flex-direction: column; gap: 10px; }
   .cn-launch-input {
     background: var(--bg);
@@ -1921,7 +1923,7 @@
     font-size: 13px;
     outline: none;
   }
-  .cn-launch-input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .cn-launch-input:focus { border-color: var(--text-accent); box-shadow: 0 0 0 1px var(--accent); }
   .cn-launch-suggestions {
     max-height: 240px;
     overflow-y: auto;
@@ -1947,7 +1949,7 @@
   .cn-launch-sugg-item.is-active { background: var(--accent-ink); }
   .cn-launch-sugg-item .sugg-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cn-launch-sugg-item .sugg-hint { color: var(--text-muted); font-size: 10px; margin-left: 8px; }
-  .cn-launch-sugg-item.cn-launch-create { color: var(--accent); }
+  .cn-launch-sugg-item.cn-launch-create { color: var(--text-accent); }
   .cn-launch-controls {
     display: flex;
     align-items: center;
@@ -1975,7 +1977,7 @@
     margin-left: auto;
   }
   .cn-launch-submit:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
-  .cn-launch-error { color: var(--red); font-size: 11px; min-height: 1em; }
+  .cn-launch-error { color: var(--text-accent); font-size: 11px; min-height: 1em; }
   @media (max-width: 767.98px) {
     .cn-launch-panel { width: 100vw; max-height: 90vh; }
     .cn-launch-modal { padding-top: 4vh; }
@@ -2001,8 +2003,8 @@
     text-transform: uppercase;
     color: var(--text-dim);
   }
-  #mirror-conn.is-live { color: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
-  #mirror-conn.is-error { color: var(--red); }
+  #mirror-conn.is-live { color: var(--text-accent); animation: live-pulse 1.4s ease-in-out infinite; }
+  #mirror-conn.is-error { color: var(--text-accent); }
 
   /* ── Task panel ───────────────────────────────────────────────
      Bootstrap's .collapse handles the show/hide and transition;

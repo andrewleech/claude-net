@@ -682,38 +682,6 @@ export class MirrorRegistry {
   }
 
   /**
-   * Rewrite ownerAgent on every session currently owned by `oldName` to
-   * `newName`. Returns the list of affected sids. Broadcasts a single
-   * `mirror:owner_renamed` event so dashboards can update their sidebars
-   * without a full refresh.
-   *
-   * Called from the MCP register handler when the hub detects that an
-   * already-connected ws has chosen a different name. When two mirror
-   * sessions share the same ownerAgent (fork sessions in the same cwd)
-   * both rename together — the sid suffix on each sidebar row keeps
-   * them visually distinct.
-   */
-  renameOwner(oldName: string, newName: string): string[] {
-    if (!oldName || !newName || oldName === newName) return [];
-    const affected: string[] = [];
-    for (const entry of this.sessions.values()) {
-      if (entry.ownerAgent === oldName) {
-        entry.ownerAgent = newName;
-        affected.push(entry.sid);
-      }
-    }
-    if (affected.length > 0) {
-      this.dashboardBroadcast({
-        event: "mirror:owner_renamed",
-        old_owner: oldName,
-        new_owner: newName,
-        sids: affected,
-      });
-    }
-    return affected;
-  }
-
-  /**
    * Rename exactly one session's owner_agent. Unlike renameOwner this
    * does NOT touch sibling sessions that share the old name. Used by
    * the POST /:sid/rename endpoint where the user is being explicit

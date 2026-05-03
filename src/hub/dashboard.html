@@ -3914,7 +3914,8 @@
       "mcp__claude-net___ack_channel": {
         call: function(_p, el) {
           el.className = "m-evt m-evt-notif";
-          el.removeAttribute("data-tool-use-id");
+          // Keep data-tool-use-id so the result renderer can find this element
+          // and no-op cleanly instead of falling into the orphan-result branch.
           el.textContent = "claude-net · channel ack";
         },
         result: function() {

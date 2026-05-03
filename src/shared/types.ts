@@ -194,6 +194,20 @@ export interface MirrorThinkingFrame {
   tool?: string | null;
 }
 
+/**
+ * Agent → hub report of the session's context-window utilisation, derived
+ * from the `usage` field on JSONL assistant records. Broadcast to watchers
+ * and cached on the session so late-joining watchers receive a snapshot.
+ */
+export interface MirrorStatuslineFrame {
+  action: "mirror_statusline";
+  sid: string;
+  ctx_pct: number;
+  ctx_tokens: number;
+  ctx_window: number;
+  ts: number;
+}
+
 export type PluginFrame =
   | RegisterFrame
   | SendFrame

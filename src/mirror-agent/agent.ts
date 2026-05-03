@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { MirrorEventFrame } from "@/shared/types";
+import type { MirrorEventFrame, MirrorStatuslineFrame } from "@/shared/types";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { type HostChannelHandle, startHostChannel } from "./host-channel";

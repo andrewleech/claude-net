@@ -140,6 +140,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     log(`Failed to create state dir: ${String(err)}`);
   }
 
+  // Remove any stale sentinel from a prior clean shutdown so the watchdog
+  // doesn't mistake this new process for an idle-stopped one.
+  removeSentinelFile(stateDir);
+
   // Prune stale pastes left by previous runs (anything older than 24 h).
   cleanupOldPastes();
 
@@ -157,7 +161,6 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     throw new Error("mirror-agent must bind to loopback only");
   }
 
-  removeSentinelFile(stateDir);
   writePortFile(stateDir, server.port);
   log(
     `mirror-agent listening on http://${bindHost}:${server.port} (hub=${hubUrl})`,
@@ -1015,9 +1018,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .join(", ");
       log(`redactor hit totals: ${summary}`);
     }
+    writeSentinelFile(stateDir);
     server.stop();
     removePortFile(stateDir);
-    writeSentinelFile(stateDir);
   }
 
   return {
@@ -1114,13 +1117,20 @@ if (import.meta.main) {
 
   function notifyCrashToHub(record: Record<string, unknown>): void {
     try {
+      let hostId: string;
+      try {
+        hostId = `${os.userInfo().username}@${os.hostname()}`;
+      } catch {
+        hostId = "unknown@unknown";
+      }
+      const hubUrl = hub.replace(/\/$/, "");
       const body = JSON.stringify({
-        action: "mirror_agent_crash",
-        host_id: `${os.userInfo().username}@${os.hostname()}`,
+        host_id: hostId,
         ...record,
       });
-      // Bun has no synchronous fetch; use curl as a fire-and-forget
-      // subprocess so we get the notification out before exit.
+      // Bun has no synchronous fetch; pipe body via stdin to avoid exposing
+      // stack traces in the process argv (visible in /proc on Linux).
+      // stdin must be a Buffer/Uint8Array — Bun.spawnSync rejects a plain string.
       Bun.spawnSync(
         [
           "curl",
@@ -1129,11 +1139,11 @@ if (import.meta.main) {
           "2",
           "-H",
           "content-type: application/json",
-          "-d",
-          body,
-          `${hub}/api/mirror/agent-crash`,
+          "--data-binary",
+          "@-",
+          `${hubUrl}/api/mirror/agent-crash`,
         ],
-        { stdout: "ignore", stderr: "ignore" },
+        { stdin: Buffer.from(body), stdout: "ignore", stderr: "ignore" },
       );
     } catch {
       // best-effort only
@@ -1148,6 +1158,10 @@ if (import.meta.main) {
     process.exit(1);
   });
 
+  // unhandledRejection: log and notify but keep running — a stray rejected
+  // promise is rarely fatal and killing the whole agent is too drastic.
+  // uncaughtException (above) still exits because a synchronous throw that
+  // escapes the event loop genuinely leaves the process in unknown state.
   process.on("unhandledRejection", (reason: unknown) => {
     const record = {
       kind: "unhandledRejection",
@@ -1157,7 +1171,6 @@ if (import.meta.main) {
     };
     writeCrashRecord("unhandledRejection", reason);
     notifyCrashToHub(record);
-    process.exit(1);
   });
 
   startAgent({ hubUrl: hub, bindPort }).catch((err: unknown) => {

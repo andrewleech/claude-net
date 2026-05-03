@@ -1,7 +1,6 @@
 import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import type {
   DashboardEvent,
   MirrorActivityState,
@@ -1130,77 +1129,6 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           return { error: result.error };
         }
         return { ok: true, sid: params.sid, owner_agent: next };
-      })
-
-      // ── Mirror-agent crash reporting ──────────────────────────────────
-      // POST /api/mirror/agent-crash — called by the agent's crash handler
-      // via a fire-and-forget curl. Writes to EventLog so the existing
-      // EventLog→broadcastToDashboards pipeline surfaces it in the UI.
-      .post("/agent-crash", ({ body, set }) => {
-        const payload = body as Record<string, unknown>;
-        if (!payload || typeof payload !== "object") {
-          set.status = 400;
-          return { error: "Expected JSON body" };
-        }
-        eventLog?.push("mirror.agent.crash", {
-          host_id:
-            typeof payload.host_id === "string" ? payload.host_id : "unknown",
-          kind: typeof payload.kind === "string" ? payload.kind : "unknown",
-          message:
-            typeof payload.message === "string"
-              ? payload.message
-              : String(payload.message ?? ""),
-          stack: typeof payload.stack === "string" ? payload.stack : "",
-          ts:
-            typeof payload.ts === "string"
-              ? payload.ts
-              : new Date().toISOString(),
-        });
-        return { ok: true };
-      })
-
-      // GET /api/mirror/agent-log — serve the last N lines of the
-      // mirror-agent log file on this host. uid param defaults to the
-      // hub process's own uid (hub and agent run on the same machine).
-      .get("/agent-log", ({ query, set }) => {
-        const uid =
-          Number.parseInt(
-            String((query as Record<string, string | undefined>).uid ?? ""),
-            10,
-          ) ||
-          (process.getuid?.() ?? 0);
-        const lines = Math.min(
-          Number.parseInt(
-            String(
-              (query as Record<string, string | undefined>).lines ?? "200",
-            ),
-            10,
-          ) || 200,
-          2000,
-        );
-        if (uid < 0) {
-          set.status = 400;
-          return { error: "Invalid uid" };
-        }
-        const logPath = `/tmp/claude-net/mirror-agent-${uid}.log`;
-        let content: string;
-        try {
-          content = fs.readFileSync(logPath, "utf8");
-        } catch {
-          return {
-            uid,
-            log_path: logPath,
-            lines: [] as string[],
-            error: "Log file not found",
-          };
-        }
-        const all = content.split("\n").filter((l) => l.length > 0);
-        return {
-          uid,
-          log_path: logPath,
-          total_lines: all.length,
-          lines: all.slice(-lines),
-        };
       })
 
       .get("/archive/:sid", ({ params, set }) => {

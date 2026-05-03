@@ -5230,7 +5230,8 @@
     // with quick-inject buttons covering the common modal options.
     var promptBannerEl = document.getElementById('mirror-prompt-banner');
     var promptTextEl = document.getElementById('mirror-prompt-text');
-    var PROMPT_RE = /permission|approval|waiting for input|needs your|allow/i;
+    // Keep in sync with isPermissionNotification in mirror-agent/agent.ts.
+    var PROMPT_RE = /permission|approval|allow|needs your|waiting for input/i;
 
     function showPromptBanner(text) {
       if (!promptBannerEl) return;

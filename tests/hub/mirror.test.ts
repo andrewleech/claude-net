@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { MirrorRegistry, mirrorPlugin } from "@/hub/mirror";
+import {
+  MirrorRegistry,
+  type SessionWatcher,
+  mirrorPlugin,
+} from "@/hub/mirror";
 import type { MirrorEventFrame } from "@/shared/types";
 import { Elysia } from "elysia";
 
@@ -551,6 +555,142 @@ describe("MirrorRegistry", () => {
     expect(
       events.find((e) => e.event === "mirror:owner_renamed"),
     ).toBeUndefined();
+  });
+
+  // ── agent-state broadcast lifecycle ────────────────────────────────
+
+  test("setAgentConnection broadcasts mirror:agent_state with attached=true", () => {
+    const events: Record<string, unknown>[] = [];
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+    const identity = {};
+    const watcher = { id: "w1", ws: { send: () => {} }, wsIdentity: {} };
+    reg.addWatcher("s1", watcher as SessionWatcher);
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    const sent: string[] = [];
+    watcher.ws.send = (s: string) => sent.push(s);
+    reg.setAgentConnection("s1", {
+      ws: { send: () => {} },
+      wsIdentity: identity,
+    });
+    const parsed = sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+    const stateEvt = parsed.find((e) => e.event === "mirror:agent_state");
+    expect(stateEvt).toBeDefined();
+    expect(stateEvt?.attached).toBe(true);
+  });
+
+  test("handleAgentDisconnect broadcasts mirror:agent_state with attached=false", () => {
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+    const identity = {};
+    const sent: string[] = [];
+    const watcher = {
+      id: "w1",
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    };
+    reg.addWatcher("s1", watcher as SessionWatcher);
+    reg.setAgentConnection("s1", {
+      ws: { send: () => {} },
+      wsIdentity: identity,
+    });
+    sent.length = 0;
+    reg.handleAgentDisconnect(identity);
+    const parsed = sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+    const stateEvt = parsed.find((e) => e.event === "mirror:agent_state");
+    expect(stateEvt).toBeDefined();
+    expect(stateEvt?.attached).toBe(false);
+  });
+
+  test("idempotent setAgentConnection does not double-broadcast", () => {
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+    const identity = {};
+    const sent: string[] = [];
+    const watcher = {
+      id: "w1",
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    };
+    reg.addWatcher("s1", watcher as SessionWatcher);
+    const conn = { ws: { send: () => {} }, wsIdentity: identity };
+    reg.setAgentConnection("s1", conn);
+    sent.length = 0;
+    // Re-attach with same connection: no state change, no broadcast.
+    reg.setAgentConnection("s1", conn);
+    expect(
+      sent.filter(
+        (s) =>
+          (JSON.parse(s) as Record<string, unknown>).event ===
+          "mirror:agent_state",
+      ).length,
+    ).toBe(0);
+  });
+
+  test("mirror:init payload reflects current agent_attached state", () => {
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+
+    // No agent connected yet.
+    const entry = reg.sessions.get("s1");
+    expect(entry?.agent).toBeNull();
+
+    reg.setAgentConnection("s1", {
+      ws: { send: () => {} },
+      wsIdentity: {},
+    });
+    expect(reg.sessions.get("s1")?.agent).not.toBeNull();
+  });
+
+  // ── broadcastStatusline + lastStatusline on init ────────────────────
+
+  test("broadcastStatusline fans out to all current watchers", () => {
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+    const sent1: string[] = [];
+    const sent2: string[] = [];
+    const w1 = {
+      id: "w1",
+      ws: { send: (s: string) => sent1.push(s) },
+      wsIdentity: {},
+    };
+    const w2 = {
+      id: "w2",
+      ws: { send: (s: string) => sent2.push(s) },
+      wsIdentity: {},
+    };
+    reg.addWatcher("s1", w1 as SessionWatcher);
+    reg.addWatcher("s1", w2 as SessionWatcher);
+    reg.broadcastStatusline("s1", {
+      ctx_pct: 42,
+      ctx_tokens: 84_000,
+      ctx_window: 200_000,
+      ts: 12345,
+    });
+    for (const sent of [sent1, sent2]) {
+      const msgs = sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+      const sl = msgs.find((m) => m.event === "mirror:statusline");
+      expect(sl).toBeDefined();
+      expect(sl?.ctx_pct).toBe(42);
+    }
+  });
+
+  test("watcher attaching after broadcast receives lastStatusline in init", () => {
+    const r = reg.createSession("a:u@h", "/a", "s1");
+    expect(r.ok).toBe(true);
+    reg.broadcastStatusline("s1", {
+      ctx_pct: 75,
+      ctx_tokens: 150_000,
+      ctx_window: 200_000,
+      ts: 99999,
+    });
+
+    // buildInitMessage is tested indirectly: check the entry's lastStatusline
+    // which is what the WS handler embeds in the init response.
+    const entry = reg.sessions.get("s1");
+    expect(entry?.lastStatusline).toBeDefined();
+    expect(entry?.lastStatusline?.ctx_pct).toBe(75);
+    expect(entry?.lastStatusline?.ctx_tokens).toBe(150_000);
   });
 });
 

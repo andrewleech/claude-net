@@ -210,7 +210,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     .use(
       apiPlugin({ registry, teams, router, startedAt, hostRegistry, eventLog }),
     )
-    .use(mirrorPlugin({ mirrorRegistry, eventLog }))
+    .use(mirrorPlugin({ mirrorRegistry }))
     .use(
       uploadsPlugin({
         mirrorRegistry,

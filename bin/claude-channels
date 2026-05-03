@@ -280,26 +280,38 @@ start_mirror_agent_watchdog() {
     port_file="/tmp/claude-net/mirror-agent-${uid}.port"
     sentinel="/tmp/claude-net/mirror-agent-${uid}.stopped"
 
+    # Clear any sentinel left by a prior clean shutdown so the incoming agent
+    # startup removes it freshly and the watchdog loop below starts clean.
+    rm -f "$sentinel" 2>/dev/null || true
+
     start_mirror_agent || return 1
 
     # Detached background subshell: polls every 5 s and respawns if the agent
     # is gone. Exits cleanly when the sentinel file appears (written by the
     # agent on idle-shutdown so we don't restart intentional stops).
+    # Backoff: consecutive restart failures double the poll delay (5s→10→20→30)
+    # to avoid a tight crash-loop filling the log.
     (
+        local backoff=5
         while true; do
-            sleep 5
+            sleep "$backoff"
             # Sentinel: agent stopped intentionally — don't restart.
             [ -f "$sentinel" ] && exit 0
             # Port file present + health check passing: all good.
             local port
             port="$(cat "$port_file" 2>/dev/null || true)"
             if [ -n "$port" ] && curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                backoff=5
                 continue
             fi
             # Agent is gone without a sentinel — crashed. Restart it.
             rm -f "$port_file" 2>/dev/null || true
-            echo "[claude-net/mirror] watchdog: agent down, restarting" >> "$log_file" 2>&1
-            start_mirror_agent >> "$log_file" 2>&1 || true
+            echo "[claude-net/mirror] watchdog: agent down, restarting (backoff=${backoff}s)" >> "$log_file" 2>&1
+            if start_mirror_agent >> "$log_file" 2>&1; then
+                backoff=5
+            else
+                backoff=$(( backoff * 2 > 30 ? 30 : backoff * 2 ))
+            fi
         done
     ) </dev/null >>"$log_file" 2>&1 &
     disown $! 2>/dev/null || true

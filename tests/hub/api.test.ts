@@ -323,4 +323,74 @@ describe("REST API endpoints", () => {
     const body = (await resp.json()) as Msg;
     expect(body.error).toContain("Missing required fields");
   });
+
+  // ── agent-crash / agent-log ───────────────────────────────────────
+
+  test("POST /api/mirror/agent-crash with valid body pushes to eventLog", async () => {
+    const { app: localApp } = createHub();
+    const localPort = localApp.server?.port ?? 0;
+    try {
+      const resp = await fetch(
+        `http://localhost:${localPort}/api/mirror/agent-crash`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            host_id: "test-host",
+            kind: "uncaughtException",
+            message: "boom",
+            stack: "Error: boom\n  at ...",
+            ts: new Date().toISOString(),
+          }),
+        },
+      );
+      expect(resp.status).toBe(200);
+      const body = (await resp.json()) as Msg;
+      expect(body.ok).toBe(true);
+
+      // Verify the event was logged.
+      const evtResp = await fetch(
+        `http://localhost:${localPort}/api/events?event=mirror.agent.crash`,
+      );
+      const evtBody = (await evtResp.json()) as {
+        events: Array<{ event: string; data: Record<string, unknown> }>;
+      };
+      const found = evtBody.events.find(
+        (e) => e.event === "mirror.agent.crash",
+      );
+      expect(found).toBeDefined();
+      expect(found?.data.host_id).toBe("test-host");
+      expect(found?.data.kind).toBe("uncaughtException");
+    } finally {
+      localApp.stop();
+    }
+  });
+
+  test("POST /api/mirror/agent-crash with non-object body returns 400", async () => {
+    const resp = await fetch(`${baseUrl}/api/mirror/agent-crash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify("not-an-object"),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.error).toBeTruthy();
+  });
+
+  test("GET /api/mirror/agent-log with missing file returns error shape", async () => {
+    // The hub process uid will point at a path that almost certainly
+    // does not exist in the test environment.
+    const resp = await fetch(`${baseUrl}/api/mirror/agent-log`);
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as Msg;
+    // Either we get lines (if the log file happens to exist) or an error.
+    // In CI the file won't exist, so we assert the error path.
+    if (body.error) {
+      expect(body.error).toContain("not found");
+      expect(Array.isArray(body.lines)).toBe(true);
+      expect((body.lines as unknown[]).length).toBe(0);
+    } else {
+      expect(Array.isArray(body.lines)).toBe(true);
+    }
+  });
 });

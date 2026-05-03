@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
-import * as fs from "node:fs";
 import type {
   DashboardEvent,
   MirrorActivityState,
@@ -21,7 +20,6 @@ interface SlashCommand {
   source: string;
 }
 import { Elysia } from "elysia";
-import type { EventLog } from "./event-log";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 
@@ -1195,11 +1193,10 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
 
 export interface MirrorPluginDeps {
   mirrorRegistry: MirrorRegistry;
-  eventLog?: EventLog;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry, eventLog } = deps;
+  const { mirrorRegistry } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })

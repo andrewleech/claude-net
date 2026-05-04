@@ -78,7 +78,12 @@ export interface AgentHandle {
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
-const DEFAULT_IDLE_SHUTDOWN_MS = 30 * 60 * 1000;
+// 0 = disabled. The agent is a persistent daemon and should not self-terminate
+// based on a session-count heuristic — a Claude Code process waiting for user
+// input generates no hooks, so sessions.size stays 0 even while the user is
+// actively working. Operators who need automatic cleanup can pass
+// idleShutdownMs explicitly when calling startAgent().
+const DEFAULT_IDLE_SHUTDOWN_MS = 0;
 /**
  * Per-session idle-close window. 0 (default) disables idle closure —
  * sessions live as long as the Claude Code that owns them is running,

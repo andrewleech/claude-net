@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { ServerWebSocket } from "bun";
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
@@ -120,17 +121,26 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   // Embedded at startup so the UI can confirm which build is running.
   // GIT_COMMIT is set by the deploy command before `docker compose restart`
   // so it's available even when git isn't installed in the container.
-  const commitHash =
-    process.env.CLAUDE_NET_VERSION ??
-    (() => {
-      try {
-        return Bun.spawnSync(["git", "rev-parse", "--short", "HEAD"])
-          .stdout.toString()
-          .trim();
-      } catch {
-        return "dev";
-      }
-    })();
+  const commitHash = (() => {
+    // 1. Read .git/HEAD directly — works in dev when .git is mounted, no git binary needed.
+    try {
+      const head = readFileSync(".git/HEAD", "utf8").trim();
+      const hash = head.startsWith("ref: ")
+        ? (() => {
+            const ref = head.slice(5);
+            try {
+              return readFileSync(`.git/${ref}`, "utf8").trim();
+            } catch {
+              const packed = readFileSync(".git/packed-refs", "utf8");
+              return packed.match(new RegExp(`([0-9a-f]+) ${ref}`))?.[1] ?? null;
+            }
+          })()
+        : head;
+      if (hash && hash.length >= 7) return hash.slice(0, 7);
+    } catch { /* .git not mounted */ }
+    // 2. Env var — set at image build time for prod.
+    return process.env.CLAUDE_NET_VERSION ?? "dev";
+  })();
 
   async function getDashboardHtml(): Promise<string> {
     if (!dashboardCache) {

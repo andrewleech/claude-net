@@ -9,6 +9,8 @@ COPY bin/ ./bin/
 # but takes ~10ms on the first hit.
 RUN bun build --target=bun ./src/mirror-agent/agent.ts \
     --outfile ./bin/mirror-agent.bundle.js
+ARG GIT_COMMIT=dev
+ENV CLAUDE_NET_VERSION=$GIT_COMMIT
 ENV CLAUDE_NET_PORT=4815
 EXPOSE 4815
 CMD ["bun", "run", "src/hub/index.ts"]

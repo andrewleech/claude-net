@@ -9,6 +9,7 @@ import type {
 } from "@/shared/types";
 import type { Elysia } from "elysia";
 import type { EventLog } from "./event-log";
+import type { HostRegistry } from "./host-registry";
 import type { MirrorRegistry } from "./mirror";
 import { type Registry, parseName } from "./registry";
 import type { Router } from "./router";
@@ -115,6 +116,7 @@ export function wsPlugin(
    * setup plugin uses so behavior is consistent across routes.
    */
   port: number = Number(process.env.CLAUDE_NET_PORT) || 4815,
+  hostRegistry?: HostRegistry,
 ): Elysia {
   const emit = (event: string, data: Record<string, unknown>): void => {
     eventLog.push(event, data);
@@ -171,11 +173,17 @@ export function wsPlugin(
               ? data.cc_pid
               : null;
 
+          const cwd =
+            typeof data.cwd === "string" && data.cwd.length > 0
+              ? data.cwd
+              : null;
+
           // Use ws itself as the sendable reference — it persists and can send.
           // Use ws.raw for identity comparison in registry.
           const result = registry.register(data.name, ws, ws.raw, {
             channelCapable,
             ccPid,
+            cwd,
           });
           if (!result.ok) {
             sendResponse(ws, requestId, false, undefined, result.error);
@@ -251,6 +259,27 @@ export function wsPlugin(
               ccPid,
               result.entry.fullName,
             );
+            // If no mirror session exists yet for this (host, ccPid),
+            // probe the mirror-agent daemon to create one. Covers the
+            // common case where the mirror-agent restarted and lost its
+            // in-memory sessions while Claude Code was still running.
+            if (
+              cwd !== null &&
+              !mirrorRegistry.hasSessionForHostPid(result.entry.host, ccPid)
+            ) {
+              const hostEntry = hostRegistry?.get(
+                `${result.entry.user}@${result.entry.host}`,
+              );
+              if (hostEntry) {
+                hostEntry.send(
+                  JSON.stringify({
+                    action: "host_session_probe",
+                    cc_pid: ccPid,
+                    cwd,
+                  }),
+                );
+              }
+            }
           }
 
           dashboardBroadcastFn({

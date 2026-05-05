@@ -1,5 +1,7 @@
 import type { Elysia } from "elysia";
 import type { HostRegistry } from "./host-registry";
+import type { MirrorRegistry } from "./mirror";
+import type { Registry } from "./registry";
 
 interface HostWs {
   send(data: string | object): void;
@@ -32,7 +34,12 @@ function safeJsonParse(s: string): unknown {
  * Phase A: handle host_register + close. Phase B adds host_ls /
  * host_mkdir / host_launch response handling.
  */
-export function wsHostPlugin(app: Elysia, hostRegistry: HostRegistry): Elysia {
+export function wsHostPlugin(
+  app: Elysia,
+  hostRegistry: HostRegistry,
+  registry?: Registry,
+  mirrorRegistry?: MirrorRegistry,
+): Elysia {
   return app.ws("/ws/host", {
     open(ws: HostWs) {
       // Wait for the daemon to send host_register before adding to the
@@ -91,6 +98,32 @@ export function wsHostPlugin(app: Elysia, hostRegistry: HostRegistry): Elysia {
         ws.send(
           JSON.stringify({ event: "host_registered", host_id: entry.hostId }),
         );
+
+        // Probe for any plugins already registered on this host that
+        // don't have a mirror session. Handles the mirror-agent restart
+        // case: Claude Code is still running (plugin is connected) but the
+        // daemon has no session state.
+        if (registry && mirrorRegistry) {
+          for (const agent of registry.agents.values()) {
+            if (
+              agent.ccPid === null ||
+              agent.cwd === null ||
+              `${agent.user}@${agent.host}` !== entry.hostId
+            ) {
+              continue;
+            }
+            if (!mirrorRegistry.hasSessionForHostPid(agent.host, agent.ccPid)) {
+              entry.send(
+                JSON.stringify({
+                  action: "host_session_probe",
+                  cc_pid: agent.ccPid,
+                  cwd: agent.cwd,
+                }),
+              );
+            }
+          }
+        }
+
         return;
       }
 

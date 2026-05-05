@@ -543,8 +543,10 @@ export class Plugin {
           plugin_version: PLUGIN_VERSION,
           // Plugin is `exec`-replaced from bash so process.ppid IS
           // Claude Code itself. Hub joins on (host, cc_pid) for
-          // rename propagation that survives reconnects.
+          // rename propagation that survives reconnects. cwd lets the
+          // hub probe the mirror-agent to create a session when none exists.
           cc_pid: process.ppid,
+          cwd: process.cwd(),
         };
       case "send_message":
         return {
@@ -865,6 +867,7 @@ export class Plugin {
           channel_capable: this.channelCapable,
           plugin_version: PLUGIN_VERSION,
           cc_pid: process.ppid,
+          cwd: process.cwd(),
         })) as { upgrade_hint?: string } | undefined;
         // The hub returns `upgrade_hint` in the register response
         // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.

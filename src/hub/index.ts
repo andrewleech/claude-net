@@ -132,12 +132,16 @@ export function createHub(options: CreateHubOptions = {}): Hub {
               return readFileSync(`.git/${ref}`, "utf8").trim();
             } catch {
               const packed = readFileSync(".git/packed-refs", "utf8");
-              return packed.match(new RegExp(`([0-9a-f]+) ${ref}`))?.[1] ?? null;
+              return (
+                packed.match(new RegExp(`([0-9a-f]+) ${ref}`))?.[1] ?? null
+              );
             }
           })()
         : head;
       if (hash && hash.length >= 7) return hash.slice(0, 7);
-    } catch { /* .git not mounted */ }
+    } catch {
+      /* .git not mounted */
+    }
     // 2. Env var — set at image build time for prod.
     return process.env.CLAUDE_NET_VERSION ?? "dev";
   })();
@@ -233,10 +237,19 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
-  app = wsPlugin(app, registry, teams, router, eventLog, mirrorRegistry, port);
+  app = wsPlugin(
+    app,
+    registry,
+    teams,
+    router,
+    eventLog,
+    mirrorRegistry,
+    port,
+    hostRegistry,
+  );
   app = wsDashboardPlugin(app, registry, teams, hostRegistry);
   app = wsMirrorPlugin(app, mirrorRegistry);
-  app = wsHostPlugin(app, hostRegistry);
+  app = wsHostPlugin(app, hostRegistry, registry, mirrorRegistry);
 
   // Periodic native WS ping + stale-WS eviction. Reuses the existing
   // close handler in ws-plugin to unregister and broadcast

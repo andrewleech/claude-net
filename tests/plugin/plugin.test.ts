@@ -142,6 +142,7 @@ describe("plugin helpers", () => {
         channel_capable: expect.any(Boolean),
         plugin_version: expect.any(String),
         cc_pid: process.ppid,
+        cwd: expect.any(String),
       });
     });
 

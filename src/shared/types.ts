@@ -39,6 +39,14 @@ export interface RegisterFrame {
    * across hub restarts. Optional — pre-rollout plugins won't send it.
    */
   cc_pid?: number;
+  /**
+   * Working directory of the Claude Code process (`process.cwd()` in the
+   * plugin). Paired with `cc_pid` to let the hub probe the mirror-agent
+   * daemon to create a session when none exists — e.g. after a
+   * mirror-agent restart that lost its in-memory session state while
+   * Claude Code was still running.
+   */
+  cwd?: string;
   requestId?: string;
 }
 
@@ -543,6 +551,20 @@ export interface HostLaunchDoneFrame {
   ok?: boolean;
   tmux_session?: string;
   error?: string;
+}
+
+/**
+ * Hub → daemon: a Claude Code process identified by (cc_pid, cwd) has
+ * a registered plugin but no mirror session on the hub. The daemon should
+ * create a session for it so the dashboard shows the live session without
+ * waiting for the next hook event.
+ *
+ * Fire-and-forget from the hub; no response frame is expected.
+ */
+export interface HostSessionProbeFrame {
+  action: "host_session_probe";
+  cc_pid: number;
+  cwd: string;
 }
 
 export interface HostConnectedEvent {

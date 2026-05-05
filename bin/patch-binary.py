@@ -53,12 +53,13 @@ PATCHES = [
     },
     {
         "name": "Dev channels dialog auto-accept",
-        "pattern": rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)[a-zA-Z0-9_$]+\(\[",
+        # Gate condition before DevChannelsDialog. isChannelsEnabled var changes per build.
+        # Replacing !VAR() with !0 (always true) short-circuits the condition, skipping dialog.
+        "pattern": rb'\]\);if\(![a-zA-Z$_][a-zA-Z0-9$_]*\(\)\|\|Qq\(\)!=="firstParty"',
         "type": "regex_replace",
-        "find": b"||!",
-        "replace": b"|| ",
-        "diag_anchor": b"accessToken)Ai(\x5b",  # Ai may change; anchor is just for diag search
-        "diag_fallback_anchor": b".accessToken)",
+        "find_regex": rb"!\w+\(\)",
+        "replace_fn": "always_true",
+        "diag_anchor": b"DevChannelsDialog",
     },
     {
         "name": "Channel notification suppression",
@@ -145,6 +146,11 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str], int, int]:
                             # Replace matched sub-expression with !1 + spaces (same length)
                             def _sub(sub_m: re.Match[bytes]) -> bytes:
                                 return b"!1" + b" " * (len(sub_m.group(0)) - 2)
+                            repl = re.sub(patch["find_regex"], _sub, orig, count=1)
+                        elif fn == "always_true":
+                            # Replace matched sub-expression with !0 + spaces (same length)
+                            def _sub(sub_m: re.Match[bytes]) -> bytes:
+                                return b"!0" + b" " * (len(sub_m.group(0)) - 2)
                             repl = re.sub(patch["find_regex"], _sub, orig, count=1)
                         else:
                             repl = orig  # unknown fn, no change

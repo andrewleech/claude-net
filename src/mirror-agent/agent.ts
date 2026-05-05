@@ -565,16 +565,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       onMessage: (raw) => handleHubMessage(session, raw),
       onClose: (code, reason) => {
         log(`[${sid}] WS closed (${code}) ${reason}`);
-        // Hub lost our session (restart, eviction, etc.). Re-register
-        // the same sid so the hub recreates the entry and we can
-        // reconnect; auto-reconnecting blindly would loop forever
-        // against a 404.
-        if (
-          code === 1008 &&
-          reason.includes("not found") &&
-          !session.closed &&
-          !session.recovering
-        ) {
+        // Any unexpected close (hub restart, eviction, network drop) should
+        // trigger recovery: re-register + reconnect. recoverSession's POST
+        // is idempotent so it's safe even when the session still exists on
+        // the hub. Only skip when the session was intentionally closed or
+        // recovery is already running.
+        if (!session.closed && !session.recovering) {
           void recoverSession(session).catch((err: unknown) => {
             log(`[${sid}] recovery failed: ${String(err)}`);
           });

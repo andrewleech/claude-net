@@ -55,7 +55,7 @@ PATCHES = [
         "name": "Dev channels dialog auto-accept",
         # Gate condition before DevChannelsDialog. isChannelsEnabled var changes per build.
         # Replacing !VAR() with !0 (always true) short-circuits the condition, skipping dialog.
-        "pattern": rb'\]\);if\(![a-zA-Z$_][a-zA-Z0-9$_]*\(\)\|\|Qq\(\)!=="firstParty"',
+        "pattern": rb'\]\);if\(![a-zA-Z$_][a-zA-Z0-9$_]*\(\)\|\|[a-zA-Z$_][a-zA-Z0-9$_]*\(\)!=="firstParty"',
         "type": "regex_replace",
         "find_regex": rb"!\w+\(\)",
         "replace_fn": "always_true",

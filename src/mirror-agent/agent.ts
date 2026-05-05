@@ -189,8 +189,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   );
 
   // Host control channel — advertises this host to the hub's sidebar and
-  // (in Phase B) accepts ls/mkdir/launch RPCs. Phase A is fire-and-forget:
-  // the channel re-connects on its own; failures don't block the daemon.
+  // accepts ls/mkdir/launch RPCs and session probes from the hub.
   const hostChannel: HostChannelHandle = startHostChannel({
     hubUrl,
     getRecentCwds: () =>
@@ -198,6 +197,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .filter((s) => s.cwd)
         .sort((a, b) => b.lastEventAt - a.lastEventAt)
         .map((s) => s.cwd),
+    onSessionProbe: (ccPid, cwd) => {
+      // Skip if an active session for this ccPid already exists.
+      for (const s of sessions.values()) {
+        if (!s.closed && s.ccPid === ccPid) return;
+      }
+      const sid = crypto.randomUUID();
+      log(`[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}`);
+      openSession(sid, cwd, undefined, undefined, ccPid).catch(
+        (err: unknown) => {
+          log(`[probe] session create failed: ${String(err)}`);
+        },
+      );
+    },
   });
 
   // Idle-shutdown watchdog.

@@ -16,6 +16,7 @@ import type {
   HostMkdirDoneFrame,
   HostMkdirRequest,
   HostRegisterFrame,
+  HostSessionProbeFrame,
 } from "@/shared/types";
 import { HubClient } from "./hub-client";
 
@@ -23,6 +24,12 @@ export interface HostChannelOptions {
   hubUrl: string;
   /** Provides the last-N cwds from active/recent sessions for the popover. */
   getRecentCwds: () => string[];
+  /**
+   * Called when the hub sends a host_session_probe. The daemon should
+   * create a mirror session for the given (ccPid, cwd) if one doesn't
+   * already exist. Fire-and-forget — errors are logged inside the daemon.
+   */
+  onSessionProbe?: (ccPid: number, cwd: string) => void;
 }
 
 /**
@@ -133,6 +140,15 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
           allowDangerousSkip,
         );
         client.send(JSON.stringify(response));
+      } else if (frame.action === "host_session_probe") {
+        const probe = frame as HostSessionProbeFrame;
+        if (
+          typeof probe.cc_pid === "number" &&
+          typeof probe.cwd === "string" &&
+          opts.onSessionProbe
+        ) {
+          opts.onSessionProbe(probe.cc_pid, probe.cwd);
+        }
       }
     },
   });

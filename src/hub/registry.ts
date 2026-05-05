@@ -20,6 +20,12 @@ export interface AgentEntry {
    * in `findByHostPid` to drive the mirror-session rename join.
    */
   ccPid: number | null;
+  /**
+   * Working directory of the Claude Code process at register time.
+   * null if the plugin didn't send `cwd` (pre-rollout client). Used
+   * to probe the mirror-agent daemon when no mirror session exists.
+   */
+  cwd: string | null;
 }
 
 export interface DisconnectedEntry {
@@ -66,7 +72,11 @@ export class Registry {
     fullName: string,
     ws: { send(data: string): void },
     wsIdentity?: object,
-    options: { channelCapable?: boolean; ccPid?: number | null } = {},
+    options: {
+      channelCapable?: boolean;
+      ccPid?: number | null;
+      cwd?: string | null;
+    } = {},
   ):
     | {
         ok: true;
@@ -78,6 +88,7 @@ export class Registry {
     const identity = wsIdentity ?? ws;
     const channelCapable = options.channelCapable ?? false;
     const ccPid = options.ccPid ?? null;
+    const cwd = options.cwd ?? null;
 
     // Detect rename: same wsIdentity, different name. At most one match
     // is possible because register() maintains the invariant.
@@ -109,10 +120,11 @@ export class Registry {
       // liveness is a property of the transport, not of a re-register.
       existing.ws = ws;
       existing.channelCapable = channelCapable;
-      // Refresh ccPid so a late-arriving identity upgrade (plugin
+      // Refresh ccPid/cwd so a late-arriving identity upgrade (plugin
       // upgraded mid-session, fresh ppid info) flows into findByHostPid
       // without needing a reconnect.
       if (ccPid !== null) existing.ccPid = ccPid;
+      if (cwd !== null) existing.cwd = cwd;
       return { ok: true, entry: existing, restored: false };
     }
 
@@ -144,6 +156,7 @@ export class Registry {
       lastPongAt: Date.now(),
       channelCapable,
       ccPid,
+      cwd,
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };

@@ -270,6 +270,19 @@ export class MirrorRegistry {
   }
 
   /**
+   * Return true if there is at least one open session for (host, ccPid).
+   * Used to decide whether to send a host_session_probe.
+   */
+  hasSessionForHostPid(host: string, ccPid: number): boolean {
+    if (!host || !Number.isFinite(ccPid)) return false;
+    for (const entry of this.sessions.values()) {
+      if (!entry.closedAt && entry.host === host && entry.ccPid === ccPid)
+        return true;
+    }
+    return false;
+  }
+
+  /**
    * Apply `newName` to every entry in `sessions`, skipping entries
    * already on that name, and broadcast `mirror:owner_renamed` once
    * per distinct prior owner. Shared between `attachAgent` (the

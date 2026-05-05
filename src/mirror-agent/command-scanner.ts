@@ -8,12 +8,25 @@
 // - Claude Code built-ins (hard-coded list below).
 // - ~/.claude/commands/**/*.md     — user commands (recursive).
 // - <cwd>/.claude/commands/**/*.md — project-local commands (recursive).
-// - ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/commands/**/*.md
-// - ~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/commands/**/*.md
+// - Plugins, two on-disk layouts:
+//     ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/{commands,skills}/
+//     ~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/{commands,skills}/
+//   For each plugin we scan BOTH `commands/` and `skills/` (the v2+ plugin
+//   format puts skills at `skills/<skill-name>/SKILL.md`, dispatched as
+//   /<plugin>:<skill-name>).
 //
 // Command name = filename stem (e.g. `00-brainstorm.md` → `00-brainstorm`),
 // which is what the user actually types. YAML frontmatter contributes the
 // description only.
+//
+// Plugin-cache subtleties:
+//   - Multiple versions can cohabit (1.1.0 + 2.1.0); only the highest is
+//     loaded by Claude Code, so we scan only that one. Otherwise stale
+//     command names from older versions surface as dead suggestions.
+//   - Plugins commonly nest commands under a folder matching the plugin
+//     name (`commands/<plugin>/<file>.md`). Claude Code dispatches these
+//     as `<plugin>:<file>`, NOT `<plugin>:<plugin>:<file>`. We flatten
+//     that duplicate level explicitly.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -78,9 +91,7 @@ export function scanCommands(cwd: string | undefined): SlashCommand[] {
     scanCommandsDir(path.join(cwd, ".claude", "commands"), "project", out);
   }
 
-  // Plugin commands — two tree layouts on disk:
-  //   ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/commands/**/*.md
-  //   ~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/commands/**/*.md
+  // Plugin commands + skills — two tree layouts on disk.
   const cacheRoot = path.join(home, ".claude", "plugins", "cache");
   scanCacheRoot(cacheRoot, out);
   const marketplacesRoot = path.join(
@@ -121,7 +132,7 @@ function scanCommandsDir(
       if (cmd) out.push(cmd);
     } else if (entry.isDirectory()) {
       // Nested subdirs extend the namespace, e.g.
-      //   commands/idea-plan-execute/00-brainstorm.md → `<plugin>:idea-plan-execute:00-brainstorm`
+      //   commands/foo/00-brainstorm.md → `<prefix>:foo:00-brainstorm`
       const nextPrefix = namePrefix
         ? `${namePrefix}:${entry.name}`
         : entry.name;
@@ -131,34 +142,112 @@ function scanCommandsDir(
 }
 
 function scanCacheRoot(cacheRoot: string, out: SlashCommand[]): void {
-  // Layout: cache/<marketplace>/<plugin>/<version>/commands/
+  // Layout: cache/<marketplace>/<plugin>/<version>/{commands,skills}/
   forEachSubdir(cacheRoot, (_mk, mkDir) => {
     forEachSubdir(mkDir, (pluginName, pluginDir) => {
-      forEachSubdir(pluginDir, (_version, versionDir) => {
-        scanCommandsDir(
-          path.join(versionDir, "commands"),
-          `plugin:${pluginName}`,
-          out,
-          pluginName,
-        );
-      });
+      const versions: string[] = [];
+      forEachSubdir(pluginDir, (v) => versions.push(v));
+      const latest = pickLatestVersion(versions);
+      if (!latest) return;
+      const versionDir = path.join(pluginDir, latest);
+      scanPluginCommands(path.join(versionDir, "commands"), pluginName, out);
+      scanPluginSkills(path.join(versionDir, "skills"), pluginName, out);
     });
   });
 }
 
 function scanMarketplacesRoot(root: string, out: SlashCommand[]): void {
-  // Layout: marketplaces/<marketplace>/plugins/<plugin>/commands/
+  // Layout: marketplaces/<marketplace>/plugins/<plugin>/{commands,skills}/
   forEachSubdir(root, (_mk, mkDir) => {
     const pluginsDir = path.join(mkDir, "plugins");
     forEachSubdir(pluginsDir, (pluginName, pluginDir) => {
-      scanCommandsDir(
-        path.join(pluginDir, "commands"),
-        `plugin:${pluginName}`,
-        out,
-        pluginName,
-      );
+      scanPluginCommands(path.join(pluginDir, "commands"), pluginName, out);
+      scanPluginSkills(path.join(pluginDir, "skills"), pluginName, out);
     });
   });
+}
+
+/** Walk a plugin's `commands/` tree, flattening the
+ *  `commands/<plugin-name>/` idiom. Top-level files are dispatched as
+ *  `<plugin>:<file>`; non-matching subdirs as `<plugin>:<subdir>:<file>`. */
+export function scanPluginCommands(
+  commandsDir: string,
+  pluginName: string,
+  out: SlashCommand[],
+): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(commandsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(commandsDir, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      const cmd = parseCommandFile(full, `plugin:${pluginName}`, pluginName);
+      if (cmd) out.push(cmd);
+    } else if (entry.isDirectory()) {
+      if (entry.name === pluginName) {
+        // Plugins commonly nest commands under a folder named after the
+        // plugin; Claude Code dispatches these as <plugin>:<file>, not
+        // <plugin>:<plugin>:<file>. Flatten the duplicate.
+        scanCommandsDir(full, `plugin:${pluginName}`, out, pluginName);
+      } else {
+        scanCommandsDir(
+          full,
+          `plugin:${pluginName}`,
+          out,
+          `${pluginName}:${entry.name}`,
+        );
+      }
+    }
+  }
+}
+
+/** Walk a plugin's `skills/` tree. Skills live at
+ *  `skills/<skill-name>/SKILL.md` and are dispatched as
+ *  `<plugin>:<skill-name>` — no further nesting. */
+export function scanPluginSkills(
+  skillsDir: string,
+  pluginName: string,
+  out: SlashCommand[],
+): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillName = entry.name;
+    const skillFile = path.join(skillsDir, skillName, "SKILL.md");
+    let description: string | undefined;
+    try {
+      const fm = parseFrontmatter(fs.readFileSync(skillFile, "utf-8"));
+      if (fm.description) description = fm.description.trim();
+    } catch {
+      // SKILL.md missing or unreadable — still emit the directory name
+      // so the autocomplete surfaces a discoverable skill.
+    }
+    out.push({
+      name: `${pluginName}:${skillName}`,
+      ...(description ? { description } : {}),
+      source: `plugin:${pluginName}`,
+    });
+  }
+}
+
+/** Pick the highest semver-like version from a list of cache version
+ *  directory names. Uses `localeCompare` with `numeric: true` so
+ *  `2.10.0` sorts after `2.9.0` (lexical sort gets that wrong). Returns
+ *  null on an empty list. */
+export function pickLatestVersion(versions: string[]): string | null {
+  if (versions.length === 0) return null;
+  const sorted = [...versions].sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+  );
+  return sorted[sorted.length - 1] ?? null;
 }
 
 function forEachSubdir(

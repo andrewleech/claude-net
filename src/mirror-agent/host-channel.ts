@@ -5,7 +5,6 @@
 // dashboard uses to open new claude-channels sessions remotely.
 
 import { spawn } from "node:child_process";
-import crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -314,10 +313,11 @@ async function handleHostLaunch(
       };
     }
   }
-  const tmuxSession = `claude-channels-${crypto.randomUUID().slice(0, 8)}`;
+  const tmuxSession = path.basename(v.absolute);
   const args = [
     "new-session",
     "-d",
+    "-A",
     "-s",
     tmuxSession,
     "-c",

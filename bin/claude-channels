@@ -346,12 +346,12 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
     && [ "$(mirror_injection_mode)" = "tmux" ] \
     && command -v tmux >/dev/null 2>&1; then
     export CLAUDE_NET_IN_TMUX_WRAP=1
-    tmux_session_name="claude-channels-$$"
+    tmux_session_name="$(basename "$PWD")"
     echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
-    # new-session replaces the current shell with tmux. When tmux exits
-    # (claude exits), the whole script exits too. This gives the user a
-    # seamless view — they never see the tmux chrome unless they look.
-    exec tmux new-session -s "$tmux_session_name" \
+    # new-session -A attaches to an existing same-name session or creates a new
+    # one, mirroring the tmxc alias behaviour. Replaces the current shell with
+    # tmux so when claude exits the whole script exits too.
+    exec tmux new-session -A -s "$tmux_session_name" \
         -e CLAUDE_NET_IN_TMUX_WRAP=1 \
         -- "$SELF" "$@"
 fi

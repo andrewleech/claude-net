@@ -2344,6 +2344,10 @@
           <input type="checkbox" id="launch-skip" checked>
           <span>Skip permission prompts</span>
         </label>
+        <label class="cn-launch-skip">
+          <input type="checkbox" id="launch-continue">
+          <span>Continue last session (-c)</span>
+        </label>
         <button type="button" class="cn-launch-submit" id="launch-submit" disabled>Launch</button>
       </div>
       <div class="cn-launch-error" id="launch-error"></div>
@@ -3078,6 +3082,7 @@
   var launchSubmitBtn = document.getElementById('launch-submit');
   var launchSkipChk = document.getElementById('launch-skip');
   var launchSkipWrap = document.getElementById('launch-skip-wrap');
+  var launchContinueChk = document.getElementById('launch-continue');
   var launchTitleEl = document.getElementById('launch-title');
   var launchErrorEl = document.getElementById('launch-error');
   var launchState = {
@@ -3098,8 +3103,8 @@
     launchState.lsCache = {};
     launchTitleEl.textContent = 'Launch in ' + host.user + '@' + host.hostname;
     launchErrorEl.textContent = '';
-    // Initial input: the most-recent cwd, if any, else ~/projects/
-    var initial = (host.recent_cwds && host.recent_cwds[0]) || '~/projects/';
+    // Initial input: the most-recent cwd, if any, else ~/mpy
+    var initial = (host.recent_cwds && host.recent_cwds[0]) || '~/mpy';
     // Expand ~ using the host's home for a full path the user can trim.
     if (initial.startsWith('~/')) initial = host.home + initial.slice(1);
     launchInput.value = initial;
@@ -3244,6 +3249,7 @@
         cwd: cwd,
         create_if_missing: true,
         skip_permissions: launchSkipChk.checked && host.allow_dangerous_skip,
+        continue: launchContinueChk.checked,
       }),
     })
       .then(function(r) {

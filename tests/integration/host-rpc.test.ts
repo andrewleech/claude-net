@@ -248,6 +248,39 @@ describe("host RPC e2e", () => {
     daemon.close();
   });
 
+  test("POST /api/host/:id/launch relays continue_session field", async () => {
+    let received: Msg | null = null;
+    const daemon = await connectMockDaemon(hub.port, {
+      hostId: "bob@b",
+      onRpc: (frame) => {
+        received = frame;
+        return {
+          action: "host_launch_done",
+          request_id: frame.request_id,
+          ok: true,
+          tmux_session: "claude-channels-abc123",
+        };
+      },
+    });
+    await waitForHost(hub.hostRegistry, "bob@b");
+
+    const resp = await fetch(
+      `http://localhost:${hub.port}/api/host/bob@b/launch`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          cwd: "/home/bob/projects/demo",
+          continue_session: true,
+        }),
+      },
+    );
+    expect(resp.status).toBe(200);
+    expect(received?.continue_session).toBe(true);
+
+    daemon.close();
+  });
+
   test("RPC to an unknown host returns 404", async () => {
     const resp = await fetch(
       `http://localhost:${hub.port}/api/host/ghost@nowhere/ls?path=/tmp`,

@@ -290,6 +290,16 @@ async function handleHostMkdir(
   }
 }
 
+function tmuxCapture(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    const proc = spawn("tmux", args, { stdio: ["ignore", "pipe", "ignore"] });
+    proc.stdout?.on("data", (d: Buffer) => chunks.push(d));
+    proc.on("close", () => resolve(Buffer.concat(chunks).toString().trim()));
+    proc.on("error", () => resolve(""));
+  });
+}
+
 async function handleHostLaunch(
   req: HostLaunchRequest,
   realRoots: string[],
@@ -330,6 +340,38 @@ async function handleHostLaunch(
     }
   }
   const tmuxSession = path.basename(v.absolute);
+
+  // Check if the session already exists with an idle shell (claude-channels
+  // exited). If so, cd to the requested cwd and re-launch rather than
+  // silently no-oping via -A.
+  const IDLE_SHELLS = new Set([
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+  ]);
+  const paneCmd = await tmuxCapture([
+    "display-message",
+    "-t",
+    tmuxSession,
+    "-p",
+    "#{pane_current_command}",
+  ]);
+  if (IDLE_SHELLS.has(paneCmd)) {
+    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}`;
+    await tmuxCapture(["send-keys", "-t", tmuxSession, relaunch, "Enter"]);
+    return {
+      action: "host_launch_done",
+      request_id: req.request_id,
+      ok: true,
+      tmux_session: tmuxSession,
+    };
+  }
+
   const args = [
     "new-session",
     "-d",

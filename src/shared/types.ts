@@ -529,6 +529,7 @@ export interface HostLaunchRequest {
   cwd: string;
   create_if_missing?: boolean;
   skip_permissions?: boolean;
+  continue_session?: boolean;
 }
 
 export interface HostLsDoneFrame {

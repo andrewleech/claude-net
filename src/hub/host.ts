@@ -4,7 +4,7 @@
 // Routes:
 //   GET  /api/host/:id/ls?path=<abs>
 //   POST /api/host/:id/mkdir { path }
-//   POST /api/host/:id/launch { cwd, create_if_missing?, skip_permissions? }
+//   POST /api/host/:id/launch { cwd, create_if_missing?, skip_permissions?, continue_session? }
 
 import { Elysia } from "elysia";
 import type { HostRegistry } from "./host-registry";
@@ -116,6 +116,7 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
         cwd?: string;
         create_if_missing?: boolean;
         skip_permissions?: boolean;
+        continue_session?: boolean;
       };
       if (!payload.cwd) {
         set.status = 400;
@@ -151,6 +152,7 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
             cwd: payload.cwd,
             create_if_missing: payload.create_if_missing === true,
             skip_permissions: payload.skip_permissions === true,
+            continue_session: payload.continue_session === true,
           },
           LAUNCH_TIMEOUT_MS,
         );

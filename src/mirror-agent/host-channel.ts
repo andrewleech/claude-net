@@ -321,6 +321,7 @@ async function handleHostLaunch(
     };
   }
   // If cwd is missing, either create it (when asked) or reject.
+  let dirWasCreated = false;
   if (!fs.existsSync(v.absolute)) {
     if (!req.create_if_missing) {
       return {
@@ -331,6 +332,7 @@ async function handleHostLaunch(
     }
     try {
       await fs.promises.mkdir(v.absolute, { recursive: true });
+      dirWasCreated = true;
     } catch (err) {
       return {
         action: "host_launch_done",
@@ -362,7 +364,7 @@ async function handleHostLaunch(
     "#{pane_current_command}",
   ]);
   if (IDLE_SHELLS.has(paneCmd)) {
-    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}`;
+    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${req.continue_session && !dirWasCreated ? " --continue" : ""}`;
     await tmuxCapture(["send-keys", "-t", tmuxSession, relaunch, "Enter"]);
     return {
       action: "host_launch_done",
@@ -384,6 +386,7 @@ async function handleHostLaunch(
     "claude-channels",
   ];
   if (req.skip_permissions) args.push("--dangerously-skip-permissions");
+  if (req.continue_session && !dirWasCreated) args.push("--continue");
   try {
     const proc = spawn("tmux", args, {
       detached: true,

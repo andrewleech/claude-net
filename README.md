@@ -247,6 +247,7 @@ Full spec: [`docs/CLAUDE_NET_SPEC.md`](docs/CLAUDE_NET_SPEC.md).
 |---|---|---|
 | `CLAUDE_NET_HOST` | _(from request Host header)_ | External hostname/IP used when generating the setup script |
 | `CLAUDE_NET_PORT` | `4815` | Port the hub listens on |
+| `CLAUDE_NET_LAUNCH_DEFAULT_PATH` | _(host home dir)_ | Default path pre-filled in the launch modal when a host has no recent cwds. Precedence: recent cwds → this var → host home dir. Hub restart required after change. |
 
 ## Development
 

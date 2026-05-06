@@ -147,9 +147,20 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   })();
 
   async function getDashboardHtml(): Promise<string> {
+    // Read once per process start; restart required to pick up env-var changes.
     if (!dashboardCache) {
       const file = Bun.file(dashboardPath);
-      dashboardCache = (await file.text()).replace("__COMMIT__", commitHash);
+      const launchDefaultPath =
+        process.env.CLAUDE_NET_LAUNCH_DEFAULT_PATH ?? "";
+      // Replace the whole quoted literal so the result is a valid JS expression
+      // regardless of what the env-var contains (JSON handles quotes, backslashes,
+      // </script>, and the String.replace $& backreference issue).
+      dashboardCache = (await file.text())
+        .replace("__COMMIT__", commitHash)
+        .replace(
+          "'__LAUNCH_DEFAULT_PATH__'",
+          JSON.stringify(launchDefaultPath || ""),
+        );
     }
     return dashboardCache;
   }

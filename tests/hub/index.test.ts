@@ -130,4 +130,14 @@ describe("hub server", () => {
     expect(bytes[2]).toBe(0x4e);
     expect(bytes[3]).toBe(0x47);
   });
+
+  test("GET / substitutes __LAUNCH_DEFAULT_PATH__ placeholder", async () => {
+    const port = app.server?.port;
+    const html = await (await fetch(`http://localhost:${port}/`)).text();
+    // Raw placeholder token must never reach the client regardless of env state.
+    expect(html).not.toContain("__LAUNCH_DEFAULT_PATH__");
+    // The surrounding single-quoted literal must also be gone — the replacement
+    // target includes the quotes so the result is a bare JS expression.
+    expect(html).not.toContain("'__LAUNCH_DEFAULT_PATH__'");
+  });
 });

@@ -2000,7 +2000,7 @@
     gap: 12px;
     flex-wrap: wrap;
   }
-  .cn-launch-skip {
+  .cn-launch-chk {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -2340,13 +2340,13 @@
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       <div class="cn-launch-suggestions" id="launch-suggestions"></div>
       <div class="cn-launch-controls">
-        <label class="cn-launch-skip" id="launch-skip-wrap">
+        <label class="cn-launch-chk" id="launch-skip-wrap">
           <input type="checkbox" id="launch-skip" checked>
           <span>Skip permission prompts</span>
         </label>
-        <label class="cn-launch-skip">
+        <label class="cn-launch-chk">
           <input type="checkbox" id="launch-continue">
-          <span>Continue last session (-c)</span>
+          <span>Continue last session</span>
         </label>
         <button type="button" class="cn-launch-submit" id="launch-submit" disabled>Launch</button>
       </div>
@@ -3103,9 +3103,9 @@
     launchState.lsCache = {};
     launchTitleEl.textContent = 'Launch in ' + host.user + '@' + host.hostname;
     launchErrorEl.textContent = '';
-    // Initial input: the most-recent cwd, if any, else ~/mpy
-    var initial = (host.recent_cwds && host.recent_cwds[0]) || '~/mpy';
-    // Expand ~ using the host's home for a full path the user can trim.
+    // Initial input: most-recent cwd → env-var override → host home dir
+    var initial = (host.recent_cwds && host.recent_cwds[0]) || '__LAUNCH_DEFAULT_PATH__' || host.home;
+    // Expand ~/ in the env-var override (recent_cwds and host.home are absolute).
     if (initial.startsWith('~/')) initial = host.home + initial.slice(1);
     launchInput.value = initial;
     if (host.allow_dangerous_skip) {
@@ -3115,6 +3115,7 @@
       launchSkipWrap.style.display = 'none';
       launchSkipChk.checked = false;
     }
+    launchContinueChk.checked = false;
     launchSubmitBtn.disabled = false;
     launchState.touchMode = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
     launchModal.classList.add('is-open');
@@ -3249,7 +3250,7 @@
         cwd: cwd,
         create_if_missing: true,
         skip_permissions: launchSkipChk.checked && host.allow_dangerous_skip,
-        continue: launchContinueChk.checked,
+        continue_session: launchContinueChk.checked,
       }),
     })
       .then(function(r) {

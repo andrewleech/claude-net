@@ -2389,6 +2389,11 @@
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
+  var renderAgentsTimer = null;
+  function renderAgentsDebounced() {
+    if (renderAgentsTimer) return;
+    renderAgentsTimer = setTimeout(function() { renderAgentsTimer = null; renderAgents(); }, 150);
+  }
 
   // --- DOM refs ---
   const agentListEl = document.getElementById('agent-list');
@@ -2532,13 +2537,13 @@
       case 'mirror:activity': {
         // Lightweight ping fired by the hub for every recorded mirror event
         // (not just ones the dashboard is watching live). Bump last_event_at
-        // + re-render so the most-active session floats to the top of the
-        // sidebar regardless of where the user is interacting from.
+        // + debounce re-render so the most-active session floats to the top
+        // of the sidebar without thrashing the DOM on every frame.
         const entry = mirrorBySid.get(event.sid);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
           if (event.activity_state) entry.activity_state = event.activity_state;
-          renderAgents();
+          renderAgentsDebounced();
         }
         break;
       }

@@ -143,6 +143,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
   const sessions = new Map<string, SessionState>();
+  // Tracks ccPids for which openSession is in-flight, preventing a second
+  // concurrent probe from racing past the sessions-map guard before the first
+  // fetch completes and sessions.set() runs.
+  const pendingProbes = new Set<number>();
   const injector = new TmuxInjector();
   const redactor = new Redactor({
     configPaths: defaultConfigPaths(
@@ -198,17 +202,21 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .sort((a, b) => b.lastEventAt - a.lastEventAt)
         .map((s) => s.cwd),
     onSessionProbe: (ccPid, cwd) => {
-      // Skip if an active session for this ccPid already exists.
+      // Skip if an active session for this ccPid already exists or is being created.
       for (const s of sessions.values()) {
         if (!s.closed && s.ccPid === ccPid) return;
       }
+      if (pendingProbes.has(ccPid)) return;
+      pendingProbes.add(ccPid);
       const sid = crypto.randomUUID();
       log(`[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}`);
-      openSession(sid, cwd, undefined, undefined, ccPid).catch(
-        (err: unknown) => {
+      openSession(sid, cwd, undefined, undefined, ccPid)
+        .catch((err: unknown) => {
           log(`[probe] session create failed: ${String(err)}`);
-        },
-      );
+        })
+        .finally(() => {
+          pendingProbes.delete(ccPid);
+        });
     },
   });
 

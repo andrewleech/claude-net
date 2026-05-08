@@ -1727,6 +1727,16 @@
     flex-shrink: 0;
   }
   .cn-sidebar-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .cn-sidebar-footer {
+    flex-shrink: 0;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .cn-sidebar-footer .btn {
+    width: 100%;
+    font-size: 12px;
+    padding: 6px 10px;
+  }
 
   #app-main {
     flex: 1 1 auto;
@@ -2232,6 +2242,11 @@
     </div>
     <div class="cn-sidebar-body">
       <div id="agent-list" class="list-group list-group-flush"></div>
+    </div>
+    <div class="cn-sidebar-footer d-none" id="install-footer">
+      <button type="button" class="btn btn-outline-primary" id="install-btn" title="Install as a standalone app">
+        Install app
+      </button>
     </div>
   </aside>
 
@@ -5967,6 +5982,41 @@ if ('serviceWorker' in navigator) {
       });
   });
 }
+
+// PWA install button: Chrome 123+ removed the auto-install banner, so the
+// dashboard surfaces its own button in the sidebar footer when the
+// browser fires beforeinstallprompt. The captured event is single-use —
+// after prompt() resolves it can't be reused, so we re-hide the button.
+(function() {
+  var deferredPrompt = null;
+  var footer = document.getElementById('install-footer');
+  var btn = document.getElementById('install-btn');
+  if (!footer || !btn) return;
+
+  // Suppress the button if the page is already running as an installed PWA.
+  if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return;
+  if (window.navigator && window.navigator.standalone) return;
+
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    deferredPrompt = e;
+    footer.classList.remove('d-none');
+  });
+
+  btn.addEventListener('click', function() {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    deferredPrompt.userChoice.finally(function() {
+      deferredPrompt = null;
+      footer.classList.add('d-none');
+    });
+  });
+
+  window.addEventListener('appinstalled', function() {
+    deferredPrompt = null;
+    footer.classList.add('d-none');
+  });
+})();
 </script>
 </body>
 </html>

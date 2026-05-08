@@ -101,11 +101,15 @@ function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
     return false;
   }
   // Inject the hub version into the bundle so the mirror-agent can detect
-  // version skew at runtime. The placeholder is a literal string constant
-  // defined in agent.ts; the bundler preserves it as a string literal.
+  // version skew at runtime. The placeholder appears in BOTH agent.ts (the
+  // MIRROR_BUILD_HASH constant) and host-channel.ts (the dev-mode-skip guard
+  // in onVersionMismatch), so use replaceAll — String.replace would only
+  // catch one and leave the other as the literal "__MIRROR_BUILD_HASH__",
+  // causing every host_registered to look like a version mismatch and
+  // trigger a self-update loop.
   if (commitHash) {
     const bundle = readFileSync(dest, "utf8");
-    writeFileSync(dest, bundle.replace("__MIRROR_BUILD_HASH__", commitHash));
+    writeFileSync(dest, bundle.replaceAll("__MIRROR_BUILD_HASH__", commitHash));
   }
   bundleBuilt = true;
   return true;

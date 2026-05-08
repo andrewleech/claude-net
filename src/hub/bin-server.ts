@@ -7,12 +7,18 @@
 // The file set is whitelisted: we never serve arbitrary paths from bin/.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { Elysia } from "elysia";
 
 export interface BinServerDeps {
   /** Absolute path to the repo root (parent of src/ and bin/). */
   repoRoot: string;
+  /**
+   * Hub commit hash injected into the bundle as __MIRROR_BUILD_HASH__ so the
+   * mirror-agent can detect version skew against the hub it connects to.
+   */
+  commitHash?: string;
 }
 
 /** Filename → (path on disk, content-type, executable-ish?) */
@@ -79,7 +85,7 @@ let bundleBuilt = false;
  * `bun build` once per process. If bun isn't on PATH (should never happen
  * in the hub container), logs and returns false.
  */
-function ensureBundleBuilt(repoRoot: string): boolean {
+function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
   if (bundleBuilt) return true;
   const source = path.join(repoRoot, BUNDLE_SOURCE_REL);
   const dest = path.join(repoRoot, BUNDLE_DEST_REL);
@@ -88,18 +94,25 @@ function ensureBundleBuilt(repoRoot: string): boolean {
     ["build", "--target=bun", source, "--outfile", dest],
     { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
   );
-  if (result.status === 0) {
-    bundleBuilt = true;
-    return true;
+  if (result.status !== 0) {
+    process.stderr.write(
+      `[claude-net] mirror-agent bundle build failed: ${result.stderr ?? result.stdout}\n`,
+    );
+    return false;
   }
-  process.stderr.write(
-    `[claude-net] mirror-agent bundle build failed: ${result.stderr ?? result.stdout}\n`,
-  );
-  return false;
+  // Inject the hub version into the bundle so the mirror-agent can detect
+  // version skew at runtime. The placeholder is a literal string constant
+  // defined in agent.ts; the bundler preserves it as a string literal.
+  if (commitHash) {
+    const bundle = readFileSync(dest, "utf8");
+    writeFileSync(dest, bundle.replace("__MIRROR_BUILD_HASH__", commitHash));
+  }
+  bundleBuilt = true;
+  return true;
 }
 
 export function binServerPlugin(deps: BinServerDeps): Elysia {
-  const { repoRoot } = deps;
+  const { repoRoot, commitHash } = deps;
 
   return new Elysia().get("/bin/:name", async ({ params, set }) => {
     const asset = ASSETS[params.name];
@@ -110,7 +123,7 @@ export function binServerPlugin(deps: BinServerDeps): Elysia {
 
     // Lazy-build the JS bundle on first request.
     if (params.name === "mirror-agent.bundle.js") {
-      if (!ensureBundleBuilt(repoRoot)) {
+      if (!ensureBundleBuilt(repoRoot, commitHash)) {
         set.status = 500;
         return "bundle build failed; see hub logs";
       }

@@ -83,6 +83,11 @@ export interface AgentHandle {
 // input generates no hooks, so sessions.size stays 0 even while the user is
 // actively working. Operators who need automatic cleanup can pass
 // idleShutdownMs explicitly when calling startAgent().
+// Placeholder replaced with the hub's commit hash when the bundle is built
+// by bin-server.ts. Stays as the literal string "__MIRROR_BUILD_HASH__" in
+// dev (bun run src/...) so the version check is a no-op in that context.
+const MIRROR_BUILD_HASH = "__MIRROR_BUILD_HASH__";
+
 const DEFAULT_IDLE_SHUTDOWN_MS = 0;
 /**
  * Per-session idle-close window. 0 (default) disables idle closure —
@@ -124,6 +129,37 @@ function cleanupOldPastes(): void {
     }
   } catch {
     // directory may not exist yet — that's fine
+  }
+}
+
+/**
+ * Download the latest mirror-agent bundle from the hub and replace the
+ * running bundle file, then exit so the watchdog respawns with the new code.
+ * Only runs when process.argv[1] points at a bundle file (skips dev mode).
+ */
+async function selfUpdate(hubUrl: string, hubVersion: string): Promise<void> {
+  const bundlePath = process.argv[1];
+  if (!bundlePath?.endsWith("mirror-agent.bundle.js")) {
+    log(`[update] skipping self-update in dev mode (argv[1]=${bundlePath})`);
+    return;
+  }
+  log(
+    `[update] hub version ${hubVersion} differs from local ${MIRROR_BUILD_HASH}; downloading update`,
+  );
+  try {
+    const res = await fetch(`${hubUrl}/bin/mirror-agent.bundle.js`);
+    if (!res.ok) {
+      log(`[update] download failed: HTTP ${res.status}`);
+      return;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const tmp = `${bundlePath}.tmp`;
+    await fs.promises.writeFile(tmp, buf);
+    await fs.promises.rename(tmp, bundlePath);
+    log("[update] bundle replaced; exiting for watchdog respawn");
+    process.exit(0);
+  } catch (err) {
+    log(`[update] self-update failed: ${String(err)}`);
   }
 }
 
@@ -217,6 +253,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .finally(() => {
           pendingProbes.delete(ccPid);
         });
+    },
+    localVersion: MIRROR_BUILD_HASH,
+    onVersionMismatch: (hubVersion) => {
+      selfUpdate(hubUrl, hubVersion).catch((err: unknown) => {
+        log(`[update] unexpected error: ${String(err)}`);
+      });
     },
   });
 

@@ -245,7 +245,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
       }),
     )
     .use(hostPlugin({ hostRegistry }))
-    .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
+    .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..`, commitHash }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
   app = wsPlugin(
@@ -260,7 +260,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   );
   app = wsDashboardPlugin(app, registry, teams, hostRegistry);
   app = wsMirrorPlugin(app, mirrorRegistry);
-  app = wsHostPlugin(app, hostRegistry, registry, mirrorRegistry);
+  app = wsHostPlugin(app, hostRegistry, registry, mirrorRegistry, commitHash);
 
   // Periodic native WS ping + stale-WS eviction. Reuses the existing
   // close handler in ws-plugin to unregister and broadcast

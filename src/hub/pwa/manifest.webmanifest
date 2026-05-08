@@ -1,4 +1,5 @@
 {
+  "id": "/",
   "name": "claude-net",
   "short_name": "claude-net",
   "description": "claude-net dashboard: agent registry, live message feed, and mirror-session transcripts.",
@@ -8,6 +9,7 @@
   "orientation": "any",
   "background_color": "#0b0c10",
   "theme_color": "#0b0c10",
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "/icon.svg",

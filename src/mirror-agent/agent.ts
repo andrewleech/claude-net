@@ -276,6 +276,23 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         }
       }
     }
+    // Orphan sweep: if the Claude Code parent died (SIGKILL, crash) the
+    // Stop hook never fires and the session leaks. Probe each open
+    // session's ccPid with signal 0 — `kill` throws ESRCH when the
+    // process is gone. Guard with a 5s grace window after lastEventAt
+    // so we don't race a hook arriving on a freshly-recorded ccPid.
+    for (const s of sessions.values()) {
+      if (s.closed || s.ccPid === null) continue;
+      if (now - s.lastEventAt < 5_000) continue;
+      try {
+        process.kill(s.ccPid, 0);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ESRCH") {
+          closeSession(s, "orphan");
+        }
+        // EPERM means the process exists but we can't signal it — still alive.
+      }
+    }
     // Process-level idle shutdown.
     if (
       idleShutdownMs > 0 &&

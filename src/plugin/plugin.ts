@@ -1109,10 +1109,25 @@ export class Plugin {
 // ── Entry point ─────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const plugin = new Plugin(process.env.CLAUDE_NET_HUB);
+  const hubUrl = process.env.CLAUDE_NET_HUB;
+  const plugin = new Plugin(hubUrl);
   await plugin.start();
   process.on("SIGINT", () => plugin.shutdown());
   process.on("SIGTERM", () => plugin.shutdown());
+
+  // Parent (Claude Code) closed its end of our stdin pipe — it exited or
+  // crashed. Without this, the plugin would be re-parented to init and keep
+  // its hub WebSocket open indefinitely, showing up as a phantom agent.
+  // StdioServerTransport already put stdin in flowing mode by attaching a
+  // 'data' listener, so EOF surfaces as 'end' here.
+  //
+  // Only attach when we actually have a hub WS to leak. Unit tests import
+  // this module without a hub configured and with stdin already at EOF;
+  // attaching unconditionally would exit the test runner before any tests
+  // could execute.
+  if (hubUrl) {
+    process.stdin.on("end", () => plugin.shutdown());
+  }
 }
 
 main().catch((err) => {

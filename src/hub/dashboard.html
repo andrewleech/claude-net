@@ -2389,9 +2389,15 @@
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
+  // Trailing-edge debounce: a burst of events (host:connected +
+  // mirror:session_started + agent:connected fired when a mirror-agent
+  // reconnects) all coalesce into a single render after 150ms of quiet.
+  // renderAgents() rebuilds the sidebar via innerHTML, so each call
+  // destroys/recreates animation state — debouncing eliminates the
+  // visible flicker that comes from rapid back-to-back rebuilds.
   var renderAgentsTimer = null;
   function renderAgentsDebounced() {
-    if (renderAgentsTimer) return;
+    if (renderAgentsTimer) clearTimeout(renderAgentsTimer);
     renderAgentsTimer = setTimeout(function() { renderAgentsTimer = null; renderAgents(); }, 150);
   }
 
@@ -2461,12 +2467,12 @@
           fullName: event.full_name,
           status: 'online'
         });
-        renderAgents();
+        renderAgentsDebounced();
         break;
 
       case 'agent:disconnected':
         agents.delete(event.full_name);
-        renderAgents();
+        renderAgentsDebounced();
         break;
 
       case 'message:routed':
@@ -2504,7 +2510,7 @@
             ag.cwd = null;
           }
         }
-        renderAgents();
+        renderAgentsDebounced();
         if (activeAgentSid === event.sid) {
           // The mirror we're viewing vanished — fall back to the log.
           window.location.hash = '';
@@ -2523,13 +2529,13 @@
           online: true,
           connected_at: event.connected_at,
         });
-        renderAgents();
+        renderAgentsDebounced();
         break;
       }
 
       case 'host:disconnected': {
         var h = hosts.get(event.host_id);
-        if (h) { h.online = false; renderAgents(); }
+        if (h) { h.online = false; renderAgentsDebounced(); }
         break;
       }
 
@@ -2576,7 +2582,7 @@
           });
           if (best) { newAg.mirrorSid = best.sid; newAg.cwd = best.cwd; }
         }
-        renderAgents();
+        renderAgentsDebounced();
         break;
       }
     }
@@ -2608,7 +2614,7 @@
           const ag = agents.get(entry.owner_agent);
           if (ag) { ag.mirrorSid = entry.sid; ag.cwd = entry.cwd; }
         }
-        renderAgents();
+        renderAgentsDebounced();
         updateCounts();
       })
       .catch(function() {});
@@ -2624,7 +2630,7 @@
       .then(function(list) {
         mirrorBySid.clear();
         for (const ag of agents.values()) { ag.mirrorSid = null; ag.cwd = null; }
-        if (!Array.isArray(list)) { renderAgents(); return; }
+        if (!Array.isArray(list)) { renderAgentsDebounced(); return; }
         // Index mirrors into mirrorBySid + register placeholder agents.
         // Skip closed sessions — they're retained briefly on the hub
         // but shouldn't occupy a sidebar slot.
@@ -2649,7 +2655,7 @@
           var ag = agents.get(ownerAgent);
           if (ag) { ag.mirrorSid = e.sid; ag.cwd = e.cwd; }
         });
-        renderAgents();
+        renderAgentsDebounced();
       })
       .catch(function() { /* ignore */ });
   }

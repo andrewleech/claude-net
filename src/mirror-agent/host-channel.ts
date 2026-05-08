@@ -30,6 +30,17 @@ export interface HostChannelOptions {
    * already exist. Fire-and-forget — errors are logged inside the daemon.
    */
   onSessionProbe?: (ccPid: number, cwd: string) => void;
+  /**
+   * This daemon's embedded build hash (the __MIRROR_BUILD_HASH__ placeholder
+   * injected into the bundle at build time). Used to detect version skew
+   * against the hub on connect.
+   */
+  localVersion?: string;
+  /**
+   * Called when the hub's version differs from localVersion. The daemon
+   * should download the new bundle and restart.
+   */
+  onVersionMismatch?: (hubVersion: string) => void;
 }
 
 /**
@@ -121,8 +132,26 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
       } catch {
         return;
       }
-      if (!data || typeof data !== "object" || !("action" in data)) return;
-      const frame = data as { action: string } & Record<string, unknown>;
+      if (!data || typeof data !== "object") return;
+      const msg = data as Record<string, unknown>;
+
+      // Hub acknowledgement sent after host_register is accepted.
+      if (msg.event === "host_registered") {
+        const hubVersion =
+          typeof msg.hub_version === "string" ? msg.hub_version : null;
+        if (
+          hubVersion &&
+          opts.localVersion &&
+          opts.localVersion !== "__MIRROR_BUILD_HASH__" &&
+          opts.localVersion !== hubVersion
+        ) {
+          opts.onVersionMismatch?.(hubVersion);
+        }
+        return;
+      }
+
+      if (!("action" in msg)) return;
+      const frame = msg as { action: string } & Record<string, unknown>;
 
       if (frame.action === "host_ls") {
         const response = await handleHostLs(frame as HostLsRequest, realRoots);

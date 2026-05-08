@@ -39,6 +39,7 @@ export function wsHostPlugin(
   hostRegistry: HostRegistry,
   registry?: Registry,
   mirrorRegistry?: MirrorRegistry,
+  commitHash?: string,
 ): Elysia {
   return app.ws("/ws/host", {
     open(ws: HostWs) {
@@ -96,7 +97,11 @@ export function wsHostPlugin(
         );
         connMeta.set(ws.raw, { hostId: entry.hostId });
         ws.send(
-          JSON.stringify({ event: "host_registered", host_id: entry.hostId }),
+          JSON.stringify({
+            event: "host_registered",
+            host_id: entry.hostId,
+            hub_version: commitHash,
+          }),
         );
 
         // Probe for any plugins already registered on this host that

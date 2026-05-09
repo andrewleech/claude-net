@@ -20,6 +20,7 @@ import { HubClient } from "./hub-client";
 import { readHistoryBefore } from "./jsonl-history";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
 import { jsonlRecordToHistoryFrame } from "./jsonl-to-frame";
+import { ProbeAttemptTracker } from "./probe-tracker";
 import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
 
@@ -179,10 +180,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
   const sessions = new Map<string, SessionState>();
-  // Tracks ccPids for which openSession is in-flight, preventing a second
-  // concurrent probe from racing past the sessions-map guard before the first
-  // fetch completes and sessions.set() runs.
-  const pendingProbes = new Set<number>();
+  // Per-ccPid probe bookkeeping: dedups concurrent in-flight probes,
+  // applies a failure cooldown, and reuses the same sid across retries
+  // so 429-loops don't accumulate orphan session rows on the hub.
+  const probeAttempts = new ProbeAttemptTracker();
   const injector = new TmuxInjector();
   const redactor = new Redactor({
     configPaths: defaultConfigPaths(
@@ -238,20 +239,25 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .sort((a, b) => b.lastEventAt - a.lastEventAt)
         .map((s) => s.cwd),
     onSessionProbe: (ccPid, cwd) => {
-      // Skip if an active session for this ccPid already exists or is being created.
+      // Skip if an active session for this ccPid already exists.
       for (const s of sessions.values()) {
         if (!s.closed && s.ccPid === ccPid) return;
       }
-      if (pendingProbes.has(ccPid)) return;
-      pendingProbes.add(ccPid);
-      const sid = crypto.randomUUID();
+      // Skip if a probe is in-flight or recently failed (cooldown).
+      if (probeAttempts.shouldSkip(ccPid)) return;
+      const sid = probeAttempts.begin(ccPid);
       log(`[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}`);
       openSession(sid, cwd, undefined, undefined, ccPid)
-        .catch((err: unknown) => {
-          log(`[probe] session create failed: ${String(err)}`);
+        .then((session) => {
+          if (session) {
+            probeAttempts.succeeded(ccPid);
+          } else {
+            probeAttempts.failed(ccPid);
+          }
         })
-        .finally(() => {
-          pendingProbes.delete(ccPid);
+        .catch((err: unknown) => {
+          log(`[probe] session create threw: ${String(err)}`);
+          probeAttempts.failed(ccPid);
         });
     },
     localVersion: MIRROR_BUILD_HASH,

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import {
   MirrorRegistry,
   type SessionWatcher,
+  _resetSessionCreateLimiterForTest,
   mirrorPlugin,
 } from "@/hub/mirror";
 import type { MirrorEventFrame } from "@/shared/types";
@@ -730,6 +731,81 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       const payload = (await transcript.json()) as Record<string, unknown>;
       expect(payload.sid).toBe("auto-sid-1");
       expect(Array.isArray(payload.transcript)).toBe(true);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("re-POST with an existing sid bypasses the rate limiter", async () => {
+    // Mirror-agent restart + post-install hook burst can fire dozens of
+    // POST /session calls for known sids in quick succession. The hub
+    // should treat those as idempotent and skip the rate limit; the
+    // limit only exists to throttle truly new sessions.
+    _resetSessionCreateLimiterForTest();
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+
+    try {
+      // Seed an existing session so re-POSTs land in the restored branch.
+      reg.createSession("agent-x:u@h", "/workspace", "known-sid");
+
+      // Slam 100 POSTs for that sid — far above the 30/5min default budget.
+      const results = await Promise.all(
+        Array.from({ length: 100 }, () =>
+          fetch(`http://localhost:${port}/api/mirror/session`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              owner_agent: "agent-x:u@h",
+              cwd: "/workspace",
+              sid: "known-sid",
+            }),
+          }),
+        ),
+      );
+      // None should 429 — they're all idempotent restored returns.
+      const statuses = results.map((r) => r.status);
+      expect(statuses.every((s) => s === 200)).toBe(true);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("rate limiter still applies to bursts of new sids", async () => {
+    // Sanity check that the bypass only fires for known sids: a flood of
+    // distinct sids must still be capped by the limiter so abuse is
+    // throttled (the limiter is keyed on remote, default 30 per 5 min).
+    _resetSessionCreateLimiterForTest();
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 60 }, (_, i) =>
+          fetch(`http://localhost:${port}/api/mirror/session`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              owner_agent: "agent-x:u@h",
+              cwd: "/workspace",
+              sid: `new-sid-${i}`,
+            }),
+          }),
+        ),
+      );
+      const statusCount = results.reduce<Record<number, number>>((acc, r) => {
+        acc[r.status] = (acc[r.status] ?? 0) + 1;
+        return acc;
+      }, {});
+      // Expect at least one 200 (the first 30) and at least one 429.
+      expect((statusCount[200] ?? 0) > 0).toBe(true);
+      expect((statusCount[429] ?? 0) > 0).toBe(true);
     } finally {
       app.stop();
     }

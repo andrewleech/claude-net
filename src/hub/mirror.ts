@@ -270,6 +270,16 @@ export class MirrorRegistry {
   }
 
   /**
+   * Return true if a session with this sid is already in the registry.
+   * Used by the /api/mirror/session route to skip the rate-limit check
+   * for idempotent re-POSTs (same sid hits createSession's restored
+   * branch — no new row, no work to throttle).
+   */
+  hasSession(sid: string): boolean {
+    return this.sessions.has(sid);
+  }
+
+  /**
    * Return true if there is at least one open session for (host, ccPid).
    * Used to decide whether to send a host_session_probe.
    */
@@ -1225,14 +1235,25 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = 400;
           return { error: "Missing required fields: owner_agent, cwd" };
         }
-        const remote = remoteKeyFor(request);
-        if (!sessionCreateLimiter.allow(remote)) {
-          const waitMs = sessionCreateLimiter.retryAfterMs(remote);
-          set.status = 429;
-          set.headers["retry-after"] = String(
-            Math.max(1, Math.ceil(waitMs / 1000)),
-          );
-          return { error: "Rate limit: too many session creations." };
+        // Rate-limit only true new-sid creations. Re-POSTs with a known
+        // sid (probe-tracker retries, hook bursts when mirror-agent has
+        // restarted but the hub still remembers the session) hit
+        // createSession's idempotent restored branch and don't allocate
+        // a new row, so counting them against the limit just produces
+        // 429-loops without protecting anything.
+        const isNewSid =
+          typeof payload.sid !== "string" ||
+          !mirrorRegistry.hasSession(payload.sid);
+        if (isNewSid) {
+          const remote = remoteKeyFor(request);
+          if (!sessionCreateLimiter.allow(remote)) {
+            const waitMs = sessionCreateLimiter.retryAfterMs(remote);
+            set.status = 429;
+            set.headers["retry-after"] = String(
+              Math.max(1, Math.ceil(waitMs / 1000)),
+            );
+            return { error: "Rate limit: too many session creations." };
+          }
         }
         const host = typeof payload.host === "string" ? payload.host : "";
         const ccPid =
@@ -1559,11 +1580,18 @@ const injectMinuteLimiter = new RateLimiter({
   windowMs: 60_000,
 });
 
-// 30 session creations per 5 minutes per remote IP.
+// 30 session creations per 5 minutes per remote IP. Idempotent re-POSTs
+// for an already-known sid bypass this — see route handler.
 const sessionCreateLimiter = new RateLimiter({
   max: 30,
   windowMs: 5 * 60_000,
 });
+
+/** Test helper. Resets the module-level session-create rate limiter so
+ *  tests don't pollute each other's budget. Not part of the public API. */
+export function _resetSessionCreateLimiterForTest(): void {
+  sessionCreateLimiter.reset();
+}
 
 function sanitizeWatcher(s: string): string {
   // Strip control characters and double-quotes so the value is safe to embed

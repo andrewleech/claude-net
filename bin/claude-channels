@@ -206,25 +206,27 @@ except Exception:
 " 2>/dev/null
 }
 
-start_mirror_agent() {
-    local uid port_file
+_mirror_agent_healthy() {
+    # Echoes the live port number on stdout when /health responds 200; returns
+    # non-zero otherwise. Caller uses this to decide whether to skip spawn.
+    local port_file="$1" port
+    [ -f "$port_file" ] || return 1
+    port=$(cat "$port_file" 2>/dev/null || true)
+    [ -n "$port" ] || return 1
+    curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1 || return 1
+    echo "$port"
+}
+
+_mirror_agent_spawn() {
+    # Caller has already verified no healthy daemon exists. Closes fd 9 on the
+    # nohup'd child so it doesn't inherit the spawn lock — otherwise the lock
+    # would be held for the lifetime of the daemon and block every subsequent
+    # claude-channels start.
+    local uid port_file log_file agent_bin hub_url
     uid="$(id -u)"
     port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+    log_file="/tmp/claude-net/mirror-agent-${uid}.log"
 
-    # Already running?
-    if [ -f "$port_file" ]; then
-        local port
-        port=$(cat "$port_file" 2>/dev/null || true)
-        if [ -n "$port" ]; then
-            if curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
-                return 0
-            fi
-            # Stale port file; remove and start fresh.
-            rm -f "$port_file" 2>/dev/null || true
-        fi
-    fi
-
-    local agent_bin
     agent_bin="$(cd "$(dirname "$SELF")" && pwd)/claude-net-mirror-agent"
     if [ ! -x "$agent_bin" ]; then
         # Try the installed location.
@@ -241,7 +243,6 @@ start_mirror_agent() {
     #      (this is where the plugin already gets its URL, so the mirror-agent
     #      ends up pointing at the same hub without extra configuration)
     #   3. http://localhost:4815 as a last-ditch default
-    local hub_url
     hub_url="${CLAUDE_NET_HUB:-}"
     if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
         hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
@@ -261,8 +262,7 @@ except Exception:
     fi
     hub_url="${hub_url:-http://localhost:4815}"
     mkdir -p /tmp/claude-net 2>/dev/null || true
-    local log_file="/tmp/claude-net/mirror-agent-${uid}.log"
-    CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 &
+    CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 9>&- &
     disown $! 2>/dev/null || true
 
     # Wait briefly for the port file to appear.
@@ -271,6 +271,50 @@ except Exception:
         sleep 0.1
         i=$((i + 1))
     done
+}
+
+start_mirror_agent() {
+    local uid port_file lock_file
+    uid="$(id -u)"
+    port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+    lock_file="/tmp/claude-net/mirror-agent-${uid}.lock"
+
+    mkdir -p /tmp/claude-net 2>/dev/null || true
+
+    # Optimistic fast-path: a healthy daemon already exists, skip the lock.
+    if _mirror_agent_healthy "$port_file" >/dev/null; then
+        return 0
+    fi
+
+    # Slow-path: serialize spawns so concurrent watchdogs don't all spawn
+    # duplicate daemons. Without this, /setup's `pkill -f mirror-agent` is
+    # followed by every claude-channels watchdog (one per Claude Code
+    # session) racing through the existence check at the same moment and
+    # producing N daemons.
+    #
+    # `flock -x -w 10` blocks up to 10 s for an exclusive lock and auto-
+    # releases when the subshell's fd 9 closes (so a crash doesn't leave
+    # a stale lock). On hosts without flock(1) (rare — bare macOS without
+    # util-linux), fall through to an unsynchronised spawn; duplicates
+    # are wasteful but not fatal.
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x -w 10 9 || {
+                echo "[claude-net/mirror] spawn lock timed out" >&2
+                exit 1
+            }
+            # Re-check now that we hold the lock — a peer may have just spawned.
+            if _mirror_agent_healthy "$port_file" >/dev/null; then
+                exit 0
+            fi
+            rm -f "$port_file" 2>/dev/null || true
+            _mirror_agent_spawn
+        ) 9>"$lock_file"
+        return $?
+    fi
+
+    rm -f "$port_file" 2>/dev/null || true
+    _mirror_agent_spawn
 }
 
 start_mirror_agent_watchdog() {

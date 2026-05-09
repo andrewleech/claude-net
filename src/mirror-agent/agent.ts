@@ -1332,24 +1332,74 @@ function deriveOwnerAgent(cwd: string): string {
   return `${session}:${user}@${host}`;
 }
 
-function writePortFile(stateDir: string, port: number): void {
+function portFilePath(stateDir: string): string {
   const uid = process.getuid?.() ?? 0;
-  const portFile = path.join(stateDir, `mirror-agent-${uid}.port`);
+  return path.join(stateDir, `mirror-agent-${uid}.port`);
+}
+
+function writePortFile(stateDir: string, port: number): void {
   try {
-    fs.writeFileSync(portFile, String(port), { mode: 0o600 });
+    fs.writeFileSync(portFilePath(stateDir), String(port), { mode: 0o600 });
   } catch (err) {
     log(`Failed to write port file: ${String(err)}`);
   }
 }
 
 function removePortFile(stateDir: string): void {
-  const uid = process.getuid?.() ?? 0;
-  const portFile = path.join(stateDir, `mirror-agent-${uid}.port`);
+  try {
+    fs.unlinkSync(portFilePath(stateDir));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Checks whether an existing mirror-agent daemon is running and healthy.
+ * Returns the port if a peer responds 200 on /health; null otherwise. A
+ * stale port file (file present, peer unreachable) is removed as a side
+ * effect so the caller can write a fresh one.
+ *
+ * Used as a singleton guard at startup: when /setup or install-channels
+ * pkills mirror-agents, every claude-channels watchdog (one per Claude
+ * Code session) detects the kill and racingly respawns. The bash spawn
+ * lock catches most of that, but this check defends against the corner
+ * cases (manual `bun mirror-agent.bundle.js`, hosts without flock).
+ */
+export async function checkExistingDaemon(
+  stateDir: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ healthy: boolean; port: number | null }> {
+  const portFile = portFilePath(stateDir);
+  let port: number | null = null;
+  try {
+    const raw = fs.readFileSync(portFile, "utf8").trim();
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) port = parsed;
+  } catch {
+    return { healthy: false, port: null };
+  }
+  if (port === null) {
+    try {
+      fs.unlinkSync(portFile);
+    } catch {
+      // ignore
+    }
+    return { healthy: false, port: null };
+  }
+  try {
+    const res = await fetchImpl(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (res.ok) return { healthy: true, port };
+  } catch {
+    // unreachable — peer is dead
+  }
   try {
     fs.unlinkSync(portFile);
   } catch {
     // ignore
   }
+  return { healthy: false, port };
 }
 
 function writeSentinelFile(stateDir: string): void {
@@ -1461,11 +1511,23 @@ if (import.meta.main) {
     notifyCrashToHub(record);
   });
 
-  startAgent({ hubUrl: hub, bindPort }).catch((err: unknown) => {
-    writeCrashRecord("startupError", err);
-    process.stderr.write(
-      `[claude-net/mirror] startup failed: ${String(err)}\n`,
-    );
-    process.exit(1);
-  });
+  (async () => {
+    // Singleton guard: exit cleanly if a healthy peer already owns the
+    // port file. Layer-1 (bash flock in claude-channels) prevents most
+    // races; this catches the rest (hosts without flock, manual launches).
+    const peer = await checkExistingDaemon(stateDir);
+    if (peer.healthy && peer.port !== null) {
+      log(`existing daemon healthy on port ${peer.port}; exiting cleanly`);
+      process.exit(0);
+    }
+    try {
+      await startAgent({ hubUrl: hub, bindPort });
+    } catch (err) {
+      writeCrashRecord("startupError", err);
+      process.stderr.write(
+        `[claude-net/mirror] startup failed: ${String(err)}\n`,
+      );
+      process.exit(1);
+    }
+  })();
 }

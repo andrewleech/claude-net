@@ -90,6 +90,13 @@ export class Registry {
     const ccPid = options.ccPid ?? null;
     const cwd = options.cwd ?? null;
 
+    if (!isValidAgentName(fullName)) {
+      return {
+        ok: false,
+        error: `Name '${fullName}' is not in the required session:user@host format (all three parts must be non-empty).`,
+      };
+    }
+
     // Detect rename: same wsIdentity, different name. At most one match
     // is possible because register() maintains the invariant.
     let renamedFrom: string | undefined;
@@ -337,6 +344,24 @@ export class Registry {
 
     return result;
   }
+}
+
+/**
+ * Reject names that don't fit the canonical `session:user@host` format
+ * with all three parts non-empty. Used by `register()` to keep the
+ * agent namespace structurally clean, and — critically — to reserve
+ * identities like `system@claude-net` for the plugin's own startup
+ * self-test notification. The LLM's trust in that notification depends
+ * on no remote agent being able to register a colliding name.
+ */
+export function isValidAgentName(fullName: string): boolean {
+  if (typeof fullName !== "string") return false;
+  const colonIdx = fullName.indexOf(":");
+  if (colonIdx <= 0) return false;
+  const atIdx = fullName.indexOf("@", colonIdx + 1);
+  if (atIdx <= colonIdx + 1) return false;
+  if (atIdx >= fullName.length - 1) return false;
+  return true;
 }
 
 export function parseName(fullName: string): {

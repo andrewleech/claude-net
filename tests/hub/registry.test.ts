@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { Registry } from "@/hub/registry";
+import { Registry, isValidAgentName } from "@/hub/registry";
 
 function mockWs() {
   const sent: string[] = [];
@@ -291,24 +291,45 @@ describe("Registry", () => {
     }
   });
 
-  // ── Legacy format (name@host without colon) ────────────────────────────
+  // ── Name format validation ─────────────────────────────────────────────
 
-  test("register and resolve legacy format (no colon)", () => {
+  test("register rejects names not in session:user@host format", () => {
     const ws = mockWs();
-    registry.register("dashboard@hub", ws);
-    const result = registry.resolve("dashboard@hub");
-    // dashboard@hub has no colon, so resolve treats it as user@host
-    // parseName("dashboard@hub") -> session="dashboard", user="", host="hub"
-    // resolve("dashboard@hub") splits on @ -> user="dashboard", host="hub"
-    // But the entry has user="" and host="hub", so user doesn't match
-    // This means we need exact match fallback for legacy format
-    // Actually: resolve("dashboard@hub") -> hasAt && !hasColon -> user@host match
-    // It looks for entry.user === "dashboard" && entry.host === "hub"
-    // But parseName("dashboard@hub") sets user="" since there's no colon
-    // So the user@host resolve won't find it.
-    // However, dashboard@hub is handled separately by the router before resolve is called.
-    // For the test, let's verify the exact behavior:
-    expect(result.ok).toBe(false);
+    // Bare user@host (no session prefix) — what the plugin's local
+    // "system@claude-net" probe identity would look like if a remote
+    // agent tried to claim it. Must be rejected so the LLM can trust
+    // structurally that from="system@claude-net" came from its local
+    // plugin, not a remote peer.
+    const r1 = registry.register("system@claude-net", ws);
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.error).toContain("session:user@host");
+
+    // Plain string (no colon, no @).
+    expect(registry.register("foo", ws).ok).toBe(false);
+
+    // Empty parts must be rejected.
+    expect(registry.register(":alice@host", ws).ok).toBe(false);
+    expect(registry.register("sess:@host", ws).ok).toBe(false);
+    expect(registry.register("sess:alice@", ws).ok).toBe(false);
+
+    // Well-formed name still works.
+    expect(registry.register("sess:alice@host", ws).ok).toBe(true);
+  });
+
+  test("isValidAgentName accepts/rejects the same shapes", () => {
+    expect(isValidAgentName("sess:alice@host")).toBe(true);
+    expect(isValidAgentName("a:b@c")).toBe(true);
+    expect(isValidAgentName("hyphen-ok:user.name@host.example")).toBe(true);
+
+    expect(isValidAgentName("system@claude-net")).toBe(false);
+    expect(isValidAgentName("dashboard@hub")).toBe(false);
+    expect(isValidAgentName("foo")).toBe(false);
+    expect(isValidAgentName("")).toBe(false);
+    expect(isValidAgentName(":alice@host")).toBe(false);
+    expect(isValidAgentName("sess:@host")).toBe(false);
+    expect(isValidAgentName("sess:alice@")).toBe(false);
+    // Wrong order — @ before : doesn't fit the format.
+    expect(isValidAgentName("alice@host:sess")).toBe(false);
   });
 
   // ── getByFullName ──────────────────────────────────────────────────────

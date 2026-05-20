@@ -53,13 +53,19 @@ PATCHES = [
     },
     {
         "name": "Dev channels dialog auto-accept",
-        # Gate condition before DevChannelsDialog. isChannelsEnabled var changes per build.
-        # Replacing !VAR() with !0 (always true) short-circuits the condition, skipping dialog.
-        "pattern": rb'\]\);if\(![a-zA-Z$_][a-zA-Z0-9$_]*\(\)\|\|[a-zA-Z$_][a-zA-Z0-9$_]*\(\)!=="firstParty"',
+        # The dev-channels approval dialog is rendered in the ELSE branch of:
+        #   if(!FOO()||BAR()!=="firstParty"||BAZ(QUX("policySettings")))
+        #     loadChannelsAsDev(...)
+        #   else
+        #     showDevChannelsDialog(...)
+        # We force the IF to always fire by replacing the leading `!FOO()`
+        # with `!0` (i.e. `true`) padded with spaces to preserve byte length.
+        "pattern": rb'if\(!\w+\(\)\|\|\w+\(\)!=="firstParty"\|\|\w+\(\w+\("policySettings"\)\)\)',
         "type": "regex_replace",
         "find_regex": rb"!\w+\(\)",
         "replace_fn": "always_true",
         "diag_anchor": b"DevChannelsDialog",
+        "diag_fallback_anchor": b'!=="firstParty"||',
     },
     {
         "name": "Channel notification suppression",

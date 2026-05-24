@@ -93,9 +93,14 @@ export const PLUGIN_VERSION = "0.1.0";
 export const INSTRUCTIONS = `claude-net agent messaging plugin.
 
 Inbound messages from other agents arrive as <channel> tags:
-  <channel source="claude-net" from="session:user@host" type="message|reply" message_id="..." reply_to="..." team="...">
+  <channel source="claude-net" from="session:user@host" type="message|reply" cn_message_id="..." cn_reply_to="..." team="...">
     message content
   </channel>
+
+The attribute names are intentionally cn_-prefixed so they cannot be
+confused with Claude Code's own diagnostics fields (e.g. previous_message_id,
+which must always be an Anthropic msg_... id). When using send_message's
+reply_to argument, pass the cn_message_id value from the prior message.
 
 Agent name format: session:user@host
   - session = project folder name (basename of cwd)
@@ -238,6 +243,17 @@ export function withSessionSuffix(fullName: string, n: number): string {
   return `${fullName.slice(0, colon)}-${n}${fullName.slice(colon)}`;
 }
 
+/**
+ * Build the MCP `notifications/claude/channel` frame that surfaces an
+ * inbound message to the LLM as a <channel> tag. The meta keys here
+ * become the attribute names CC renders on that tag, so they are
+ * deliberately namespaced with a `cn_` prefix to avoid colliding with
+ * CC's own diagnostic schema — in particular, CC's
+ * `diagnostics.previous_message_id` must always be an Anthropic `msg_...`
+ * id, and an earlier version of this notification used plain `message_id`
+ * which CC stored in that same slot, producing 400s on the receiver's
+ * next API call.
+ */
 export function createChannelNotification(message: InboundMessageFrame): {
   method: string;
   params: { content: string; meta: Record<string, string> };
@@ -249,8 +265,8 @@ export function createChannelNotification(message: InboundMessageFrame): {
       meta: {
         from: message.from,
         type: message.type,
-        message_id: message.message_id,
-        ...(message.reply_to ? { reply_to: message.reply_to } : {}),
+        cn_message_id: message.message_id,
+        ...(message.reply_to ? { cn_reply_to: message.reply_to } : {}),
         ...(message.team ? { team: message.team } : {}),
       },
     },
@@ -341,7 +357,8 @@ export const TOOL_DEFINITIONS = [
         content: { type: "string", description: "Message content" },
         reply_to: {
           type: "string",
-          description: "message_id of the message being replied to",
+          description:
+            "cn_message_id of the message being replied to (taken from the <channel> tag's cn_message_id attribute)",
         },
       },
       required: ["to", "content"],
@@ -370,7 +387,8 @@ export const TOOL_DEFINITIONS = [
         content: { type: "string", description: "Message content" },
         reply_to: {
           type: "string",
-          description: "message_id of the message being replied to",
+          description:
+            "cn_message_id of the message being replied to (taken from the <channel> tag's cn_message_id attribute)",
         },
       },
       required: ["team", "content"],
@@ -742,7 +760,7 @@ export class Plugin {
           meta: {
             from: "system@claude-net",
             type: "message",
-            message_id: crypto.randomUUID(),
+            cn_message_id: crypto.randomUUID(),
           },
         },
       })

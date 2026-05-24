@@ -69,6 +69,11 @@ interface SessionState {
   /** True while a keep-alive POST with a new ccPid is in flight, to
    *  prevent duplicate concurrent POSTs from rapid hook arrivals. */
   pendingPidUpdate: boolean;
+  /** JSONL record uuids for which we have already POSTed an
+   *  api-error report to the hub. Prevents double-firing within a
+   *  single agent run; on restart the timestamp filter in
+   *  `maybeReportApiError` keeps us from re-reporting old records. */
+  apiErrorUuidsPosted: Set<string>;
 }
 
 export interface AgentHandle {
@@ -108,6 +113,13 @@ const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 const RECOVERY_INITIAL_DELAY_MS = 1_000;
 const RECOVERY_MAX_DELAY_MS = 30_000;
 const RECOVERY_MAX_ATTEMPTS = 20;
+
+/** Maximum age of an isApiErrorMessage JSONL record we'll report to the
+ *  hub. The JSONL tail re-reads from byte 0 on every agent start, so
+ *  without a recency filter a restart would re-fire stale errors that
+ *  have already been investigated. 5 min is well past the conversation
+ *  half-life where a sender would still care. */
+const API_ERROR_RECENCY_MS = 5 * 60 * 1000;
 
 /** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
 const PASTE_DIR = "/tmp/claude-net/pastes";
@@ -585,6 +597,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       lastCtxPct: -1,
       lastUsage: null,
       pendingPidUpdate: false,
+      apiErrorUuidsPosted: new Set(),
     };
     sessions.set(sid, session);
 
@@ -774,11 +787,68 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             emitCtxFromUsage(session, msg.usage);
           }
         }
+        // Detect Claude Code's synthetic API-error assistant records and
+        // report them to the hub. Used by the delivery-failure feedback
+        // path: when a sender's claude-net message lands on a receiver
+        // whose next API call subsequently fails, the hub can route a
+        // system notification back to the sender so they know their
+        // message wasn't processed end-to-end.
+        if (rec.type === "assistant" && isApiErrorRecord(rec)) {
+          maybeReportApiError(session, rec).catch((err: unknown) => {
+            log(`[${session.sid}] api-error report threw: ${String(err)}`);
+          });
+        }
       },
       onError: (err) => {
         log(`[${session.sid}] JSONL tail error: ${err.message}`);
       },
     });
+  }
+
+  /**
+   * POST a CC-side API-error record back to the hub. Dedupes per-uuid in
+   * memory (lost on agent restart) and applies a 5-minute recency filter
+   * so an agent restart re-reading old JSONL doesn't spam the hub with
+   * historical errors. The hub correlates the error to the most recent
+   * inbound claude-net message and notifies that sender.
+   */
+  async function maybeReportApiError(
+    session: SessionState,
+    rec: Record<string, unknown>,
+  ): Promise<void> {
+    const uuid = typeof rec.uuid === "string" ? rec.uuid : "";
+    if (!uuid) return;
+    if (session.apiErrorUuidsPosted.has(uuid)) return;
+
+    const recTs =
+      typeof rec.timestamp === "string"
+        ? Date.parse(rec.timestamp)
+        : Number.NaN;
+    const tsMs = Number.isFinite(recTs) ? recTs : Date.now();
+    if (Date.now() - tsMs > API_ERROR_RECENCY_MS) return;
+
+    session.apiErrorUuidsPosted.add(uuid);
+
+    const status =
+      typeof rec.apiErrorStatus === "number" ? rec.apiErrorStatus : null;
+    const text = extractApiErrorText(rec);
+
+    try {
+      await fetch(`${hubUrl}/api/mirror/api-error`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sid: session.sid,
+          owner_agent: session.ownerAgent,
+          uuid,
+          status,
+          text,
+          ts: tsMs,
+        }),
+      });
+    } catch (err) {
+      log(`[${session.sid}] api-error POST failed: ${String(err)}`);
+    }
   }
 
   /**
@@ -1078,9 +1148,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     }
     const result = await injector.inject(session.sid, session.tmuxPane, text);
     if (!result.ok) {
+      // Append the dropped prompt so the user can copy it back into the
+      // compose box without retyping. The inject cap upstream is 512 KB
+      // (MAX_INJECT_BYTES), so the worst-case audit payload is bounded.
       emitAuditEvent(
         session,
-        `inject failed (${result.code}): ${result.error}`,
+        `inject failed (${result.code}): ${result.error}\n\n--- dropped prompt (copy to retry) ---\n${text}`,
       );
       return;
     }
@@ -1323,6 +1396,42 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 function toWsUrl(hubUrl: string, sid: string): string {
   const wsBase = hubUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
   return `${wsBase}/ws/mirror/${encodeURIComponent(sid)}?as=agent`;
+}
+
+/**
+ * Claude Code writes "synthetic" assistant records into the JSONL
+ * transcript when an upstream Anthropic API call fails. They carry
+ * `type: "assistant"`, `isApiErrorMessage: true`, and an `apiErrorStatus`
+ * number alongside a single text block describing the error. This is the
+ * structured marker the mirror-agent uses to detect downstream failures
+ * without parsing free-form text.
+ */
+export function isApiErrorRecord(rec: Record<string, unknown>): boolean {
+  return rec.isApiErrorMessage === true;
+}
+
+/**
+ * Pull a human-readable error string out of an isApiErrorMessage record.
+ * Falls back through the documented fields (`message.content[0].text` →
+ * `error` → empty string) so the hub always has something useful to
+ * include in the system notification it routes back to the sender.
+ */
+export function extractApiErrorText(rec: Record<string, unknown>): string {
+  const message = rec.message as { content?: unknown } | undefined;
+  if (message && Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (
+        block &&
+        typeof block === "object" &&
+        (block as { type?: string }).type === "text" &&
+        typeof (block as { text?: string }).text === "string"
+      ) {
+        return (block as { text: string }).text;
+      }
+    }
+  }
+  if (typeof rec.error === "string") return rec.error;
+  return "";
 }
 
 function deriveOwnerAgent(cwd: string): string {

@@ -225,4 +225,49 @@ export class Router {
 
     return { ok: true, message_id, delivered_to, skipped_no_channel };
   }
+
+  /**
+   * Deliver a hub-originated notification to `to`. The from-field is the
+   * reserved `system@claude-net` identity (structurally unforgeable —
+   * isValidAgentName rejects it on register, see registry.ts), so a
+   * receiving LLM that follows the documented trust model can
+   * distinguish this from agent-to-agent traffic.
+   *
+   * Used today for the delivery-failure feedback path: when a recipient's
+   * Claude Code reports an API error after receiving a message, the hub
+   * routes a system notification back to the original sender so they
+   * know their message may not have been processed. Unlike routeDirect
+   * this does NOT NAK on no-channel — there is no caller to surface a
+   * NAK to (the hub originates the message), so the outcome is just
+   * "delivered" or "skipped" with no error path.
+   */
+  routeSystemNotification(
+    to: string,
+    content: string,
+  ): { ok: true; outcome: "delivered" | "skipped"; reason?: string } {
+    const resolved = this.registry.resolve(to);
+    if (!resolved.ok) {
+      return { ok: true, outcome: "skipped", reason: "offline" };
+    }
+    if (!resolved.entry.channelCapable) {
+      return { ok: true, outcome: "skipped", reason: "no-channel" };
+    }
+    const message_id = crypto.randomUUID();
+    const timestamp = new Date().toISOString();
+    const frame: InboundMessageFrame = {
+      event: "message",
+      message_id,
+      from: "system@claude-net",
+      to: resolved.entry.fullName,
+      type: "message",
+      content,
+      timestamp,
+    };
+    try {
+      resolved.entry.ws.send(JSON.stringify(frame));
+    } catch {
+      return { ok: true, outcome: "skipped", reason: "transport-error" };
+    }
+    return { ok: true, outcome: "delivered" };
+  }
 }

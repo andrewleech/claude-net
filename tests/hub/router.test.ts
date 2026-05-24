@@ -382,4 +382,59 @@ describe("Router", () => {
       expect(Number.isNaN(Date.parse(msg?.timestamp ?? ""))).toBe(false);
     });
   });
+
+  describe("routeSystemNotification", () => {
+    test("delivers with from=system@claude-net when recipient is online and channel-capable", () => {
+      const ws = mockWs();
+      registry.register("proj:alice@host", ws, undefined, {
+        channelCapable: true,
+      });
+      const result = router.routeSystemNotification(
+        "proj:alice@host",
+        "delivery report",
+      );
+      expect(result.ok).toBe(true);
+      expect(result.outcome).toBe("delivered");
+      expect(ws.sent).toHaveLength(1);
+      expect(ws.sent[0]?.from).toBe("system@claude-net");
+      expect(ws.sent[0]?.content).toBe("delivery report");
+      expect(ws.sent[0]?.to).toBe("proj:alice@host");
+    });
+
+    test("skips with reason=offline when recipient unknown", () => {
+      const result = router.routeSystemNotification(
+        "proj:ghost@host",
+        "anyone?",
+      );
+      expect(result.ok).toBe(true);
+      expect(result.outcome).toBe("skipped");
+      expect(result.reason).toBe("offline");
+    });
+
+    test("skips with reason=no-channel when recipient lacks channels", () => {
+      const ws = mockWs();
+      registry.register("proj:alice@host", ws, undefined, {
+        channelCapable: false,
+      });
+      const result = router.routeSystemNotification("proj:alice@host", "hello");
+      expect(result.outcome).toBe("skipped");
+      expect(result.reason).toBe("no-channel");
+      expect(ws.sent).toHaveLength(0);
+    });
+
+    test("system identity bypasses the register-time name validator", () => {
+      // The whole point of using system@claude-net as the from-field is
+      // that it cannot be registered (isValidAgentName rejects it), so
+      // no remote agent can forge a notification with that origin. Make
+      // sure the router doesn't accidentally tighten this — recipients
+      // are still resolved through the normal registry.
+      const ws = mockWs();
+      registry.register("proj:bob@host", ws, undefined, {
+        channelCapable: true,
+      });
+      const result = router.routeSystemNotification("proj:bob@host", "hi");
+      expect(result.outcome).toBe("delivered");
+      expect(ws.sent[0]?.from).toBe("system@claude-net");
+    });
+  });
 });

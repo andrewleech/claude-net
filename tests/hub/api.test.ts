@@ -6,7 +6,7 @@ import {
   expect,
   test,
 } from "bun:test";
-import { apiPlugin } from "@/hub/api";
+import { apiPlugin, correlateRecentSender } from "@/hub/api";
 import { EventLog } from "@/hub/event-log";
 import { Registry } from "@/hub/registry";
 import { Router } from "@/hub/router";
@@ -392,5 +392,178 @@ describe("REST API endpoints", () => {
     } else {
       expect(Array.isArray(body.lines)).toBe(true);
     }
+  });
+
+  // ── /api/mirror/api-error route ────────────────────────────────────────
+  // End-to-end: register sender + receiver, send a message, then simulate
+  // the receiver's mirror-agent reporting an api-error and assert the
+  // sender's WS receives a system notification.
+
+  test("POST /api/mirror/api-error notifies the most recent sender", async () => {
+    const sender = await connect();
+    const receiver = await connect();
+    await registerAgent(sender, "proj:alice@laptop");
+    await registerAgent(receiver, "proj:bob@desktop");
+    // Drain register acks to clean state.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Sender → receiver. We don't care about delivery success here, only
+    // that the message.sent event lands in the EventLog with outcome=delivered.
+    const sendDone = waitForMessage(sender);
+    sender.send(
+      JSON.stringify({
+        action: "send",
+        to: "proj:bob@desktop",
+        content: "ping",
+        type: "message",
+        requestId: "send-1",
+      }),
+    );
+    await sendDone;
+
+    // Capture the next inbound on the sender — should be the system
+    // notification routed by the api-error handler.
+    const notifyP = waitForMessage(sender, 3000);
+
+    const resp = await fetch(`${baseUrl}/api/mirror/api-error`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sid: "test-sid",
+        owner_agent: "proj:bob@desktop",
+        uuid: "rec-uuid-1",
+        status: 400,
+        text: "API Error: 400 diagnostics.previous_message_id",
+        ts: Date.now(),
+      }),
+    });
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as Msg;
+    expect(body.ok).toBe(true);
+    expect(body.notified).toEqual(["proj:alice@laptop"]);
+
+    const notification = await notifyP;
+    expect(notification.event).toBe("message");
+    expect(notification.from).toBe("system@claude-net");
+    expect(notification.to).toBe("proj:alice@laptop");
+    expect(typeof notification.content).toBe("string");
+    expect(notification.content).toContain("proj:bob@desktop");
+    expect(notification.content).toContain("API Error: 400");
+  });
+
+  test("POST /api/mirror/api-error returns ok with no notify when no recent sender matches", async () => {
+    const resp = await fetch(`${baseUrl}/api/mirror/api-error`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sid: "test-sid-2",
+        owner_agent: "proj:zelda@unknown-host",
+        uuid: "rec-uuid-2",
+        status: 529,
+        text: "Overloaded",
+        ts: Date.now(),
+      }),
+    });
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as Msg;
+    expect(body.ok).toBe(true);
+    expect(body.notified).toEqual([]);
+  });
+
+  test("POST /api/mirror/api-error with non-object body returns 400", async () => {
+    const resp = await fetch(`${baseUrl}/api/mirror/api-error`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify("not-an-object"),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.error).toBeTruthy();
+  });
+});
+
+// ── correlateRecentSender (pure helper) ─────────────────────────────────
+// Direct unit tests so the substring-matching logic doesn't require a
+// running hub. Each test owns its own EventLog.
+
+describe("correlateRecentSender", () => {
+  test("returns the most recent sender that sent to a matching `to`", () => {
+    const log = new EventLog(100);
+    const now = Date.now();
+    // Older message — should NOT be returned.
+    log.push("message.sent", {
+      from: "proj:eve@old",
+      to: "proj:bob@desktop",
+      messageId: "m-old",
+      outcome: "delivered",
+      elapsedMs: 5,
+    });
+    log.push("message.sent", {
+      from: "proj:alice@laptop",
+      to: "proj:bob@desktop",
+      messageId: "m-new",
+      outcome: "delivered",
+      elapsedMs: 5,
+    });
+    const result = correlateRecentSender(log, "proj:bob@desktop", now - 60_000);
+    expect(result).toEqual(["proj:alice@laptop"]);
+  });
+
+  test("matches partial `to` forms against the canonical owner_agent", () => {
+    const log = new EventLog(100);
+    const now = Date.now();
+    log.push("message.sent", {
+      from: "proj:alice@laptop",
+      to: "bob",
+      messageId: "m1",
+      outcome: "delivered",
+      elapsedMs: 5,
+    });
+    expect(
+      correlateRecentSender(log, "proj:bob@desktop", now - 60_000),
+    ).toEqual(["proj:alice@laptop"]);
+  });
+
+  test("skips NAK'd sends — they never touched the recipient", () => {
+    const log = new EventLog(100);
+    const now = Date.now();
+    log.push("message.sent", {
+      from: "proj:alice@laptop",
+      to: "proj:bob@desktop",
+      messageId: null,
+      outcome: "nak",
+      reason: "no-channel",
+      elapsedMs: 5,
+    });
+    expect(
+      correlateRecentSender(log, "proj:bob@desktop", now - 60_000),
+    ).toEqual([]);
+  });
+
+  test("ignores `to` values that don't match the owner_agent at all", () => {
+    const log = new EventLog(100);
+    const now = Date.now();
+    log.push("message.sent", {
+      from: "proj:alice@laptop",
+      to: "proj:carol@elsewhere",
+      messageId: "m1",
+      outcome: "delivered",
+      elapsedMs: 5,
+    });
+    expect(
+      correlateRecentSender(log, "proj:bob@desktop", now - 60_000),
+    ).toEqual([]);
+  });
+
+  test("returns empty when owner_agent is empty", () => {
+    const log = new EventLog(100);
+    log.push("message.sent", {
+      from: "x:y@z",
+      to: "anyone",
+      messageId: "m",
+      outcome: "delivered",
+      elapsedMs: 0,
+    });
+    expect(correlateRecentSender(log, "", Date.now() - 1000)).toEqual([]);
   });
 });

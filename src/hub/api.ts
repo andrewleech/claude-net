@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { Elysia } from "elysia";
 import type { EventLog } from "./event-log";
 import type { HostRegistry } from "./host-registry";
+import type { MirrorRegistry } from "./mirror";
 import { RateLimiter } from "./rate-limit";
 import type { Registry } from "./registry";
 import type { Router } from "./router";
@@ -14,6 +15,10 @@ export interface ApiDeps {
   startedAt: Date;
   eventLog: EventLog;
   hostRegistry?: HostRegistry;
+  /** Optional — used by the /mirror/api-error route to look up a
+   *  session's owner_agent. When omitted (e.g. older tests) the route
+   *  falls back to a body-supplied owner_agent. */
+  mirrorRegistry?: MirrorRegistry;
 }
 
 const EVENTS_DEFAULT_LIMIT = 100;
@@ -27,6 +32,77 @@ const AGENT_LOG_TAIL_BYTES = 256_000;
 
 // 5 crash reports per minute per remote IP.
 const agentCrashLimiter = new RateLimiter({ max: 5, windowMs: 60_000 });
+
+// API-error reports from mirror-agents. Generous burst (the JSONL tail
+// can replay a few records on a busy session) but capped so a runaway
+// loop on the receiver doesn't fan out unbounded notifications.
+const apiErrorLimiter = new RateLimiter({ max: 30, windowMs: 60_000 });
+
+/**
+ * Maximum age of a `message.sent` event we'll correlate to an incoming
+ * api-error report. The receiver's CC makes its next API call within
+ * seconds of receiving a message, so 60s is generous; older messages
+ * almost certainly aren't the trigger.
+ */
+const API_ERROR_CORRELATION_WINDOW_MS = 60_000;
+
+/**
+ * Cooldown between system notifications routed to the same (sender,
+ * recipient) pair for api-error reports. Without this, a receiver
+ * stuck in an API-error loop would page the same sender for every
+ * synthetic record they generate.
+ */
+const API_ERROR_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** Map of "sender|ownerAgent" → last-notify epoch ms. Used to enforce
+ *  API_ERROR_NOTIFY_COOLDOWN_MS. Module-level so the cooldown survives
+ *  per-request re-entry; bounded only by the universe of agent pairs
+ *  on a given hub. */
+const apiErrorNotifyCooldown = new Map<string, number>();
+
+/**
+ * Identify recent senders to `ownerAgent` worth notifying about an
+ * api-error report. The event log stores `to` as the sender originally
+ * passed it (full, partial, or plain), so we substring-match against the
+ * canonical owner_agent and its three parts. Returns at most one
+ * sender — the most recent — to keep the notification fan-out
+ * deterministic and well-targeted.
+ */
+export function correlateRecentSender(
+  eventLog: EventLog,
+  ownerAgent: string,
+  sinceMs: number,
+): string[] {
+  if (!ownerAgent) return [];
+  const events = eventLog.query({ event: "message.sent", since: sinceMs });
+  // Walk from most recent backwards; pick the latest delivered send to a
+  // matching `to`. Skip NAKs (outcome === "nak") — those didn't actually
+  // touch the recipient's CC, so they can't have triggered the error.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (!ev) continue;
+    if (ev.data.outcome !== "delivered") continue;
+    const toRaw = typeof ev.data.to === "string" ? ev.data.to : "";
+    const fromRaw = typeof ev.data.from === "string" ? ev.data.from : "";
+    if (!toRaw || !fromRaw) continue;
+    if (toMatchesOwner(toRaw, ownerAgent)) {
+      return [fromRaw];
+    }
+  }
+  return [];
+}
+
+function toMatchesOwner(to: string, owner: string): boolean {
+  if (to === owner) return true;
+  const [sessionPart, rest] = owner.split(":", 2);
+  if (!sessionPart || !rest) return false;
+  const [userPart, hostPart] = rest.split("@", 2);
+  // Canonical partial forms the sender might have used.
+  if (to === `${sessionPart}:${userPart}`) return true;
+  if (to === `${userPart}@${hostPart}`) return true;
+  if (to === sessionPart || to === userPart || to === hostPart) return true;
+  return false;
+}
 
 function parseOptionalNumber(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
@@ -42,7 +118,15 @@ function remoteKeyFor(request: Request): string {
 }
 
 export function apiPlugin(deps: ApiDeps): Elysia {
-  const { registry, teams, router, startedAt, hostRegistry, eventLog } = deps;
+  const {
+    registry,
+    teams,
+    router,
+    startedAt,
+    hostRegistry,
+    eventLog,
+    mirrorRegistry,
+  } = deps;
 
   return (
     new Elysia({ prefix: "/api" })
@@ -239,6 +323,89 @@ export function apiPlugin(deps: ApiDeps): Elysia {
               : new Date().toISOString(),
         });
         return { ok: true };
+      })
+
+      // POST /api/mirror/api-error — mirror-agent reports a receiver-side
+      // Claude Code API error (the synthetic `isApiErrorMessage: true`
+      // record CC writes when its upstream Anthropic call fails). Hub
+      // correlates to the most recent inbound message routed to that
+      // session's owner_agent and routes a system notification back to
+      // the sender so they know their message wasn't processed.
+      .post("/mirror/api-error", ({ body, set, request }) => {
+        const remote = remoteKeyFor(request);
+        if (!apiErrorLimiter.allow(remote)) {
+          const waitMs = apiErrorLimiter.retryAfterMs(remote);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return { error: "Rate limit exceeded." };
+        }
+        const payload = body as Record<string, unknown>;
+        if (!payload || typeof payload !== "object") {
+          set.status = 400;
+          return { error: "Expected JSON body" };
+        }
+        const sid = typeof payload.sid === "string" ? payload.sid : "";
+        const status =
+          typeof payload.status === "number" ? payload.status : null;
+        const text = typeof payload.text === "string" ? payload.text : "";
+        const recUuid = typeof payload.uuid === "string" ? payload.uuid : "";
+        const recTs =
+          typeof payload.ts === "number" && Number.isFinite(payload.ts)
+            ? payload.ts
+            : Date.now();
+        // owner_agent is supplied by the agent so we don't strictly need
+        // mirrorRegistry to look it up, but we prefer the registry's view
+        // when available — it reflects the latest rename.
+        let ownerAgent =
+          typeof payload.owner_agent === "string" ? payload.owner_agent : "";
+        if (sid && mirrorRegistry) {
+          const found = mirrorRegistry.getSession(sid);
+          if (found.ok) ownerAgent = found.entry.ownerAgent;
+        }
+
+        eventLog.push("mirror.api_error", {
+          sid,
+          ownerAgent,
+          status,
+          text,
+          uuid: recUuid,
+          ts: recTs,
+        });
+
+        // Correlate to the most recent message.sent event delivered to
+        // this owner_agent within the window. The event log stores the
+        // unresolved `to` value the sender passed, so we filter by
+        // substring against the canonical owner_agent rather than exact
+        // match — catches "alice", "alice@laptop", and the full form.
+        const candidates = correlateRecentSender(
+          eventLog,
+          ownerAgent,
+          recTs - API_ERROR_CORRELATION_WINDOW_MS,
+        );
+        const cooldownNow = Date.now();
+        for (const senderName of candidates) {
+          const key = `${senderName}|${ownerAgent}`;
+          const last = apiErrorNotifyCooldown.get(key) ?? 0;
+          if (cooldownNow - last < API_ERROR_NOTIFY_COOLDOWN_MS) continue;
+          apiErrorNotifyCooldown.set(key, cooldownNow);
+
+          const summary =
+            text.length > 0 ? text : `API error (status ${status ?? "?"})`;
+          const notifyContent = `Your recent claude-net message to ${ownerAgent} may not have been processed: their Claude Code reported an upstream API error after receiving it.\n\nError text:\n${summary}\n\nThis is automated correlation by the hub; treat it as a strong signal rather than proof. The sender identity "system@claude-net" is reserved per the documented trust model.`;
+          const outcome = router.routeSystemNotification(
+            senderName,
+            notifyContent,
+          );
+          eventLog.push("mirror.api_error.notified", {
+            to: senderName,
+            ownerAgent,
+            outcome: outcome.outcome,
+            ...(outcome.reason ? { reason: outcome.reason } : {}),
+          });
+        }
+        return { ok: true, notified: candidates };
       })
 
       // GET /api/mirror/agent-log — serve the last N lines of the

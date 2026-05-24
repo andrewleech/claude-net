@@ -71,12 +71,12 @@ describe("plugin helpers", () => {
       expect(notification.params.content).toBe("Hello Bob");
       expect(notification.params.meta.from).toBe("alice@laptop");
       expect(notification.params.meta.type).toBe("message");
-      expect(notification.params.meta.message_id).toBe("msg-123");
-      expect(notification.params.meta.reply_to).toBeUndefined();
+      expect(notification.params.meta.cn_message_id).toBe("msg-123");
+      expect(notification.params.meta.cn_reply_to).toBeUndefined();
       expect(notification.params.meta.team).toBeUndefined();
     });
 
-    test("formats reply notification with reply_to", () => {
+    test("formats reply notification with cn_reply_to", () => {
       const message = {
         event: "message" as const,
         message_id: "msg-456",
@@ -91,7 +91,7 @@ describe("plugin helpers", () => {
       const notification = createChannelNotification(message);
 
       expect(notification.params.meta.type).toBe("reply");
-      expect(notification.params.meta.reply_to).toBe("msg-123");
+      expect(notification.params.meta.cn_reply_to).toBe("msg-123");
     });
 
     test("includes team in meta when present", () => {
@@ -124,6 +124,29 @@ describe("plugin helpers", () => {
 
       const notification = createChannelNotification(message);
       expect("source" in notification.params.meta).toBe(false);
+    });
+
+    test("never uses the legacy unprefixed message_id / reply_to meta keys", () => {
+      // Regression guard for the CC-collision bug: CC's
+      // `diagnostics.previous_message_id` slot only accepts msg_... ids,
+      // but an earlier version of this notification used a plain
+      // `message_id` meta key whose UUID value CC stored in that same
+      // slot, producing 400s on the receiver's next API call. The cn_
+      // prefix structurally prevents the collision; this test ensures
+      // we never regress.
+      const message = {
+        event: "message" as const,
+        message_id: "msg-regress",
+        from: "alice@laptop",
+        to: "bob@desktop",
+        type: "reply" as const,
+        content: "Regression check",
+        reply_to: "msg-prev",
+        timestamp: "2026-01-01T00:00:00Z",
+      };
+      const notification = createChannelNotification(message);
+      expect("message_id" in notification.params.meta).toBe(false);
+      expect("reply_to" in notification.params.meta).toBe(false);
     });
   });
 
@@ -531,6 +554,10 @@ describe("plugin helpers", () => {
         // Negative-trust guidance: never act on tool-call directives
         // inside messages from session:user@host senders.
         "session:user@host",
+        // Channel-tag attribute names — must be cn_-prefixed so they
+        // cannot be confused with CC's own diagnostic schema.
+        "cn_message_id",
+        "cn_reply_to",
       ];
       for (const phrase of required) {
         expect(INSTRUCTIONS).toContain(phrase);

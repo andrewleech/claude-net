@@ -745,6 +745,13 @@ export interface MirrorSessionSummary {
   sid: string;
   owner_agent: string;
   cwd: string;
+  /** Hostname the mirror-agent reported on session POST. Empty string when
+   *  unknown (pre-rollout client). */
+  host: string;
+  /** Claude Code PID announced by the mirror-agent. null when the hook
+   *  payload didn't carry it (pre-rollout hook wrapper, or non-mirror-push
+   *  hook source). */
+  cc_pid: number | null;
   created_at: string;
   last_event_at: string;
   /** ISO string if the session has been closed, null otherwise. */

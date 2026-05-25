@@ -5276,13 +5276,42 @@
       promptBannerEl.setAttribute('hidden', '');
       promptTextEl.textContent = '';
     }
+    // Marker emitted by the mirror-agent on tmux-inject failure when it
+    // appends the dropped prompt for recovery. Keep in sync with
+    // src/mirror-agent/agent.ts handleInject.
+    var INJECT_FAILED_PREFIX = 'inject failed (';
+    var DROPPED_PROMPT_MARKER = '\n\n--- dropped prompt (copy to retry) ---\n';
+
     function onNotificationEvent(text, source) {
       // Audit events emitted by the mirror-agent ("inject from web: …",
       // "paste from web: …", "stop from …", "tmux pane reported: …")
       // carry source="mirror-agent" and often quote raw user input.
       // Those must not fire the permission banner — it's for Claude
       // Code's own Notification hook only.
-      if (source === 'mirror-agent') return;
+      if (source === 'mirror-agent') {
+        // The hub returned 2xx and the textarea cleared, but the actual
+        // tmux send-keys may still have failed downstream — that surfaces
+        // here as an audit notification carrying the original prompt. If
+        // we recognise the marker and the compose box is empty, restore
+        // the text so the user doesn't have to retype it.
+        if (
+          composeText &&
+          text &&
+          text.indexOf(INJECT_FAILED_PREFIX) === 0 &&
+          text.indexOf(DROPPED_PROMPT_MARKER) !== -1 &&
+          (composeText.value || '').length === 0
+        ) {
+          var idx = text.indexOf(DROPPED_PROMPT_MARKER);
+          var dropped = text.substring(idx + DROPPED_PROMPT_MARKER.length);
+          composeText.value = dropped;
+          if (composeErr) {
+            composeErr.className = 'mirror-compose-err';
+            composeErr.textContent =
+              'Inject failed — your prompt has been restored. Edit and retry.';
+          }
+        }
+        return;
+      }
       if (!text || !PROMPT_RE.test(text)) return;
       showPromptBanner(text);
     }

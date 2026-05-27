@@ -7,3 +7,5 @@ bin/__pycache__/
 # request, and the Dockerfile pre-builds it at image time.
 bin/mirror-agent.bundle.js
 .claude/screens/
+.claude/scheduled_tasks.lock
+.playwright-mcp/

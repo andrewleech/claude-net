@@ -1690,10 +1690,24 @@ const injectMinuteLimiter = new RateLimiter({
   windowMs: 60_000,
 });
 
-// 30 session creations per 5 minutes per remote IP. Idempotent re-POSTs
-// for an already-known sid bypass this — see route handler.
+// Session-create rate limit per remote IP. Idempotent re-POSTs for an
+// already-known sid bypass this — see route handler. The cap needs to
+// be large enough to absorb a recovery storm after hub restart: every
+// mirror-agent on the host POSTs its existing sid, all of which look
+// "new" to the freshly-booted hub. With 25+ agents per host the old
+// 30/5min cap left two-thirds of them stuck in 30s-backoff loops until
+// the recovery-max-attempts ceiling kicked in and the session vanished
+// from the dashboard entirely. 200/5min covers a realistic
+// power-user host while still throttling adversarial probe storms
+// (worst sustained rate ~40 fresh sids/min). Overridable via
+// `CLAUDE_NET_MIRROR_SESSION_CREATE_MAX`.
+const SESSION_CREATE_MAX = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_SESSION_CREATE_MAX);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 200;
+})();
 const sessionCreateLimiter = new RateLimiter({
-  max: 30,
+  max: SESSION_CREATE_MAX,
   windowMs: 5 * 60_000,
 });
 

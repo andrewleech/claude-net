@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { checkExistingDaemon } from "@/mirror-agent/agent";
+import {
+  checkExistingDaemon,
+  evictIfPeerOwnsPortFile,
+} from "@/mirror-agent/agent";
 
 let stateDir = "";
 
@@ -84,5 +87,63 @@ describe("checkExistingDaemon", () => {
     }) as unknown as typeof fetch;
     await checkExistingDaemon(stateDir, fakeFetch);
     expect(calledUrl).toBe("http://127.0.0.1:4242/health");
+  });
+});
+
+describe("evictIfPeerOwnsPortFile", () => {
+  test("no-op when the port file is missing", async () => {
+    let exited = false;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fetch, ((_c: number) => {
+      exited = true;
+    }) as unknown as (code: number) => never);
+    expect(exited).toBe(false);
+  });
+
+  test("no-op when the port file names this same process", async () => {
+    fs.writeFileSync(portFile(), "8000");
+    let exited = false;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fetch, ((_c: number) => {
+      exited = true;
+    }) as unknown as (code: number) => never);
+    expect(exited).toBe(false);
+  });
+
+  test("exits when the file names a different healthy peer", async () => {
+    fs.writeFileSync(portFile(), "9999");
+    let exited = false;
+    let exitCode = -1;
+    const fakeFetch = (async (_url: string) => ({
+      ok: true,
+    })) as unknown as typeof fetch;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fakeFetch, ((c: number) => {
+      exited = true;
+      exitCode = c;
+    }) as unknown as (code: number) => never);
+    expect(exited).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+
+  test("does NOT exit when the named peer is unreachable", async () => {
+    fs.writeFileSync(portFile(), "9999");
+    let exited = false;
+    const fakeFetch = (async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof fetch;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fakeFetch, ((_c: number) => {
+      exited = true;
+    }) as unknown as (code: number) => never);
+    expect(exited).toBe(false);
+  });
+
+  test("does NOT exit when the named peer returns non-OK", async () => {
+    fs.writeFileSync(portFile(), "9999");
+    let exited = false;
+    const fakeFetch = (async () => ({
+      ok: false,
+    })) as unknown as typeof fetch;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fakeFetch, ((_c: number) => {
+      exited = true;
+    }) as unknown as (code: number) => never);
+    expect(exited).toBe(false);
   });
 });

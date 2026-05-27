@@ -27,7 +27,28 @@ import { RateLimiter } from "./rate-limit";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const INIT_TRANSCRIPT_WINDOW = 200;
-const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a closed session stays in the registry's in-memory map before
+ * being dropped. Default 1 hour — long enough for the user to revisit a
+ * transcript after close, short enough that orphan-swept gravestones
+ * don't accumulate in the dashboard sidebar. Was 24h originally; that
+ * was overkill for orphan-closed entries which have no user value.
+ * Overridable via `CLAUDE_NET_MIRROR_RETENTION_MS` env var.
+ */
+const DEFAULT_RETENTION_MS = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_RETENTION_MS);
+  if (Number.isFinite(raw) && raw >= 0) return raw;
+  return 60 * 60 * 1000;
+})();
+
+/**
+ * Age beyond which a session that has NEVER produced an event (i.e.
+ * lastEventAt === createdAt) is dropped. Catches probe-created sessions
+ * whose underlying Claude Code never fired a hook — these have no
+ * transcript and clutter the dashboard sidebar as "history: transcript_path
+ * unknown" entries. 5 min is well past the longest plausible startup gap.
+ */
+const DEFAULT_NEVER_ACTIVE_MS = 5 * 60 * 1000;
 /**
  * A session is considered "orphaned" when no daemon-agent WS has been
  * bound AND no events have arrived for this long. The sweeper closes
@@ -141,6 +162,11 @@ export interface MirrorRegistryOptions {
    * have seen no events for this long. 0 disables. Default 30 min.
    */
   orphanCloseMs?: number;
+  /**
+   * Drop sessions that have never produced an event and are older than
+   * this. 0 disables. Default 5 min. See `sweepNeverActive` for why.
+   */
+  neverActiveMs?: number;
 }
 
 // ── MirrorRegistry ────────────────────────────────────────────────────────
@@ -171,6 +197,7 @@ export class MirrorRegistry {
   private transcriptRing: number;
   private retentionMs: number;
   private orphanCloseMs: number;
+  private neverActiveMs: number;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
   /**
@@ -195,12 +222,13 @@ export class MirrorRegistry {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
     this.retentionMs = options?.retentionMs ?? DEFAULT_RETENTION_MS;
     this.orphanCloseMs = options?.orphanCloseMs ?? DEFAULT_ORPHAN_CLOSE_MS;
+    this.neverActiveMs = options?.neverActiveMs ?? DEFAULT_NEVER_ACTIVE_MS;
     this.store = options?.store ?? new NullStore();
-    if (this.orphanCloseMs > 0) {
-      this.orphanSweepTimer = setInterval(
-        () => this.sweepOrphans(),
-        ORPHAN_SWEEP_INTERVAL_MS,
-      );
+    if (this.orphanCloseMs > 0 || this.neverActiveMs > 0) {
+      this.orphanSweepTimer = setInterval(() => {
+        if (this.orphanCloseMs > 0) this.sweepOrphans();
+        if (this.neverActiveMs > 0) this.sweepNeverActive();
+      }, ORPHAN_SWEEP_INTERVAL_MS);
       if (
         this.orphanSweepTimer &&
         typeof this.orphanSweepTimer === "object" &&
@@ -212,20 +240,54 @@ export class MirrorRegistry {
   }
 
   /**
-   * Close sessions whose daemon-agent WS is absent AND whose last event
-   * is older than orphanCloseMs. Runs on a timer.
+   * Close + drop sessions whose last event is older than orphanCloseMs.
+   *
+   * Deliberately does NOT spare sessions with `entry.agent` bound — a
+   * mirror-agent process can die uncleanly and leave a half-open WS
+   * registered on the hub for a long time before Bun's idleTimeout
+   * notices. If no events have flowed in 30+ minutes, the session is
+   * effectively dead regardless of whether the WS handshake is "alive".
+   * Sessions whose CC is genuinely idle (alive but quiet) will re-open
+   * via createSession's restored-closed branch the next time a hook
+   * arrives — at the cost of a new in-memory entry for the same sid.
+   *
+   * Uses closeAndDrop instead of closeSession so the gravestone doesn't
+   * linger for the retention window — orphan-swept entries have no
+   * user value and the dashboard sidebar should clear them immediately.
    */
   private sweepOrphans(): void {
     const cutoff = Date.now() - this.orphanCloseMs;
     const victims: string[] = [];
     for (const entry of this.sessions.values()) {
       if (entry.closedAt) continue;
-      if (entry.agent) continue;
       if (entry.lastEventAt.getTime() > cutoff) continue;
       victims.push(entry.sid);
     }
     for (const sid of victims) {
-      this.closeSession(sid, "agent_timeout");
+      this.closeAndDrop(sid, "agent_timeout");
+    }
+  }
+
+  /**
+   * Close + drop sessions that have NEVER produced an event and are
+   * older than neverActiveMs. These are probe-created sessions whose
+   * underlying Claude Code never fired a hook — they hold no transcript
+   * and never will. Catching them separately from `sweepOrphans` matters
+   * because their `lastEventAt === createdAt` is preserved across the
+   * orphan-close window, so they otherwise linger until the eventual
+   * orphan sweep — meanwhile cluttering the dashboard.
+   */
+  private sweepNeverActive(): void {
+    const cutoff = Date.now() - this.neverActiveMs;
+    const victims: string[] = [];
+    for (const entry of this.sessions.values()) {
+      if (entry.closedAt) continue;
+      if (entry.lastEventAt.getTime() !== entry.createdAt.getTime()) continue;
+      if (entry.createdAt.getTime() > cutoff) continue;
+      victims.push(entry.sid);
+    }
+    for (const sid of victims) {
+      this.closeAndDrop(sid, "agent_timeout");
     }
   }
 
@@ -669,6 +731,29 @@ export class MirrorRegistry {
         );
       }
     }
+  }
+
+  /**
+   * Close + immediately remove a session from the registry, skipping
+   * the retention timer. Used by the sweep paths (orphan / never-active)
+   * where the session has no remaining user value and lingering it for
+   * the retention window would just clutter the dashboard sidebar.
+   *
+   * Distinct from `closeSession` because user-initiated closes (CC exit,
+   * /clear, /compact) still benefit from the retention window so the
+   * user can re-open the dashboard and look at the transcript.
+   */
+  closeAndDrop(
+    sid: string,
+    reason: "exit" | "agent_timeout" = "agent_timeout",
+  ): void {
+    this.closeSession(sid, reason);
+    const entry = this.sessions.get(sid);
+    if (entry?.retentionTimerId) {
+      clearTimeout(entry.retentionTimerId);
+      entry.retentionTimerId = null;
+    }
+    this.sessions.delete(sid);
   }
 
   listOwnedBy(ownerAgent: string): MirrorSessionSummary[] {

@@ -320,6 +320,16 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       log("idle shutdown");
       void stop();
     }
+    // Periodic singleton recheck. The startup checkExistingDaemon only
+    // runs once; processes that were started before the singleton-guard
+    // landed (or that won a startup race) keep running until something
+    // kills them. This converges duplicates to a single daemon: if the
+    // port file points at a different PID with a healthy /health, we are
+    // the duplicate — exit cleanly so the watchdog (if any) doesn't
+    // respawn. The port-file owner is unaffected.
+    void evictIfPeerOwnsPortFile(server.port, stateDir).catch((err: unknown) =>
+      log(`[singleton] recheck failed: ${String(err)}`),
+    );
   }, 30_000);
   if (typeof idleTimer === "object" && "unref" in idleTimer) {
     idleTimer.unref();
@@ -1459,6 +1469,49 @@ function removePortFile(stateDir: string): void {
     fs.unlinkSync(portFilePath(stateDir));
   } catch {
     // ignore
+  }
+}
+
+/**
+ * Periodic singleton check called from inside a running daemon. If the
+ * port file is owned by a DIFFERENT, healthy peer, this process exits
+ * (we are the duplicate). If the port file is missing or stale or
+ * already names this process, do nothing.
+ *
+ * Designed to converge the multi-daemon-zombie state that predates the
+ * startup singleton guard: existing duplicates die off naturally as
+ * each detects the registered owner on its next 30s tick.
+ */
+export async function evictIfPeerOwnsPortFile(
+  myPort: number,
+  stateDir: string,
+  fetchImpl: typeof fetch = fetch,
+  exit: (code: number) => never = process.exit,
+): Promise<void> {
+  const portFile = portFilePath(stateDir);
+  let registeredPort: number | null = null;
+  try {
+    const raw = fs.readFileSync(portFile, "utf8").trim();
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) registeredPort = parsed;
+  } catch {
+    return; // file missing — no peer to defer to
+  }
+  if (registeredPort === null || registeredPort === myPort) return;
+  // Different port registered — see if it's healthy.
+  try {
+    const res = await fetchImpl(`http://127.0.0.1:${registeredPort}/health`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (res.ok) {
+      process.stderr.write(
+        `[claude-net/mirror] [singleton] peer on port ${registeredPort} is healthy; exiting (my port ${myPort})\n`,
+      );
+      exit(0);
+    }
+  } catch {
+    // Peer unreachable — leave the port file alone; the next startup
+    // singleton check on someone else will deal with reclaiming it.
   }
 }
 

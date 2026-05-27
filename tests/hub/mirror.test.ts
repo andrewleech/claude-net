@@ -32,6 +32,7 @@ describe("MirrorRegistry", () => {
       transcriptRing: 50,
       retentionMs: 0,
       orphanCloseMs: 0,
+      neverActiveMs: 0,
     });
   });
 
@@ -868,47 +869,115 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("orphan sweep closes sessions that lost their agent + are stale", async () => {
-    // orphanCloseMs: 20 → sessions unbound from agent for >20ms get closed
-    // on the next sweep.
+  test("orphan sweep closes + drops stale sessions (no agent)", async () => {
+    // orphanCloseMs: 20 → sessions whose last event is >20ms ago get
+    // close+dropped on the next sweep. The session must vanish from the
+    // map immediately (no retention wait), since closeAndDrop is used.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
-      retentionMs: 0,
+      retentionMs: 60_000,
       orphanCloseMs: 20,
+      neverActiveMs: 0,
     });
     try {
       const r = quick.createSession("alice:u@h", "/home/alice");
       expect(r.ok).toBe(true);
       if (!r.ok) return;
       const sid = r.entry.sid;
-      // Back-date last_event_at so it looks stale.
       r.entry.lastEventAt = new Date(Date.now() - 60_000);
-      // No agent bound → meets the orphan criteria.
-      // Force a sweep by calling the private method via a cast.
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
-      expect(r.entry.closedAt).not.toBeNull();
+      // closeAndDrop is used so the entry is gone, not just closed.
+      expect(quick.hasSession(sid)).toBe(false);
     } finally {
       quick.stop();
     }
   });
 
-  test("orphan sweep spares sessions with a bound agent even if stale", () => {
+  test("orphan sweep does NOT spare stale sessions with a bound agent", () => {
+    // Regression guard: an earlier version of sweepOrphans spared
+    // sessions with entry.agent != null, on the theory that the WS was
+    // proof of life. In practice, zombie mirror-agent processes leave
+    // half-open WSes registered for hours, so stale beats agent-bound.
+    // Sessions with no events for orphanCloseMs MUST be swept regardless.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
-      retentionMs: 0,
+      retentionMs: 60_000,
       orphanCloseMs: 20,
+      neverActiveMs: 0,
     });
     try {
       const r = quick.createSession("bob:u@h", "/home/bob");
       if (!r.ok) return;
-      // Bind a fake agent.
+      const sid = r.entry.sid;
       r.entry.agent = {
         ws: { send: () => {} },
         wsIdentity: {},
       };
       r.entry.lastEventAt = new Date(Date.now() - 60_000);
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
-      expect(r.entry.closedAt).toBeNull();
+      expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("never-active sweep drops sessions that never received an event", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 20,
+    });
+    try {
+      const r = quick.createSession("probe:u@h", "/home/probe");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      // Back-date BOTH createdAt and lastEventAt — never-active sweep
+      // looks for entries where these are equal and the age beats the cutoff.
+      const longAgo = new Date(Date.now() - 60_000);
+      r.entry.createdAt = longAgo;
+      r.entry.lastEventAt = longAgo;
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("never-active sweep spares sessions that DID receive an event", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 20,
+    });
+    try {
+      const r = quick.createSession("active:u@h", "/home/active");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      // Created long ago AND received at least one event: lastEventAt > createdAt.
+      r.entry.createdAt = new Date(Date.now() - 60_000);
+      r.entry.lastEventAt = new Date(Date.now() - 30_000);
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(true);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("closeAndDrop removes the session from the map immediately", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000, // would otherwise hold the entry for 60s
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession("c:u@h", "/home/c");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      quick.closeAndDrop(sid);
+      expect(quick.hasSession(sid)).toBe(false);
     } finally {
       quick.stop();
     }

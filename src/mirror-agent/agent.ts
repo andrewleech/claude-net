@@ -479,20 +479,21 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
     }
 
-    // /clear handling. If any OTHER session shares this one's tmux pane
-    // it's a stale mirror from before a /clear — same claude process,
-    // new session_id — and every inject aimed at the stale sid would
-    // actually land in the current pane, confusing users. Close them.
-    if (ingested.tmuxPane) {
-      for (const other of sessions.values()) {
-        if (
-          other.sid !== sid &&
-          !other.closed &&
-          other.tmuxPane === ingested.tmuxPane
-        ) {
-          closeSession(other, "replaced-by-clear");
-        }
-      }
+    // /clear handling. A fresh session_id arrives for a Claude Code we
+    // already had a session for — the user issued /clear (or /compact,
+    // which also rotates session_id). The old mirror session never
+    // receives another hook, so without an explicit close it sits
+    // "open, agent-bound" forever: the hub's orphan sweep skips it
+    // because entry.agent is still set, and the dashboard shows it as
+    // a permanent gravestone.
+    for (const staleSid of findReplacedByClear(
+      sessions,
+      sid,
+      ingested.ccPid,
+      ingested.tmuxPane,
+    )) {
+      const stale = sessions.get(staleSid);
+      if (stale) closeSession(stale, "replaced-by-clear");
     }
 
     // Stop / SubagentStop fire at turn end and carry only the FINAL
@@ -1406,6 +1407,56 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 function toWsUrl(hubUrl: string, sid: string): string {
   const wsBase = hubUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
   return `${wsBase}/ws/mirror/${encodeURIComponent(sid)}?as=agent`;
+}
+
+/**
+ * Identify sessions that should be closed because a fresh session_id
+ * has arrived for the same Claude Code process — the user issued
+ * /clear (or /compact, which also rotates session_id). Without the
+ * explicit close, the old session sits "open, agent-bound" forever
+ * because the per-session WS stays attached even though no further
+ * hooks will ever target the old sid.
+ *
+ * Two identity signals, tried in order:
+ *   1. ccPid — strongest signal. Each Claude Code is one OS process;
+ *      fork-session siblings have distinct ccPids; --continue keeps
+ *      the same session_id so no rotation happens.
+ *   2. tmuxPane — fallback for hosts whose hook wrapper doesn't
+ *      inject CC_PID (pre-rollout clients), or for sessions whose
+ *      ccPid was never recorded.
+ *
+ * Exported pure for unit-testability — the real handler iterates the
+ * returned sids and calls closeSession on each.
+ */
+export interface ClearReplaceCandidate {
+  sid: string;
+  ccPid: number | null;
+  tmuxPane: string | null;
+  closed: boolean;
+}
+
+export function findReplacedByClear(
+  sessions:
+    | Iterable<ClearReplaceCandidate>
+    | Map<string, ClearReplaceCandidate>,
+  incomingSid: string,
+  incomingCcPid: number | undefined,
+  incomingTmuxPane: string | null | undefined,
+): string[] {
+  const iter = sessions instanceof Map ? sessions.values() : sessions;
+  const victims: string[] = [];
+  const ccPidUsable =
+    typeof incomingCcPid === "number" && Number.isFinite(incomingCcPid);
+  for (const s of iter) {
+    if (s.closed) continue;
+    if (s.sid === incomingSid) continue;
+    const matchByPid = ccPidUsable && s.ccPid === incomingCcPid;
+    const matchByPane = !!incomingTmuxPane && s.tmuxPane === incomingTmuxPane;
+    if (matchByPid || matchByPane) {
+      victims.push(s.sid);
+    }
+  }
+  return victims;
 }
 
 /**

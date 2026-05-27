@@ -100,19 +100,44 @@ function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
     );
     return false;
   }
-  // Inject the hub version into the bundle so the mirror-agent can detect
-  // version skew at runtime. The placeholder appears in BOTH agent.ts (the
-  // MIRROR_BUILD_HASH constant) and host-channel.ts (the dev-mode-skip guard
-  // in onVersionMismatch), so use replaceAll — String.replace would only
-  // catch one and leave the other as the literal "__MIRROR_BUILD_HASH__",
-  // causing every host_registered to look like a version mismatch and
-  // trigger a self-update loop.
   if (commitHash) {
     const bundle = readFileSync(dest, "utf8");
-    writeFileSync(dest, bundle.replaceAll("__MIRROR_BUILD_HASH__", commitHash));
+    writeFileSync(dest, substituteBuildHash(bundle, commitHash));
   }
   bundleBuilt = true;
   return true;
+}
+
+/**
+ * Substitute the build hash into a mirror-agent bundle. The placeholder
+ * `__MIRROR_BUILD_HASH__` appears in BOTH agent.ts (the MIRROR_BUILD_HASH
+ * constant) AND host-channel.ts (the dev-mode-skip guard inside
+ * onVersionMismatch). Surgical substitution: only replace the assignment
+ * in agent.ts.
+ *
+ * The skip guard's literal MUST stay intact so the runtime check
+ * `localVersion !== "__MIRROR_BUILD_HASH__"` can fire — in a built bundle,
+ * localVersion gets the real commit hash via the substituted constant,
+ * so the check is true and onVersionMismatch fires when
+ * localVersion !== hubVersion (i.e. the bundle is out of date).
+ *
+ * An earlier version of this code used `bundle.replaceAll(...)`, which
+ * clobbered both occurrences and left the guard as
+ * `localVersion !== "<commit>"` — permanently false because localVersion
+ * equals that same commit. Net effect: silently disabled self-update for
+ * every bundle built after the version-check landed in 62eb27d.
+ */
+export function substituteBuildHash(
+  bundle: string,
+  commitHash: string,
+): string {
+  const assignment = /MIRROR_BUILD_HASH\s*=\s*"__MIRROR_BUILD_HASH__"/;
+  if (!assignment.test(bundle)) {
+    process.stderr.write(
+      "[claude-net] bin-server: MIRROR_BUILD_HASH assignment not found in bundle — version check will be inert\n",
+    );
+  }
+  return bundle.replace(assignment, `MIRROR_BUILD_HASH = "${commitHash}"`);
 }
 
 export function binServerPlugin(deps: BinServerDeps): Elysia {

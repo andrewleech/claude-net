@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { binServerPlugin } from "@/hub/bin-server";
+import { binServerPlugin, substituteBuildHash } from "@/hub/bin-server";
 import { Elysia } from "elysia";
 
 describe("bin-server /bin/:name", () => {
@@ -53,5 +53,58 @@ describe("bin-server /bin/:name", () => {
     // but the asset name must match a whitelist key exactly.
     const r1 = await fetch(`${baseUrl}/bin/..%2fpackage.json`);
     expect(r1.status).toBe(404);
+  });
+});
+
+describe("substituteBuildHash", () => {
+  // Regression guard for the silently-broken self-update bug. An earlier
+  // version of bin-server used bundle.replaceAll("__MIRROR_BUILD_HASH__", x),
+  // which clobbered BOTH the MIRROR_BUILD_HASH constant AND the dev-mode-
+  // skip guard's literal. With both replaced to the same hash, the runtime
+  // check `localVersion !== "<hash>"` became permanently false (because
+  // localVersion equals that same hash), and onVersionMismatch never fired
+  // for any built bundle.
+  test("replaces the MIRROR_BUILD_HASH constant assignment", () => {
+    const input = `const MIRROR_BUILD_HASH = "__MIRROR_BUILD_HASH__";`;
+    const out = substituteBuildHash(input, "deadbeef");
+    expect(out).toContain('MIRROR_BUILD_HASH = "deadbeef"');
+    expect(out).not.toContain('"__MIRROR_BUILD_HASH__"');
+  });
+
+  test("leaves the dev-mode-skip guard's literal placeholder intact", () => {
+    // Realistic bundle excerpt: agent.ts's constant + host-channel.ts's guard
+    // both end up in the same bundle. Only the constant should be substituted.
+    const input = `
+      const MIRROR_BUILD_HASH = "__MIRROR_BUILD_HASH__";
+      // ... later in host-channel.ts ...
+      if (opts.localVersion && opts.localVersion !== "__MIRROR_BUILD_HASH__" && opts.localVersion !== hubVersion) {
+        opts.onVersionMismatch?.(hubVersion);
+      }
+    `;
+    const out = substituteBuildHash(input, "1e2881f");
+    expect(out).toMatch(/MIRROR_BUILD_HASH\s*=\s*"1e2881f"/);
+    expect(out).toContain('opts.localVersion !== "__MIRROR_BUILD_HASH__"');
+  });
+
+  test("no-op when the constant assignment is absent", () => {
+    // Defensive: if the bundle structure changes upstream (Bun renames the
+    // constant, for example), substitution returns the input unchanged
+    // rather than silently writing a mangled file.
+    const input = `const Other = "__MIRROR_BUILD_HASH__";`;
+    const out = substituteBuildHash(input, "abc1234");
+    expect(out).toBe(input);
+  });
+
+  test("only replaces ONCE — multiple constants would be a structural error", () => {
+    // String.replace (not replaceAll) by design: the constant should appear
+    // exactly once in any built bundle. If it ever appears twice, that's a
+    // bug upstream and we'd rather leave it visible than silently double-write.
+    const input = `
+      const MIRROR_BUILD_HASH = "__MIRROR_BUILD_HASH__";
+      const MIRROR_BUILD_HASH = "__MIRROR_BUILD_HASH__";
+    `;
+    const out = substituteBuildHash(input, "xyz");
+    const matches = out.match(/MIRROR_BUILD_HASH\s*=\s*"xyz"/g) ?? [];
+    expect(matches.length).toBe(1);
   });
 });

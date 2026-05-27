@@ -893,12 +893,12 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("orphan sweep does NOT spare stale sessions with a bound agent", () => {
-    // Regression guard: an earlier version of sweepOrphans spared
-    // sessions with entry.agent != null, on the theory that the WS was
-    // proof of life. In practice, zombie mirror-agent processes leave
-    // half-open WSes registered for hours, so stale beats agent-bound.
-    // Sessions with no events for orphanCloseMs MUST be swept regardless.
+  test("orphan sweep spares stale sessions with a bound agent", () => {
+    // Bun closes WSes silent for 120s, so a truly dead agent loses its
+    // binding within ~2 min and becomes orphan-sweepable then. Until
+    // then, a bound WS proves the agent is alive — possibly hosting an
+    // idle CC session whose user just stopped typing. Sweeping those
+    // would tear down legitimate sidebar entries.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -915,13 +915,13 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       };
       r.entry.lastEventAt = new Date(Date.now() - 60_000);
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
-      expect(quick.hasSession(sid)).toBe(false);
+      expect(quick.hasSession(sid)).toBe(true);
     } finally {
       quick.stop();
     }
   });
 
-  test("never-active sweep drops sessions that never received an event", () => {
+  test("never-active sweep drops probe-orphaned sessions (no agent)", () => {
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -937,8 +937,37 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       const longAgo = new Date(Date.now() - 60_000);
       r.entry.createdAt = longAgo;
       r.entry.lastEventAt = longAgo;
+      // No agent bound — simulates probe-orphaned-at-birth.
       (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
       expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("never-active sweep spares bound sessions even with no events ever", () => {
+    // Idle CC session: agent process alive, user hasn't typed yet.
+    // createdAt == lastEventAt and arbitrarily old — but the bound
+    // agent WS proves the session is legitimately live.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 20,
+    });
+    try {
+      const r = quick.createSession("idle:u@h", "/home/idle");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      const longAgo = new Date(Date.now() - 60_000);
+      r.entry.createdAt = longAgo;
+      r.entry.lastEventAt = longAgo;
+      r.entry.agent = {
+        ws: { send: () => {} },
+        wsIdentity: {},
+      };
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(true);
     } finally {
       quick.stop();
     }

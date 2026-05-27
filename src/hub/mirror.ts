@@ -240,26 +240,26 @@ export class MirrorRegistry {
   }
 
   /**
-   * Close + drop sessions whose last event is older than orphanCloseMs.
+   * Close + drop sessions whose daemon-agent WS has been unbound AND
+   * whose last event is older than orphanCloseMs.
    *
-   * Deliberately does NOT spare sessions with `entry.agent` bound — a
-   * mirror-agent process can die uncleanly and leave a half-open WS
-   * registered on the hub for a long time before Bun's idleTimeout
-   * notices. If no events have flowed in 30+ minutes, the session is
-   * effectively dead regardless of whether the WS handshake is "alive".
-   * Sessions whose CC is genuinely idle (alive but quiet) will re-open
-   * via createSession's restored-closed branch the next time a hook
-   * arrives — at the cost of a new in-memory entry for the same sid.
+   * The `entry.agent` guard matters: a bound WS means there's a live
+   * mirror-agent process still pinging this session's WS every 5s. Bun
+   * auto-closes WSes silent for 120s, so a truly dead agent loses its
+   * binding within ~2 min — at which point this sweep can pick the
+   * session up. Sweeping bound sessions would prematurely kill
+   * legitimate idle CC sessions whose user has stopped typing.
    *
-   * Uses closeAndDrop instead of closeSession so the gravestone doesn't
-   * linger for the retention window — orphan-swept entries have no
-   * user value and the dashboard sidebar should clear them immediately.
+   * Uses closeAndDrop so the gravestone doesn't linger for the
+   * retention window — orphan-swept entries are user-invisible and
+   * the dashboard sidebar should clear them immediately.
    */
   private sweepOrphans(): void {
     const cutoff = Date.now() - this.orphanCloseMs;
     const victims: string[] = [];
     for (const entry of this.sessions.values()) {
       if (entry.closedAt) continue;
+      if (entry.agent) continue;
       if (entry.lastEventAt.getTime() > cutoff) continue;
       victims.push(entry.sid);
     }
@@ -269,19 +269,24 @@ export class MirrorRegistry {
   }
 
   /**
-   * Close + drop sessions that have NEVER produced an event and are
-   * older than neverActiveMs. These are probe-created sessions whose
-   * underlying Claude Code never fired a hook — they hold no transcript
-   * and never will. Catching them separately from `sweepOrphans` matters
-   * because their `lastEventAt === createdAt` is preserved across the
-   * orphan-close window, so they otherwise linger until the eventual
-   * orphan sweep — meanwhile cluttering the dashboard.
+   * Close + drop sessions that have NEVER produced an event AND are
+   * older than neverActiveMs AND have no agent bound. Catches
+   * probe-created sessions whose underlying Claude Code died before
+   * any hook flowed (orphaned at birth), separately from `sweepOrphans`
+   * because their `lastEventAt === createdAt` means even after
+   * orphanCloseMs they look "fresh" by lastEventAt-only criteria.
+   *
+   * Skips bound sessions for the same reason `sweepOrphans` does: an
+   * idle but alive CC session has agent != null and (createdAt ==
+   * lastEventAt) until the user types something. Sweeping those would
+   * tear down legitimate sessions visible in the dashboard sidebar.
    */
   private sweepNeverActive(): void {
     const cutoff = Date.now() - this.neverActiveMs;
     const victims: string[] = [];
     for (const entry of this.sessions.values()) {
       if (entry.closedAt) continue;
+      if (entry.agent) continue;
       if (entry.lastEventAt.getTime() !== entry.createdAt.getTime()) continue;
       if (entry.createdAt.getTime() > cutoff) continue;
       victims.push(entry.sid);
@@ -739,6 +744,14 @@ export class MirrorRegistry {
    * where the session has no remaining user value and lingering it for
    * the retention window would just clutter the dashboard sidebar.
    *
+   * Force-closes any bound agent WS so the mirror-agent on the other
+   * side notices: without this, the agent keeps pinging a sid the hub
+   * no longer knows about, its local SessionState stays stuck in
+   * "open" state, and onSessionProbe later skips re-creation because
+   * the local Map still has a session for that ccPid. With the close,
+   * the agent's HubClient.onClose fires recoverSession → POST
+   * createSession → hub re-creates fresh entry with the same sid.
+   *
    * Distinct from `closeSession` because user-initiated closes (CC exit,
    * /clear, /compact) still benefit from the retention window so the
    * user can re-open the dashboard and look at the transcript.
@@ -747,13 +760,25 @@ export class MirrorRegistry {
     sid: string,
     reason: "exit" | "agent_timeout" = "agent_timeout",
   ): void {
-    this.closeSession(sid, reason);
+    // Capture agent.close BEFORE closeSession runs — closeSession may
+    // null out entry.agent depending on retention timing, but
+    // closeAndDrop must always disconnect any still-bound mirror-agent
+    // so the per-session WS recovers via reconnect+recreate.
     const entry = this.sessions.get(sid);
+    const agentClose = entry?.agent?.close;
+    this.closeSession(sid, reason);
     if (entry?.retentionTimerId) {
       clearTimeout(entry.retentionTimerId);
       entry.retentionTimerId = null;
     }
     this.sessions.delete(sid);
+    if (agentClose) {
+      try {
+        agentClose();
+      } catch {
+        // ignore — the agent will notice on its next ping if it didn't already
+      }
+    }
   }
 
   listOwnedBy(ownerAgent: string): MirrorSessionSummary[] {

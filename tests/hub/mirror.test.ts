@@ -778,7 +778,9 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
   test("rate limiter still applies to bursts of new sids", async () => {
     // Sanity check that the bypass only fires for known sids: a flood of
     // distinct sids must still be capped by the limiter so abuse is
-    // throttled (the limiter is keyed on remote, default 30 per 5 min).
+    // throttled (default 200/5min — see SESSION_CREATE_MAX). Send well
+    // past the cap so the test stays robust if the default is bumped
+    // moderately upward in future.
     _resetSessionCreateLimiterForTest();
     const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
     const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
@@ -788,7 +790,7 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
 
     try {
       const results = await Promise.all(
-        Array.from({ length: 60 }, (_, i) =>
+        Array.from({ length: 250 }, (_, i) =>
           fetch(`http://localhost:${port}/api/mirror/session`, {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -804,7 +806,7 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
         acc[r.status] = (acc[r.status] ?? 0) + 1;
         return acc;
       }, {});
-      // Expect at least one 200 (the first 30) and at least one 429.
+      // Expect at least one 200 (under the cap) and at least one 429 (past it).
       expect((statusCount[200] ?? 0) > 0).toBe(true);
       expect((statusCount[429] ?? 0) > 0).toBe(true);
     } finally {

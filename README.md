@@ -194,7 +194,7 @@ Large pastes (bigger than the `/inject` cap) auto-route to a `/paste` endpoint: 
 
 **TLS.** Set `CLAUDE_NET_TLS_CERT` and `CLAUDE_NET_TLS_KEY` on the hub and it serves HTTPS/WSS on the same port; mirror URLs rewrite to `https://`.
 
-**Rate limits.** `POST /session` caps at 30 per 5 minutes per remote IP; `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
+**Rate limits.** `POST /session` caps at `CLAUDE_NET_MIRROR_SESSION_CREATE_MAX` (default 200) per 5 minutes per remote IP — idempotent re-POSTs for an already-known sid bypass this. `/inject` caps at one per 250ms plus `CLAUDE_NET_MIRROR_INJECT_RPM` (default 20) per minute. 429 responses include `Retry-After`.
 
 **Upgrading.** The mirror-agent daemon is long-lived and the `claude-channels` launcher only probes `/health` (not version) before reusing it. If you update the hub — especially any change under `src/mirror-agent/` — the previously-spawned daemon keeps running the old code and the dashboard shows `NO MIRROR` on every session. Fix with one command:
 
@@ -248,6 +248,8 @@ Full spec: [`docs/CLAUDE_NET_SPEC.md`](docs/CLAUDE_NET_SPEC.md).
 | `CLAUDE_NET_HOST` | _(from request Host header)_ | External hostname/IP used when generating the setup script |
 | `CLAUDE_NET_PORT` | `4815` | Port the hub listens on |
 | `CLAUDE_NET_LAUNCH_DEFAULT_PATH` | _(host home dir)_ | Default path pre-filled in the launch modal when a host has no recent cwds. Precedence: recent cwds → this var → host home dir. Hub restart required after change. |
+| `CLAUDE_NET_MIRROR_SESSION_CREATE_MAX` | `200` | Max session-create POSTs per 5-min window per remote IP. Sized for a post-restart recovery storm (every mirror-agent on every host re-POSTs simultaneously). Raise if your largest host hosts more than ~150 concurrent Claude Code sessions. |
+| `CLAUDE_NET_MIRROR_RETENTION_MS` | `3600000` (1h) | How long a closed mirror session stays in the hub's in-memory map before being dropped. Controls dashboard sidebar visibility of recently-closed sessions, not on-disk archive retention (see `CLAUDE_NET_MIRROR_RETENTION_HOURS` for that). |
 
 ## Development
 

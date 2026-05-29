@@ -5281,6 +5281,12 @@
     // src/mirror-agent/agent.ts handleInject.
     var INJECT_FAILED_PREFIX = 'inject failed (';
     var DROPPED_PROMPT_MARKER = '\n\n--- dropped prompt (copy to retry) ---\n';
+    // True while applyInit is replaying the cached transcript. Side-effects
+    // that should fire only for live events (the prompt banner, the
+    // inject-failed compose restore) check this flag and bail. Without it
+    // every tab-away-then-back would replay the cached inject-failed
+    // notification and re-stuff the dropped prompt into the compose box.
+    var inTranscriptReplay = false;
 
     function onNotificationEvent(text, source) {
       // Audit events emitted by the mirror-agent ("inject from web: …",
@@ -5294,7 +5300,13 @@
         // here as an audit notification carrying the original prompt. If
         // we recognise the marker and the compose box is empty, restore
         // the text so the user doesn't have to retype it.
+        //
+        // Live broadcasts only — during init-time transcript replay, the
+        // notification is historical and the user has already decided what
+        // to do with it. Re-stuffing the textarea then would resurrect a
+        // dismissed prompt every time the user switches tabs.
         if (
+          !inTranscriptReplay &&
           composeText &&
           text &&
           text.indexOf(INJECT_FAILED_PREFIX) === 0 &&
@@ -5382,8 +5394,17 @@
       // calls inside renderEvent no-op when we intend to restore position.
       setScrolledUp(!!(scrollState && scrollState.scrolledUp));
       if (Array.isArray(msg.transcript)) {
-        for (var i = 0; i < msg.transcript.length; i++) {
-          renderEvent(msg.transcript[i]);
+        // The replay flag is checked by side-effect handlers (banner,
+        // compose-textarea restore) so they don't re-trigger on cached
+        // historical events. Always cleared in `finally` so a throw mid-
+        // replay can't leave live events suppressed forever.
+        inTranscriptReplay = true;
+        try {
+          for (var i = 0; i < msg.transcript.length; i++) {
+            renderEvent(msg.transcript[i]);
+          }
+        } finally {
+          inTranscriptReplay = false;
         }
         // Transcript replay would have flipped the banner on for every
         // old notification it contains. Those prompts are answered and

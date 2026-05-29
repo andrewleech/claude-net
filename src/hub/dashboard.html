@@ -283,6 +283,36 @@
   }
   .m-evt-user .m-label { color: var(--text-accent); }
 
+  /* ── SUBAGENT: prompts to and replies from a Task/Agent subagent.
+     Same in/out spatial language as user/assistant but tinted gold to
+     mark "this is the parent steering or hearing back from a child",
+     and the body is wrapped in a <details> so the long subagent prompt
+     never dominates the feed. ── */
+  .m-evt-subagent {
+    padding-left: 128px;
+    padding-right: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .m-evt-subagent > details {
+    max-width: min(72ch, 100%);
+    background: var(--bg-subtle, rgba(255,255,255,0.02));
+    border-left: 3px solid var(--gold);
+    padding: 8px 12px;
+  }
+  .m-evt-subagent > details > summary {
+    cursor: pointer;
+    color: var(--gold);
+    font-family: var(--mono);
+    font-size: 0.9em;
+  }
+  .m-evt-subagent > details > .m-subagent-body {
+    margin-top: 6px;
+    color: var(--text);
+  }
+  .m-evt-subagent .m-label { color: var(--gold); }
+
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
      just a thin left rule anchoring the row to the timeline. The
      row does NOT shift right via margin-left (that would break the
@@ -3464,6 +3494,24 @@
     var attachSig = attachAc.signal;
 
     var rendered = Object.create(null); // uuid → true
+    // tool_use_id → true for every in-flight Task/Agent dispatch. Updated
+    // in renderEvent when a subagent tool_call arrives and when its
+    // matching tool_result arrives. Used to relabel intervening
+    // user_prompt / assistant_message events as SUBAGENT (collapsed) so
+    // the parent's feed doesn't get drowned in verbose subagent prompts.
+    var activeSubagents = Object.create(null);
+    function isSubagentToolCall(payload) {
+      if (!payload) return false;
+      if (payload.tool_name === 'Agent' || payload.tool_name === 'Task') return true;
+      // Future-proof: any tool whose input declares a subagent_type is
+      // dispatching a subagent. Covers renames between CC versions and
+      // any custom subagent-dispatching tools registered as MCP.
+      return !!(payload.input && payload.input.subagent_type);
+    }
+    function inSubagent() {
+      for (var _k in activeSubagents) if (activeSubagents[_k]) return true;
+      return false;
+    }
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
     // Anchor for "load earlier history" requests — the timestamp of
@@ -4243,7 +4291,7 @@
             body += '<div class="m-grep-more">… ' + (matchCount - shown) + ' more</div>';
           }
           body += '</div>';
-          appendDetails(el, summary, body, { open: true });
+          appendDetails(el, summary, body);
         },
       },
       Glob: {
@@ -4315,6 +4363,9 @@
             '<pre>' + escapeHtml(truncateLines(resp || '', 30)) + '</pre>');
         },
       },
+      // Agent (Task in older CC builds) is aliased AFTER this object
+      // literal closes — see `TOOL_RENDERERS.Agent = TOOL_RENDERERS.Task`
+      // below. Inside the literal, sibling keys aren't accessible.
       NotebookEdit: {
         call: function(p, el) {
           var fp = p.input && p.input.notebook_path;
@@ -4549,7 +4600,7 @@
           appendDetails(el,
             results.length + ' result' + (results.length === 1 ? '' : 's') +
               ' across ' + hostCount + ' site' + (hostCount === 1 ? '' : 's'),
-            body, { open: true });
+            body);
           // Stash the AI-generated summary as a collapsed details so the
           // card offers the narrative without cluttering the link list.
           var summary = extractWebSearchSummary(p.response);
@@ -4737,7 +4788,7 @@
           body += '</ul>';
           appendDetails(el,
             agents.length + ' agent' + (agents.length === 1 ? '' : 's'),
-            body, { open: true });
+            body);
         },
       },
       'mcp__claude-net__list_teams': {
@@ -4763,7 +4814,7 @@
           body += '</ul>';
           appendDetails(el,
             teams.length + ' team' + (teams.length === 1 ? '' : 's'),
-            body, { open: true });
+            body);
         },
       },
       'mcp__claude-net__mirror_on': cnSimple('🎥 mirror on', 'on'),
@@ -4789,7 +4840,7 @@
           setStatusOk(el, 'done');
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
           appendDetails(el, 'url',
-            '<pre>' + escapeHtml(String(resp || '')) + '</pre>', { open: true });
+            '<pre>' + escapeHtml(String(resp || '')) + '</pre>');
         },
       },
       'mcp__claude-net__mirror_share': {
@@ -4814,6 +4865,9 @@
         },
       },
     };
+
+    // Alias: newer CC builds rename Task → Agent. Same input shape.
+    TOOL_RENDERERS.Agent = TOOL_RENDERERS.Task;
 
     // Small helper for MCP tools with no meaningful input/output —
     // the headline tells the whole story.
@@ -5007,21 +5061,52 @@
 
       if (kind === 'user_prompt') {
         el = document.createElement('div');
-        el.className = 'm-evt m-evt-user';
-        el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">user</span> ' + ts + '</div>' +
-          '<pre>' + escapeHtml(payload.prompt || '') + '</pre>' +
-          (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+        if (inSubagent()) {
+          // The parent dispatched an Agent/Task subagent and the
+          // subagent's hook stream is now flowing through the parent's
+          // session. Its UserPromptSubmit is the parent's instruction
+          // to it — visually heavy, semantically not the human typing.
+          var preview = (payload.prompt || '').split('\n')[0].slice(0, 100);
+          el.className = 'm-evt m-evt-subagent';
+          el.innerHTML =
+            '<div class="m-evt-meta"><span class="m-label">subagent</span> ' + ts + '</div>' +
+            '<details><summary>prompt — ' + escapeHtml(preview || '(empty)') + '</summary>' +
+              '<pre class="m-subagent-body">' + escapeHtml(payload.prompt || '') + '</pre>' +
+            '</details>' +
+            (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+        } else {
+          el.className = 'm-evt m-evt-user';
+          el.innerHTML =
+            '<div class="m-evt-meta"><span class="m-label">user</span> ' + ts + '</div>' +
+            '<pre>' + escapeHtml(payload.prompt || '') + '</pre>' +
+            (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+        }
       } else if (kind === 'assistant_message') {
         el = document.createElement('div');
-        el.className = 'm-evt m-evt-assistant';
-        el.innerHTML =
-          '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + ts + '</div>' +
-          '<div class="md-body">' + renderMarkdown(payload.text || '') + '</div>' +
-          (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
-        // Claude moved on → any outstanding permission banner has been
-        // answered and should disappear.
-        onAssistantReply();
+        // payload.subagent === true comes from the SubagentStop hook on
+        // the parent's session (set by hook-ingest in agent.ts). Treat
+        // an in-flight Agent/Task as equivalent in case SubagentStop
+        // doesn't fire on this CC version.
+        var asSubagent = payload.subagent === true || inSubagent();
+        if (asSubagent) {
+          var preview2 = (payload.text || '').split('\n')[0].slice(0, 100);
+          el.className = 'm-evt m-evt-subagent';
+          el.innerHTML =
+            '<div class="m-evt-meta"><span class="m-label">subagent</span> ' + ts + '</div>' +
+            '<details><summary>reply — ' + escapeHtml(preview2 || '(empty)') + '</summary>' +
+              '<div class="m-subagent-body md-body">' + renderMarkdown(payload.text || '') + '</div>' +
+            '</details>' +
+            (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+        } else {
+          el.className = 'm-evt m-evt-assistant';
+          el.innerHTML =
+            '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + ts + '</div>' +
+            '<div class="md-body">' + renderMarkdown(payload.text || '') + '</div>' +
+            (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+          // Claude moved on → any outstanding permission banner has been
+          // answered and should disappear.
+          onAssistantReply();
+        }
       } else if (kind === 'tool_call') {
         // Question tools get their own card; everything else uses the
         // tool-renderer registry with a safe fallback for unknown names.
@@ -5040,7 +5125,21 @@
             renderUnknownToolCall(payload, el);
           }
         }
+        // Note subagent dispatches AFTER the card is built so the
+        // dispatching tool_call itself isn't relabelled — it's a
+        // parent-side action, the subagent context starts with the
+        // NEXT event.
+        if (isSubagentToolCall(payload) && payload.tool_use_id) {
+          activeSubagents[payload.tool_use_id] = true;
+        }
       } else if (kind === 'tool_result') {
+        // Clear the in-flight marker BEFORE rendering so that any
+        // assistant_message arriving in the same tick (race-condition
+        // safety, mostly theoretical) is correctly attributed to the
+        // parent again.
+        if (payload.tool_use_id && activeSubagents[payload.tool_use_id]) {
+          delete activeSubagents[payload.tool_use_id];
+        }
         // Try to attach to the matching tool_call / question card.
         var existing = payload.tool_use_id
           ? transcriptEl.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
@@ -5385,6 +5484,7 @@
       updateHistoryBtn();
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
+      activeSubagents = Object.create(null);
       disconnectTailObserver();
       // Restore per-session scroll-back state. If the user previously
       // scrolled up in this session, preserve that and restore their

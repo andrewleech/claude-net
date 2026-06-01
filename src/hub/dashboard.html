@@ -2778,14 +2778,10 @@
     mcpByHost.forEach(function(list) { list.sort(mcpSort); });
     mcpOrphans.sort(mcpSort);
 
-    // Host ordering: online first, then by their busiest session's
-    // last_event_at DESC, then alphabetical.
+    // Host ordering: fixed alphabetical. Sessions within a host group still
+    // reorder by last_event_at, but the host rows themselves stay put so
+    // unrelated activity on one host doesn't bounce the others around.
     var hostIds = Array.from(hosts.keys()).sort(function(a, b) {
-      var ha = hosts.get(a), hb = hosts.get(b);
-      if (ha.online !== hb.online) return ha.online ? -1 : 1;
-      var la = ((sessionsByHost.get(a) || [])[0] || {}).last_event_at || '';
-      var lb = ((sessionsByHost.get(b) || [])[0] || {}).last_event_at || '';
-      if (la !== lb) return lb.localeCompare(la);
       return a.localeCompare(b);
     });
 

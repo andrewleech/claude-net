@@ -104,7 +104,12 @@ mkdir -p "$CACHE_DIR"
 # matters: when patch-binary.py changes (new patch added, existing patch
 # fixed), every cached binary needs re-patching even if the source binary
 # is unchanged. Without it, hosts silently keep running the old patch set.
-HASH=$(sha256sum "$CLI_PATH" "$PATCHER" | sha256sum | head -c 12)
+#
+# Pipe contents (not file paths) to sha256sum — `sha256sum FILE1 FILE2`
+# embeds the paths in its output, which would make the in-repo launcher
+# and the installed launcher produce different cache keys even for the
+# same byte-identical patcher.
+HASH=$(cat "$CLI_PATH" "$PATCHER" | sha256sum | head -c 12)
 PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${HASH}"
 
 # Patch if this hash hasn't been patched yet

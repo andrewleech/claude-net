@@ -100,8 +100,11 @@ except Exception:
 CLI_PATH=$(find_claude_binary)
 mkdir -p "$CACHE_DIR"
 
-# Version key from binary hash (avoids executing the binary just for --version)
-HASH=$(sha256sum "$CLI_PATH" | head -c 12)
+# Version key from binary hash + patcher hash. The patcher contribution
+# matters: when patch-binary.py changes (new patch added, existing patch
+# fixed), every cached binary needs re-patching even if the source binary
+# is unchanged. Without it, hosts silently keep running the old patch set.
+HASH=$(sha256sum "$CLI_PATH" "$PATCHER" | sha256sum | head -c 12)
 PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${HASH}"
 
 # Patch if this hash hasn't been patched yet

@@ -5,12 +5,13 @@ Same-length binary patcher for Claude Code's compiled Bun binary.
 All replacements are exactly the same byte length as the original,
 preserving the binary's embedded payload offsets and checksums.
 
-Patches applied (all channel-related):
+Patches applied:
 1. Channels feature gate (tengu_harbor -> true)
 2. Org policy channelsEnabled inversion
 3. Channel allowlist gate bypass
 4. Dev channels dialog auto-accept
 5. Channel notification suppression (stale allowlist toast)
+6. Dynamic workflows master gate (Y2 -> always true)
 
 Exit codes:
   0 = all patches applied
@@ -69,6 +70,25 @@ PATCHES = [
         "find_regex": rb"!\w+\.dev",
         "replace_fn": "always_false",
         "diag_anchor": b'why:"server: entries need',
+    },
+    {
+        "name": "Dynamic workflows master gate (Y2)",
+        # The master gate for the Workflow tool. Original body chains four
+        # checks (managed disable, org policy `allow_workflows`, Statsig
+        # `tengu_workflows_enabled` launch gate, user setting `enableWorkflows`)
+        # and returns false on the first miss. Replace the whole body with
+        # `return!0` so the tool's validateInput, isEnabled, prompt-text
+        # inclusion, keyboard handler, and tool-list assembly all see it as on.
+        #
+        # Function name (Y2) and helper names (B48/a87/BP6/fP5) mangle per
+        # build, so we anchor on the body's destructuring shape — the literal
+        # `{available:X,defaultOn:X}` pattern is unique to this function in
+        # the entire bundle (we verified: 1 match on 2.1.159).
+        "pattern": rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+\(\);if\(![\w$]+\)return!1;return [\w$]+\(\)\?\?[\w$]+',
+        "type": "regex_pad",
+        "replacement_prefix": b"return!0",
+        "replacement_suffix": b"",
+        "diag_anchor": b"tengu_workflows_enabled",
     },
 ]
 

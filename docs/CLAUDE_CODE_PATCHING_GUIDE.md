@@ -81,7 +81,7 @@ When reverse-engineering a new gate or check:
 | `?.accessToken` (property access pattern) | Exact function signatures |
 | `{action:"skip",kind:"allowlist"` (return value shape) | Line numbers or byte offsets |
 
-## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112)
+## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159)
 
 Implementation: `bin/patch-binary.py`
 
@@ -182,13 +182,49 @@ rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"s
 
 **Expected matches:** 2
 
+### Patch 6: Dynamic workflows master gate
+
+**What it bypasses:** The `Workflow` tool (multi-agent orchestration via `Workflow(...)` invocations) is gated behind four independent checks. When any of them fails the tool returns `Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting in /config)`.
+
+The gates, in order:
+
+1. Managed-settings `disableWorkflows` policy (admin kill switch)
+2. Org policy `allow_workflows` capability (Statsig org-level entitlement)
+3. Statsig launch gate `tengu_workflows_enabled` (per-account rollout)
+4. User setting `enableWorkflows` from `/config` (defaults to plan-based)
+
+All four are collapsed into a single `Y2()` helper that short-circuits on the first miss:
+
+```javascript
+function Y2(){
+  if(B48())return!1;                          // managed disable
+  if(!a87())return!1;                         // org policy
+  let{available:H,defaultOn:$}=BP6();
+  if(!H)return!1;                             // launch gate
+  return fP5()??$;                            // /config setting
+}
+```
+
+The Workflow tool's `validateInput`, `isEnabled`, prompt-text inclusion, keyboard handler, history loader, and tool-list assembly all call `Y2()` directly, so a single body rewrite gates them all.
+
+**Regex to find it:**
+```python
+rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+\(\);if\(![\w$]+\)return!1;return [\w$]+\(\)\?\?[\w$]+'
+```
+
+The function and helper names (Y2, B48, a87, BP6, fP5) all mangle per build. The destructuring `{available:X,defaultOn:X}` is unique to this function in the entire bundle, so it serves as the structural anchor.
+
+**Replacement:** `return!0` + spaces (closing `}` is outside the match). Same length, function unconditionally returns `true`.
+
+**Expected matches:** 1 (single payload copy in observed builds; the second copy seen for older channel patches isn't always present)
+
 ## The launcher script
 
 `bin/claude-channels` wraps the patched binary:
 
 1. Finds the Claude Code binary (prefers native ELF at known locations over npm/bun installs)
-2. Caches a patched copy at `~/.local/share/claude-channels/claude-patched-{hash}` (hash-based, version-safe)
-3. Re-patches automatically when the binary changes (hash mismatch)
+2. Caches a patched copy at `~/.local/share/claude-channels/claude-patched-{hash}`. The hash is a digest of the source binary AND `patch-binary.py` combined, so a change to either invalidates the cache.
+3. Re-patches automatically when the binary or patcher changes (hash mismatch)
 4. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each
 5. On partial patch failure, prints diagnostics and offers fallback to previous version
 6. Execs the patched binary with all injected + user-provided args
@@ -229,4 +265,5 @@ grep -cP 'channelsEnabled===!0' /tmp/test-patched             # Patch 2
 grep -cP 'if\(!1\s+\)return\{action:"skip"' /tmp/test-patched  # Patch 3
 grep -cP '\|\| [a-zA-Z0-9_$]+\(\)\?\.accessToken' /tmp/test-patched  # Patch 4
 grep -cP 'if\(!1\s+\)[a-zA-Z0-9_$]+\.push' /tmp/test-patched  # Patch 5
+grep -cP 'function [\w$]+\(\)\{return!0 +\}function [\w$]+\(\)\{return [\w$]+\(\)\.defaultOn\}' /tmp/test-patched  # Patch 6
 ```

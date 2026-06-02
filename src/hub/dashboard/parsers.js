@@ -104,6 +104,77 @@ export function extractCnList(resp, key) {
   return [];
 }
 
+// Whitelist of image media types we will render inline. SVG is excluded
+// because SVG can carry script content; if a future renderer ever inlines
+// it as raw markup it becomes an XSS vector. PNG/JPEG/GIF/WEBP are
+// rendered via <img src=data:...> where the browser refuses to execute
+// embedded scripts.
+const IMAGE_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+// Extract image content blocks from a tool_result response. Returns
+// [{ media_type, data, bytes }, …] for each base64 image block whose
+// media_type is on the IMAGE_MEDIA_TYPES allowlist; everything else is
+// skipped. Walks the three shapes Claude Code emits:
+//   - bare array of blocks                       [{type:"image", …}, …]
+//   - MCP envelope                              { content: [{type:"image", …}, …] }
+//   - nested image inside a wrapper             { …, image: {type:"image", …} }
+// Field order inside the source object is not enforced (media_type may
+// appear before or after data).
+//
+// Also recognises the over-cap placeholder emitted by the mirror-agent
+// (`{type:"image_placeholder", media_type, bytes, reason}`) and includes
+// it in the returned list with `data:null` so the renderer can show a
+// non-blank "image too large" tile rather than nothing.
+export function extractImageBlocks(resp) {
+  const out = [];
+  if (!resp) return out;
+  walkForImages(resp, out, 0);
+  return out;
+}
+
+function walkForImages(node, out, depth) {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++)
+      walkForImages(node[i], out, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+  // Image block? Accept the canonical Claude Code shape and the mirror-
+  // agent's over-cap placeholder.
+  if (node.type === "image" && node.source && typeof node.source === "object") {
+    const src = node.source;
+    const mt = typeof src.media_type === "string" ? src.media_type : "";
+    const data = typeof src.data === "string" ? src.data : "";
+    if (IMAGE_MEDIA_TYPES.has(mt) && data) {
+      // Approximate decoded byte size: base64 expands by ~4/3.
+      const bytes = Math.ceil((data.length * 3) / 4);
+      out.push({ media_type: mt, data, bytes });
+    }
+    return;
+  }
+  if (node.type === "image_placeholder") {
+    const mt = typeof node.media_type === "string" ? node.media_type : "";
+    const bytes = typeof node.bytes === "number" ? node.bytes : 0;
+    const reason =
+      typeof node.reason === "string" ? node.reason : "unavailable";
+    out.push({ media_type: mt, data: null, bytes, reason });
+    return;
+  }
+  // Otherwise recurse into common envelope fields. Avoid `source.data`
+  // (already handled above) and bail on giant text fields.
+  if (Array.isArray(node.content)) walkForImages(node.content, out, depth + 1);
+  if (Array.isArray(node.results)) walkForImages(node.results, out, depth + 1);
+  if (node.image) walkForImages(node.image, out, depth + 1);
+  if (Array.isArray(node.attachments))
+    walkForImages(node.attachments, out, depth + 1);
+}
+
 // If `resp` looks like an MCP text-content envelope, join the text
 // blocks and return the concatenated string. Returns null if this
 // wasn't an envelope. Callers JSON.parse if they expect JSON —
@@ -114,10 +185,18 @@ export function unwrapMcpText(resp) {
   else if (resp && typeof resp === "object" && Array.isArray(resp.content))
     blocks = resp.content;
   if (!blocks || blocks.length === 0) return null;
+  // Concat only the text blocks. Mixed-content arrays (e.g. text + image)
+  // used to return null here, losing the text portion entirely; now we
+  // keep the text and let extractImageBlocks pull the images out
+  // separately. If no block has text, treat as not-an-envelope so callers
+  // fall through to their other shapes.
+  const parts = [];
   for (let i = 0; i < blocks.length; i++) {
-    if (!blocks[i] || typeof blocks[i].text !== "string") return null;
+    const b = blocks[i];
+    if (b && typeof b.text === "string") parts.push(b.text);
   }
-  return blocks.map((b) => b.text).join("");
+  if (parts.length === 0) return null;
+  return parts.join("");
 }
 
 // Pull tool names out of a ToolSearch response. The tool returns a

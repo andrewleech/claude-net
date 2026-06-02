@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractCnList,
+  extractImageBlocks,
   extractToolSearchNames,
   extractWebSearchResults,
   extractWebSearchSummary,
@@ -135,6 +136,144 @@ describe("unwrapMcpText", () => {
     expect(unwrapMcpText("plain")).toBe(null);
     expect(unwrapMcpText({ other: true })).toBe(null);
     expect(unwrapMcpText(null)).toBe(null);
+  });
+
+  test("keeps text portion when array also contains non-text blocks", () => {
+    // Used to return null and discard the text — see commit notes.
+    const mixed = [
+      { type: "text", text: "summary line" },
+      {
+        type: "image",
+        source: { type: "base64", data: "AAAA", media_type: "image/png" },
+      },
+    ];
+    expect(unwrapMcpText(mixed)).toBe("summary line");
+  });
+
+  test("returns null when no block has text", () => {
+    const noText = [
+      {
+        type: "image",
+        source: { type: "base64", data: "AAAA", media_type: "image/png" },
+      },
+    ];
+    expect(unwrapMcpText(noText)).toBe(null);
+  });
+});
+
+describe("extractImageBlocks", () => {
+  // 1×1 transparent PNG (33 bytes decoded, ~44 bytes base64).
+  const tinyPng =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+  test("returns the image block from a bare top-level array", () => {
+    const blocks = extractImageBlocks([
+      {
+        type: "image",
+        source: { type: "base64", data: tinyPng, media_type: "image/png" },
+      },
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].media_type).toBe("image/png");
+    expect(blocks[0].data).toBe(tinyPng);
+    expect(blocks[0].bytes).toBeGreaterThan(0);
+  });
+
+  test("returns image blocks from an MCP {content:[]} envelope", () => {
+    const blocks = extractImageBlocks({
+      content: [
+        { type: "text", text: "intro" },
+        {
+          type: "image",
+          source: { type: "base64", data: tinyPng, media_type: "image/jpeg" },
+        },
+      ],
+    });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].media_type).toBe("image/jpeg");
+  });
+
+  test("returns multiple images in order", () => {
+    const blocks = extractImageBlocks([
+      {
+        type: "image",
+        source: { type: "base64", data: tinyPng, media_type: "image/png" },
+      },
+      {
+        type: "image",
+        source: { type: "base64", data: tinyPng, media_type: "image/webp" },
+      },
+    ]);
+    expect(blocks.map((b) => b.media_type)).toEqual([
+      "image/png",
+      "image/webp",
+    ]);
+  });
+
+  test("rejects image/svg+xml (script-bearing format)", () => {
+    expect(
+      extractImageBlocks([
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            data: tinyPng,
+            media_type: "image/svg+xml",
+          },
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("rejects unknown / empty media_type", () => {
+    expect(
+      extractImageBlocks([
+        {
+          type: "image",
+          source: { type: "base64", data: tinyPng, media_type: "" },
+        },
+        { type: "image", source: { type: "base64", data: tinyPng } },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("returns empty for plain text / file-shape Read responses", () => {
+    expect(extractImageBlocks("plain text")).toEqual([]);
+    expect(extractImageBlocks({ file: { content: "lines" } })).toEqual([]);
+    expect(extractImageBlocks(null)).toEqual([]);
+  });
+
+  test("surfaces the over-cap placeholder emitted by the mirror-agent", () => {
+    const blocks = extractImageBlocks([
+      {
+        type: "image_placeholder",
+        media_type: "image/png",
+        bytes: 1_500_000,
+        reason: "too_large",
+      },
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].data).toBeNull();
+    expect(blocks[0].reason).toBe("too_large");
+    expect(blocks[0].bytes).toBe(1_500_000);
+  });
+
+  test("does not recurse into source.data (no false positives in base64)", () => {
+    // A pathological base64 payload that contains the literal substring
+    // {"type":"image"...} would otherwise re-match if we recursed into
+    // source.data. We don't — image blocks short-circuit.
+    const blocks = extractImageBlocks([
+      {
+        type: "image",
+        source: {
+          type: "base64",
+          // not a real PNG, but enough to satisfy the walker
+          data: tinyPng,
+          media_type: "image/png",
+        },
+      },
+    ]);
+    expect(blocks).toHaveLength(1);
   });
 });
 

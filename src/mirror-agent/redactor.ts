@@ -148,6 +148,18 @@ export class Redactor {
     if (Array.isArray(v)) return v.map((x) => this.redactAny(x));
     if (typeof v === "object") {
       const obj = v as Record<string, unknown>;
+      // Don't walk image content blocks — the base64 payload is opaque
+      // binary and running regex rules across it is both expensive and
+      // pointless (a JWT-shaped substring inside a PNG would corrupt
+      // the image without any privacy benefit). Pre-validated by the
+      // hook-ingest sanitizer, so we trust the structural shape here.
+      if (
+        obj.type === "image" &&
+        obj.source &&
+        typeof obj.source === "object"
+      ) {
+        return v;
+      }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(obj)) {
         out[k] = this.redactAny(val);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ingestHook } from "@/mirror-agent/hook-ingest";
+import { MAX_INLINE_IMAGE_BYTES, ingestHook } from "@/mirror-agent/hook-ingest";
 
 describe("ingestHook", () => {
   test("returns null when session_id is missing", () => {
@@ -170,5 +170,140 @@ describe("ingestHook", () => {
     expect(out.frame.sid).toBe("s-42");
     expect(out.frame.uuid).toMatch(/^[0-9a-f-]{36}$/);
     expect(typeof out.frame.ts).toBe("number");
+  });
+
+  describe("PostToolUse — image content blocks", () => {
+    // 1×1 transparent PNG. Small enough that any sane cap admits it.
+    const TINY_PNG_B64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    test("preserves an image block carried in a bare top-level array", () => {
+      const out = ingestHook({
+        hook_event_name: "PostToolUse",
+        session_id: "s-1",
+        tool_use_id: "u-1",
+        tool_name: "Read",
+        tool_response: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              data: TINY_PNG_B64,
+              media_type: "image/png",
+            },
+          },
+        ],
+      });
+      expect(out).not.toBeNull();
+      if (!out || out.frame.payload.kind !== "tool_result") return;
+      const resp = out.frame.payload.response as Array<{
+        type: string;
+        source: { data: string; media_type: string };
+      }>;
+      expect(Array.isArray(resp)).toBe(true);
+      expect(resp[0].type).toBe("image");
+      expect(resp[0].source.data).toBe(TINY_PNG_B64);
+      expect(resp[0].source.media_type).toBe("image/png");
+      expect(out.frame.payload.truncated).toBeUndefined();
+    });
+
+    test("preserves an image block inside an MCP {content:[]} envelope", () => {
+      const out = ingestHook({
+        hook_event_name: "PostToolUse",
+        session_id: "s-1",
+        tool_use_id: "u-1",
+        tool_name: "mcp__playwright__browser_take_screenshot",
+        tool_response: {
+          content: [
+            { type: "text", text: "took screenshot" },
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                data: TINY_PNG_B64,
+                media_type: "image/jpeg",
+              },
+            },
+          ],
+        },
+      });
+      expect(out).not.toBeNull();
+      if (!out || out.frame.payload.kind !== "tool_result") return;
+      const resp = out.frame.payload.response as {
+        content: Array<{ type: string }>;
+      };
+      expect(resp.content).toHaveLength(2);
+      expect(resp.content[0].type).toBe("text");
+      expect(resp.content[1].type).toBe("image");
+    });
+
+    test("replaces an over-cap image with a structured placeholder", () => {
+      // Build an image block whose base64 decodes to just over the cap.
+      const overCapBytes = MAX_INLINE_IMAGE_BYTES + 1;
+      const overCapData = "A".repeat(Math.ceil((overCapBytes * 4) / 3));
+      const out = ingestHook({
+        hook_event_name: "PostToolUse",
+        session_id: "s-1",
+        tool_use_id: "u-1",
+        tool_name: "Read",
+        tool_response: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              data: overCapData,
+              media_type: "image/png",
+            },
+          },
+        ],
+      });
+      expect(out).not.toBeNull();
+      if (!out || out.frame.payload.kind !== "tool_result") return;
+      const resp = out.frame.payload.response as Array<Record<string, unknown>>;
+      expect(resp[0].type).toBe("image_placeholder");
+      expect(resp[0].media_type).toBe("image/png");
+      expect(resp[0].reason).toBe("too_large");
+      expect(out.frame.payload.truncated).toBe(true);
+    });
+
+    test("replaces an unsupported media type (svg+xml) with a placeholder", () => {
+      const out = ingestHook({
+        hook_event_name: "PostToolUse",
+        session_id: "s-1",
+        tool_use_id: "u-1",
+        tool_name: "Read",
+        tool_response: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              data: TINY_PNG_B64,
+              media_type: "image/svg+xml",
+            },
+          },
+        ],
+      });
+      expect(out).not.toBeNull();
+      if (!out || out.frame.payload.kind !== "tool_result") return;
+      const resp = out.frame.payload.response as Array<Record<string, unknown>>;
+      expect(resp[0].type).toBe("image_placeholder");
+      expect(resp[0].reason).toBe("unsupported_media_type");
+      expect(resp[0].media_type).toBe("image/svg+xml");
+      expect(out.frame.payload.truncated).toBe(true);
+    });
+
+    test("passes through text-only responses unchanged", () => {
+      const out = ingestHook({
+        hook_event_name: "PostToolUse",
+        session_id: "s-1",
+        tool_use_id: "u-1",
+        tool_name: "Bash",
+        tool_response: "file1\nfile2\n",
+      });
+      expect(out).not.toBeNull();
+      if (!out || out.frame.payload.kind !== "tool_result") return;
+      expect(out.frame.payload.response).toBe("file1\nfile2\n");
+      expect(out.frame.payload.truncated).toBeUndefined();
+    });
   });
 });

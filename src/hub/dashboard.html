@@ -501,6 +501,35 @@
   .m-diff-read .m-diff-content { color: var(--text); }
   .m-read-more .m-diff-content { color: var(--text-muted); font-style: italic; }
 
+  /* ── Inline image rendering (Read of binary, screenshots, etc.) ── */
+  .m-img-grid {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 4px 0;
+  }
+  .m-img-thumb {
+    max-width: 240px; max-height: 240px;
+    object-fit: contain;
+    cursor: zoom-in;
+    background: var(--bg-2, #1c1c1c);
+    border: 1px solid var(--border, #333);
+    border-radius: 3px;
+    transition: max-width 0.15s ease, max-height 0.15s ease;
+  }
+  .m-img-thumb.expanded {
+    max-width: 100%; max-height: 80vh;
+    cursor: zoom-out;
+  }
+  .m-img-placeholder {
+    padding: 8px 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-style: italic;
+    color: var(--text-muted);
+    background: var(--bg-2, #1c1c1c);
+    border: 1px dashed var(--border, #333);
+    border-radius: 3px;
+  }
+
   /* ── CLAUDE-NET MCP lists (list_agents / list_teams / ToolSearch). ── */
   .m-cn-list {
     list-style: none; margin: 4px 0 0; padding: 0;
@@ -4005,13 +4034,19 @@
           el.innerHTML = makeHeadline('Read',
             '<span title="' + escapeAttr(fp || '') + '">' + escapeHtml(shortPath(fp || '')) + '</span>');
         },
-        result: function(p, el) {
+        result: function(p, el, ctx) {
           if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'read'); }
           var parsed = parseReadContent(p.response);
           var rows = parsed.rows;
           var total = parsed.totalLines || rows.length;
           var start = parsed.startLine;
           var end = rows.length ? Number(rows[rows.length - 1].n) : start;
+          // When the response is image-only the line table is empty —
+          // the image card emitted by the caller is the real content.
+          // Skip the "(empty)" details so the card doesn't read as
+          // "Read got nothing, also here's an image".
+          var hasImages = ctx && ctx.images && ctx.images.length > 0;
+          if (rows.length === 0 && hasImages) return;
           var MAX = 60;
           var shown = rows.slice(0, MAX);
           var body = '<div class="m-diff-v2 m-read-body">';
@@ -4894,6 +4929,64 @@
     function hostFromUrl(u)               { return window.Parsers.hostFromUrl(u); }
     function toWebSearchText(resp)        { return window.Parsers.toWebSearchText(resp); }
     function extractWebSearchSummary(resp){ return window.Parsers.extractWebSearchSummary(resp); }
+    function extractImageBlocks(resp)     { return window.Parsers.extractImageBlocks(resp); }
+
+    // Append a collapsed image-card details to a tool-result card. Each
+    // image is rendered as a thumbnail-sized <img src=data:...> that
+    // expands to full-screen on click. Default-collapsed for consistency
+    // with the rest of the tool-result UI (see commit cea2f19 — "collapse
+    // all tool results"). Placeholders (over-cap / unsupported media
+    // type from the mirror-agent sanitizer) get a non-image tile so the
+    // user sees something rather than a blank card.
+    //
+    // No DOMPurify needed: every dynamic value lands in a controlled
+    // location — media_type via textContent, base64 data inside an
+    // attribute we construct with escapeAttr. The <img> data: URL is
+    // built from an allowlist of media types (see extractImageBlocks)
+    // so there is no path for a foreign protocol to slip in.
+    function appendImageCard(el, images) {
+      if (!images || images.length === 0) return;
+      var d = document.createElement('details');
+      var totalKb = 0;
+      for (var i = 0; i < images.length; i++) {
+        totalKb += Math.max(1, Math.round((images[i].bytes || 0) / 1024));
+      }
+      var label = images.length === 1
+        ? 'image · ' + images[0].media_type + ' · ' + totalKb + ' KB'
+        : images.length + ' images · ' + totalKb + ' KB total';
+      var s = document.createElement('summary');
+      s.textContent = label;
+      d.appendChild(s);
+      var grid = document.createElement('div');
+      grid.className = 'm-img-grid';
+      for (var j = 0; j < images.length; j++) {
+        var im = images[j];
+        if (im.data) {
+          var img = document.createElement('img');
+          img.className = 'm-img-thumb';
+          img.alt = '';
+          img.loading = 'lazy';
+          img.src = 'data:' + im.media_type + ';base64,' + im.data;
+          img.addEventListener('click', function(e) {
+            e.currentTarget.classList.toggle('expanded');
+          });
+          grid.appendChild(img);
+        } else {
+          var ph = document.createElement('div');
+          ph.className = 'm-img-placeholder';
+          var reason = im.reason === 'too_large'
+            ? 'image too large to display'
+            : im.reason === 'unsupported_media_type'
+              ? 'unsupported media type: ' + (im.media_type || 'unknown')
+              : 'image unavailable';
+          var kb = im.bytes ? ' (' + Math.round(im.bytes / 1024) + ' KB)' : '';
+          ph.textContent = reason + kb;
+          grid.appendChild(ph);
+        }
+      }
+      d.appendChild(grid);
+      el.appendChild(d);
+    }
 
     // Render an unknown tool with a clear "no custom view yet" note.
     function renderUnknownToolCall(payload, el) {
@@ -4904,10 +4997,22 @@
       appendDetails(el, 'input (raw)',
         '<pre>' + escapeHtml(tryJson(payload.input)) + '</pre>');
     }
-    function renderUnknownToolResult(payload, el) {
-      var resp = typeof payload.response === 'string' ? payload.response : tryJson(payload.response);
+    function renderUnknownToolResult(payload, el, ctx) {
       if (payload.is_error) setStatusError(el);
       else setStatusOk(el, 'done');
+      // When the response is image-only, the caller is about to append
+      // an image card — skip the raw-result dump so a screenshot tool
+      // doesn't render its base64 payload as a wall of <pre>.
+      var hasImages = ctx && ctx.images && ctx.images.length > 0;
+      var resp = typeof payload.response === 'string' ? payload.response : tryJson(payload.response);
+      if (hasImages) {
+        // Heuristic for "image-only": after extracting image blocks the
+        // remaining textual portion (via unwrapMcpText) is empty or just
+        // a small wrapper.
+        var unwrapped = unwrapMcpText(payload.response);
+        if (unwrapped === null || unwrapped.trim().length === 0) return;
+        resp = unwrapped;
+      }
       appendDetails(el, 'result (raw)', '<pre>' + escapeHtml(truncateLines(resp, 30)) + '</pre>');
     }
 
@@ -5140,16 +5245,23 @@
         var existing = payload.tool_use_id
           ? transcriptEl.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
           : null;
+        // Detect any image content blocks ONCE — used both to suppress
+        // empty-fallback noise in renderers that don't know about images
+        // (e.g. Read on a PNG would otherwise show "(empty)") and to
+        // append the image card at the bottom of whichever card we end
+        // up with.
+        var images = extractImageBlocks(payload.response);
         if (existing) {
           if (existing.classList.contains('m-evt-question')) {
             markQuestionAnswered(existing, payload);
           } else {
             var r = TOOL_RENDERERS[payload.tool_name];
             if (r && typeof r.result === 'function') {
-              r.result(payload, existing);
+              r.result(payload, existing, { images: images });
             } else {
-              renderUnknownToolResult(payload, existing);
+              renderUnknownToolResult(payload, existing, { images: images });
             }
+            appendImageCard(existing, images);
           }
           scrollToBottom();
           return;
@@ -5159,8 +5271,9 @@
         el.className = 'm-evt m-evt-tool' + (payload.is_error ? ' is-error' : '');
         el.innerHTML = makeHeadline(payload.tool_name || 'tool', '(orphan result)');
         var r2 = TOOL_RENDERERS[payload.tool_name];
-        if (r2 && typeof r2.result === 'function') r2.result(payload, el);
-        else renderUnknownToolResult(payload, el);
+        if (r2 && typeof r2.result === 'function') r2.result(payload, el, { images: images });
+        else renderUnknownToolResult(payload, el, { images: images });
+        appendImageCard(el, images);
       } else if (kind === 'notification') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-notif';

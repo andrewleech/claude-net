@@ -120,4 +120,34 @@ describe("Redactor", () => {
     });
     expect(r.ruleCount).toBe(0);
   });
+
+  test("skips image content blocks (does not scan base64 payload)", () => {
+    // A rule that would otherwise rewrite any base64-shaped substring.
+    // If the redactor recursed into source.data, the image would come
+    // back mangled and unloadable. The image-block short-circuit
+    // protects the payload.
+    const r = new Redactor({
+      includeDefaults: false,
+      rules: [{ name: "b64-junk", pattern: "[A-Za-z0-9+/]{20,}" }],
+    });
+    const originalData =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const frame = toolResultFrame([
+      {
+        type: "image",
+        source: {
+          type: "base64",
+          data: originalData,
+          media_type: "image/png",
+        },
+      },
+    ]);
+    r.redactFrame(frame);
+    const p = frame.payload as MirrorToolResultPayload;
+    const resp = p.response as Array<{
+      source: { data: string };
+    }>;
+    expect(resp[0].source.data).toBe(originalData);
+    expect(r.stats["b64-junk"]).toBeUndefined();
+  });
 });

@@ -1313,6 +1313,8 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     sid: entry.sid,
     owner_agent: entry.ownerAgent,
     cwd: entry.cwd,
+    host: entry.host,
+    cc_pid: entry.ccPid,
     created_at: entry.createdAt.toISOString(),
     last_event_at: entry.lastEventAt.toISOString(),
     closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,

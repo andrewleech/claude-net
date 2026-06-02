@@ -123,21 +123,17 @@ if [ ! -f "$PATCHED_VERSIONED" ]; then
         echo "Fatal patching error. Falling back to unpatched binary." >&2
         PATCHED_VERSIONED="$CLI_PATH"
     elif [ "$patch_exit" -eq 2 ]; then
-        # Partial success — some patches failed
-        # Check if there's a previous working version to fall back to
+        # Partial success — some patches failed.
+        # Fall back to the previous patched binary if one exists; otherwise run
+        # with partial patches. Don't prompt: this fires on every Claude Code
+        # update and the user has already opted in by running claude-channels.
         PREV_PATCHED="$(readlink -f "$PATCHED_LINK" 2>/dev/null || true)"
         if [ -n "$PREV_PATCHED" ] && [ -f "$PREV_PATCHED" ] && [ "$PREV_PATCHED" != "$PATCHED_VERSIONED" ]; then
-            echo "" >&2
-            echo "  A previous working patched binary exists: $(basename "$PREV_PATCHED")" >&2
-            echo "  Press Enter to use it, or Ctrl-C to abort." >&2
-            read -r < /dev/tty 2>/dev/null || true
+            echo "[claude-channels] partial patch on new build; using previous patched binary $(basename "$PREV_PATCHED")" >&2
             rm -f "$PATCHED_VERSIONED"
             PATCHED_VERSIONED="$PREV_PATCHED"
         else
-            echo "" >&2
-            echo "  No previous version available. Continuing with partial patches." >&2
-            echo "  Press Enter to continue, or Ctrl-C to abort." >&2
-            read -r < /dev/tty 2>/dev/null || true
+            echo "[claude-channels] partial patch; continuing — some channel restrictions may still prompt" >&2
         fi
     fi
 

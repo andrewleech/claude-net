@@ -42,6 +42,7 @@ bin/
     install-statusline # installer for the statusline script
     claude-net-mirror-push  # tiny hook forwarder — stdin JSON → loopback POST to mirror-agent
     claude-net-mirror-agent # entry launcher for the mirror-agent daemon (dev-clone or bundled)
+    claude-net-self-inject  # CLI: text → loopback POST /inject — agent queues input for its own session
 tests/
   hub/               # unit tests for each hub module
   plugin/            # plugin unit tests

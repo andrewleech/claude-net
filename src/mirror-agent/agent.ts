@@ -107,6 +107,18 @@ const DEFAULT_SESSION_IDLE_MS = 0;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 
+/**
+ * Per-call cap for the loopback /inject endpoint (claude-net-self-inject).
+ * Matches the hub's webui-side MAX_INJECT_BYTES default (512 KB) so a
+ * single text injection has the same upper bound however it originates.
+ * Override via CLAUDE_NET_MIRROR_SELF_INJECT_MAX_KB.
+ */
+const MAX_SELF_INJECT_BYTES = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_SELF_INJECT_MAX_KB);
+  const kb = Number.isFinite(raw) && raw > 0 ? raw : 512;
+  return kb * 1024;
+})();
+
 /** Recovery retry schedule. Hub redeploys typically take 10–30 s so the
  *  worst-case ~8 min window here covers nearly anything short of total
  *  hub failure. */
@@ -340,6 +352,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (req.method === "POST" && url.pathname === "/hook") {
       return handleHookPost(req);
     }
+    if (req.method === "POST" && url.pathname === "/inject") {
+      return handleInjectPost(req);
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       return Response.json({
         status: "ok",
@@ -353,6 +368,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           sid: s.sid,
           owner_agent: s.ownerAgent,
           cwd: s.cwd,
+          cc_pid: s.ccPid,
           last_event_at: new Date(s.lastEventAt).toISOString(),
           closed: s.closed,
         })),
@@ -363,6 +379,40 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       return new Response("stopping", { status: 200 });
     }
     return new Response("not found", { status: 404 });
+  }
+
+  /**
+   * Loopback inject endpoint — lets a process running on the same host
+   * (typically the Claude Code session itself, via the
+   * claude-net-self-inject CLI) push text into a session's tmux pane
+   * without going through the hub. Accepts either `sid` or `ccPid` to
+   * identify the target session; ccPid is the path of least resistance
+   * for self-inject because the caller can walk its own process tree.
+   *
+   * Security model: bound to 127.0.0.1, port file mode 0600, so only
+   * same-uid processes can reach it. The trust boundary is identical to
+   * what a process can already do with `tmux send-keys -t <pane>` —
+   * adding this endpoint does not expand the attack surface.
+   */
+  async function handleInjectPost(req: Request): Promise<Response> {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const resolved = resolveSelfInject(body, sessions, MAX_SELF_INJECT_BYTES);
+    if ("error" in resolved) {
+      return Response.json(
+        { error: resolved.error },
+        { status: resolved.status },
+      );
+    }
+    const { session, text, source } = resolved;
+    void handleInject(session, text, source).catch((err: unknown) => {
+      log(`[${session.sid}] self-inject handler threw: ${String(err)}`);
+    });
+    return Response.json({ ok: true, sid: session.sid });
   }
 
   /**
@@ -1500,6 +1550,84 @@ function deriveOwnerAgent(cwd: string): string {
   const user = os.userInfo().username || process.env.USER || "user";
   const host = os.hostname() || "host";
   return `${session}:${user}@${host}`;
+}
+
+/**
+ * Structural shape of the candidate sessions resolveSelfInject inspects.
+ * Defined narrowly so this helper can be unit-tested against a tiny
+ * fixture instead of needing a full SessionState.
+ */
+export interface SelfInjectSessionCandidate {
+  sid: string;
+  ccPid: number | null;
+  closed: boolean;
+  tmuxPane: string | null;
+}
+
+export type SelfInjectResolution<S> =
+  | { session: S; text: string; source: string }
+  | { error: string; status: number };
+
+/**
+ * Validate a /inject POST body and resolve it to a session. Pure: takes
+ * the parsed JSON and a sessions map, returns either the matched
+ * session + sanitized fields or a structured error with HTTP status.
+ *
+ * Lookup order: explicit sid wins over ccPid (the latter is the
+ * convenience path for the self-inject CLI which only knows its own pid).
+ */
+export function resolveSelfInject<S extends SelfInjectSessionCandidate>(
+  raw: unknown,
+  sessions: Iterable<S> | Map<string, S>,
+  maxBytes: number,
+): SelfInjectResolution<S> {
+  if (!raw || typeof raw !== "object") {
+    return { error: "bad json", status: 400 };
+  }
+  const body = raw as Record<string, unknown>;
+  const text = typeof body.text === "string" ? body.text : "";
+  if (!text) return { error: "missing text", status: 400 };
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    return { error: `text exceeds ${maxBytes} bytes`, status: 413 };
+  }
+  const sid = typeof body.sid === "string" && body.sid ? body.sid : undefined;
+  const ccPid =
+    typeof body.ccPid === "number" && Number.isFinite(body.ccPid)
+      ? body.ccPid
+      : undefined;
+  if (!sid && ccPid === undefined) {
+    return { error: "missing sid or ccPid", status: 400 };
+  }
+  const source =
+    typeof body.source === "string" && body.source ? body.source : "self";
+
+  let match: S | undefined;
+  if (sid) {
+    if (sessions instanceof Map) {
+      match = sessions.get(sid);
+    } else {
+      for (const s of sessions)
+        if (s.sid === sid) {
+          match = s;
+          break;
+        }
+    }
+  } else {
+    const it: Iterable<S> =
+      sessions instanceof Map ? sessions.values() : sessions;
+    for (const s of it) {
+      if (!s.closed && s.ccPid === ccPid) {
+        match = s;
+        break;
+      }
+    }
+  }
+  if (!match) return { error: "no matching session", status: 404 };
+  if (match.closed) return { error: "session closed", status: 410 };
+  if (!match.tmuxPane) {
+    return { error: "session not running inside tmux", status: 409 };
+  }
+  return { session: match, text, source };
 }
 
 function portFilePath(stateDir: string): string {

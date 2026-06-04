@@ -8,6 +8,7 @@ services:
       - CLAUDE_NET_UPLOADS_DIR=/data/uploads
     volumes:
       - ./src:/app/src
+      - ./docs:/app/docs:ro
       - ./.git:/app/.git:ro
       - cn-uploads-dev:/data/uploads
     restart: unless-stopped

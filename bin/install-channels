@@ -51,6 +51,12 @@ chmod +x "$INSTALL_DIR/claude-channels"
 [ -f "$INSTALL_DIR/claude-net-mirror-push" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-push"
 [ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-agent"
 
+# Remove artifacts from a previous release that no longer exist as
+# standalone binaries. claude-net-self-inject was folded into
+# `claude-net-mirror-agent inject` as a subcommand — leaving the old
+# symlink around would shadow PATH for users.
+rm -f "$INSTALL_DIR/claude-net-self-inject" "$BIN_DIR/claude-net-self-inject"
+
 # Symlink to PATH
 ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
 [ -f "$INSTALL_DIR/claude-net-mirror-push" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-push" "$BIN_DIR/claude-net-mirror-push"

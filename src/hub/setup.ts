@@ -57,14 +57,12 @@ mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude"
 
 echo "[1/5] Downloading claude-channels + mirror binaries from \${HUB}…"
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
-         claude-net-self-inject \\
          patch-binary.py mirror-agent.bundle.js; do
     curl -fsSL "\$HUB/bin/\$f" -o "\$INSTALL_DIR/\$f"
 done
 chmod +x "\$INSTALL_DIR/claude-channels" \\
          "\$INSTALL_DIR/claude-net-mirror-push" \\
-         "\$INSTALL_DIR/claude-net-mirror-agent" \\
-         "\$INSTALL_DIR/claude-net-self-inject"
+         "\$INSTALL_DIR/claude-net-mirror-agent"
 
 # Statusline script lives in ~/.claude/ because that's where Claude Code
 # resolves relative paths from in settings.json.statusLine.command.
@@ -73,8 +71,7 @@ curl -fsSL "\$HUB/bin/statusline.py" -o "\$HOME/.claude/statusline.py"
 chmod +x "\$HOME/.claude/statusline.py"
 
 # Symlink into PATH (idempotent)
-for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
-         claude-net-self-inject; do
+for f in claude-channels claude-net-mirror-push claude-net-mirror-agent; do
     ln -snf "\$INSTALL_DIR/\$f" "\$BIN_DIR/\$f"
 done
 

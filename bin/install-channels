@@ -36,9 +36,6 @@ fi
 if [ -f "$SCRIPT_DIR/claude-net-mirror-agent" ]; then
     cp "$SCRIPT_DIR/claude-net-mirror-agent" "$INSTALL_DIR/claude-net-mirror-agent"
 fi
-if [ -f "$SCRIPT_DIR/claude-net-self-inject" ]; then
-    cp "$SCRIPT_DIR/claude-net-self-inject" "$INSTALL_DIR/claude-net-self-inject"
-fi
 # Bundle the mirror-agent TS tree so the installed launcher doesn't need
 # the source tree alongside.
 if [ -f "$SCRIPT_DIR/../src/mirror-agent/agent.ts" ] && command -v bun >/dev/null 2>&1; then
@@ -53,13 +50,11 @@ fi
 chmod +x "$INSTALL_DIR/claude-channels"
 [ -f "$INSTALL_DIR/claude-net-mirror-push" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-push"
 [ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-agent"
-[ -f "$INSTALL_DIR/claude-net-self-inject" ] && chmod +x "$INSTALL_DIR/claude-net-self-inject"
 
 # Symlink to PATH
 ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
 [ -f "$INSTALL_DIR/claude-net-mirror-push" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-push" "$BIN_DIR/claude-net-mirror-push"
 [ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-agent" "$BIN_DIR/claude-net-mirror-agent"
-[ -f "$INSTALL_DIR/claude-net-self-inject" ] && ln -snf "$INSTALL_DIR/claude-net-self-inject" "$BIN_DIR/claude-net-self-inject"
 
 # Retire any running mirror-agent daemon so the next claude-channels launch
 # respawns against the just-installed bundle. The launcher's /health probe

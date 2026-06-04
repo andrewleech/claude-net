@@ -1767,9 +1767,249 @@ function log(msg: string): void {
   process.stderr.write(`[claude-net/mirror] ${msg}\n`);
 }
 
+// ── Self-inject CLI (subcommand of the mirror-agent entry) ────────────────
+//
+// `claude-net-mirror-agent inject [--sid SID|--pid PID] [--source NAME] <text>`
+// reads the port file written by the running daemon, walks the process tree
+// to find the calling Claude Code's pid, and POSTs to /inject. Exit codes:
+//   0 success, 2 unreachable, 3 no matching session,
+//   4 bad arguments, 5 inject rejected (closed, not in tmux, etc.)
+
+interface InjectCliArgs {
+  sid: string | null;
+  pid: number | null;
+  source: string | null;
+  text: string | null;
+  help: boolean;
+}
+
+export function parseInjectCliArgs(
+  argv: string[],
+): InjectCliArgs | { error: string } {
+  const out: InjectCliArgs = {
+    sid: null,
+    pid: null,
+    source: null,
+    text: null,
+    help: false,
+  };
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "-h" || a === "--help") {
+      out.help = true;
+      continue;
+    }
+    if (a === "--sid") {
+      const v = argv[++i];
+      if (!v) return { error: "--sid requires a value" };
+      out.sid = v;
+      continue;
+    }
+    if (a === "--pid") {
+      const v = argv[++i];
+      if (!v) return { error: "--pid requires a value" };
+      const n = Number.parseInt(v, 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        return { error: `--pid must be a positive integer, got '${v}'` };
+      }
+      out.pid = n;
+      continue;
+    }
+    if (a === "--source") {
+      const v = argv[++i];
+      if (!v) return { error: "--source requires a value" };
+      out.source = v;
+      continue;
+    }
+    if (a === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (a?.startsWith("-")) {
+      return { error: `unknown flag: ${a}` };
+    }
+    if (a !== undefined) positional.push(a);
+  }
+  if (positional.length > 0) out.text = positional.join(" ");
+  return out;
+}
+
+const INJECT_CLI_USAGE = [
+  "claude-net-mirror-agent inject — queue text at the calling session's prompt",
+  "",
+  "Usage:",
+  "  claude-net-mirror-agent inject [--sid SID|--pid PID] [--source NAME] <text>",
+  "  echo <text> | claude-net-mirror-agent inject [--sid SID|--pid PID]",
+  "",
+  "Without --sid/--pid, walks the process tree to find Claude Code and",
+  "targets the session bound to that pid.",
+].join("\n");
+
+// NUL (\x00) is the field separator in /proc/PID/cmdline on Linux —
+// argv[0] ends in NUL, not whitespace. The control-char is intentional.
+const CC_BINARY_PATTERN = (() => {
+  const src =
+    process.env.CLAUDE_NET_CC_BINARY_PATTERN ??
+    "\\/claude-patched(?:\\x00|\\s|$)";
+  try {
+    return new RegExp(src);
+  } catch {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: NUL is the /proc/PID/cmdline field separator
+    return /\/claude-patched(?:\x00|\s|$)/;
+  }
+})();
+
+/**
+ * Walk up the process tree to find Claude Code's pid. Mirrors the
+ * resolution in bin/claude-net-mirror-push so both paths agree on
+ * "which CC process owns me".
+ */
+function resolveCallingCcPid(): number | null {
+  let pid = process.ppid;
+  for (let i = 0; i < 6; i++) {
+    const info = readProcessInfo(pid);
+    if (CC_BINARY_PATTERN.test(info.cmdline)) return pid;
+    if (!info.ppid || info.ppid <= 1) break;
+    pid = info.ppid;
+  }
+  return null;
+}
+
+function readProcessInfo(pid: number): { ppid: number; cmdline: string } {
+  if (process.platform === "linux") {
+    try {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = status.match(/^PPid:\s*(\d+)/m);
+      return {
+        ppid: m?.[1] ? Number.parseInt(m[1], 10) : 0,
+        cmdline,
+      };
+    } catch {
+      return { ppid: 0, cmdline: "" };
+    }
+  }
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["ps", "-o", "ppid=,command=", "-p", String(pid)],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = new TextDecoder().decode(result.stdout).trim();
+    const m = out.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m?.[1]) return { ppid: 0, cmdline: "" };
+    return {
+      ppid: Number.parseInt(m[1], 10),
+      cmdline: m[2] ?? "",
+    };
+  } catch {
+    return { ppid: 0, cmdline: "" };
+  }
+}
+
+async function readStdinText(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(
+        typeof chunk === "string"
+          ? Buffer.from(chunk)
+          : Buffer.from(chunk as Uint8Array),
+      );
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+export async function runInjectCli(argv: string[]): Promise<number> {
+  const parsed = parseInjectCliArgs(argv);
+  if ("error" in parsed) {
+    process.stderr.write(`${parsed.error}\n\n${INJECT_CLI_USAGE}\n`);
+    return 4;
+  }
+  if (parsed.help) {
+    process.stdout.write(`${INJECT_CLI_USAGE}\n`);
+    return 0;
+  }
+
+  let text = parsed.text;
+  if (text === null) text = (await readStdinText()).trimEnd();
+  if (!text) {
+    process.stderr.write(`error: no text to inject\n\n${INJECT_CLI_USAGE}\n`);
+    return 4;
+  }
+
+  const uid = process.getuid?.() ?? 0;
+  const portFile = `/tmp/claude-net/mirror-agent-${uid}.port`;
+  let port: number;
+  try {
+    const raw = fs.readFileSync(portFile, "utf8").trim();
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) throw new Error("bad port");
+    port = n;
+  } catch {
+    process.stderr.write(
+      "error: mirror-agent not running (port file missing)\n",
+    );
+    return 2;
+  }
+
+  const body: Record<string, unknown> = { text };
+  if (parsed.source) body.source = parsed.source;
+  if (parsed.sid) {
+    body.sid = parsed.sid;
+  } else if (parsed.pid !== null) {
+    body.ccPid = parsed.pid;
+  } else {
+    const pid = resolveCallingCcPid();
+    if (pid === null) {
+      process.stderr.write(
+        "error: could not resolve Claude Code pid from process tree; pass --sid or --pid explicitly\n",
+      );
+      return 3;
+    }
+    body.ccPid = pid;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/inject`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (res.ok) return 0;
+    const txt = await res
+      .text()
+      .then((s) => s.trim())
+      .catch(() => "");
+    process.stderr.write(`error: ${res.status} ${txt}\n`);
+    if (res.status === 404) return 3;
+    if (res.status === 409 || res.status === 410) return 5;
+    return 5;
+  } catch (err) {
+    process.stderr.write(`error: ${String(err)}\n`);
+    return 2;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Run when invoked directly ─────────────────────────────────────────────
 
 if (import.meta.main) {
+  // Subcommand dispatch — `claude-net-mirror-agent inject ...` routes to
+  // the loopback inject client; no subcommand falls through to daemon mode.
+  if (process.argv[2] === "inject") {
+    const code = await runInjectCli(process.argv.slice(3));
+    process.exit(code);
+  }
   const hub = process.env.CLAUDE_NET_HUB || "http://localhost:4815";
   const portEnv = process.env.CLAUDE_NET_MIRROR_AGENT_PORT;
   const bindPort = portEnv ? Number.parseInt(portEnv, 10) || 0 : 0;

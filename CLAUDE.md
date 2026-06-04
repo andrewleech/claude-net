@@ -71,6 +71,10 @@ The setup endpoint (`GET /setup`) generates a shell script that downloads the pl
 
 `bin/claude-channels` patches the Claude Code binary to enable channels without manual CLI flags. See `docs/CLAUDE_CODE_PATCHING_GUIDE.md` for technical details. Patches are same-length replacements (file size must not change or the Bun binary breaks). Patched binaries are cached by hash at `~/.local/share/claude-channels/`.
 
+## Self-inject
+
+`claude-net-mirror-agent inject "<text>"` lets an agent queue text at its own Claude Code prompt — useful for triggering slash commands (`/mcp reconnect`, `/clear`, `/compact`, `/resume`) that can't be invoked via a regular tool call. See `docs/SELF_INJECT.md` for the full reference, including exit codes, caveats (notably: slash commands execute silently, no `local-command-stdout` echo), and cross-session targeting.
+
 ## Testing
 
 ```

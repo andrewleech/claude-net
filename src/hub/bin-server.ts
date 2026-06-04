@@ -143,29 +143,50 @@ export function substituteBuildHash(
 export function binServerPlugin(deps: BinServerDeps): Elysia {
   const { repoRoot, commitHash } = deps;
 
-  return new Elysia().get("/bin/:name", async ({ params, set }) => {
-    const asset = ASSETS[params.name];
-    if (!asset) {
-      set.status = 404;
-      return "not found";
-    }
+  return (
+    new Elysia()
+      .get("/bin/:name", async ({ params, set }) => {
+        const asset = ASSETS[params.name];
+        if (!asset) {
+          set.status = 404;
+          return "not found";
+        }
 
-    // Lazy-build the JS bundle on first request.
-    if (params.name === "mirror-agent.bundle.js") {
-      if (!ensureBundleBuilt(repoRoot, commitHash)) {
-        set.status = 500;
-        return "bundle build failed; see hub logs";
-      }
-    }
+        // Lazy-build the JS bundle on first request.
+        if (params.name === "mirror-agent.bundle.js") {
+          if (!ensureBundleBuilt(repoRoot, commitHash)) {
+            set.status = 500;
+            return "bundle build failed; see hub logs";
+          }
+        }
 
-    const file = Bun.file(path.join(repoRoot, asset.rel));
-    if (!(await file.exists())) {
-      set.status = 404;
-      return `asset '${params.name}' not present on disk`;
-    }
-    set.headers["content-type"] = asset.contentType;
-    return file;
-  });
+        const file = Bun.file(path.join(repoRoot, asset.rel));
+        if (!(await file.exists())) {
+          set.status = 404;
+          return `asset '${params.name}' not present on disk`;
+        }
+        set.headers["content-type"] = asset.contentType;
+        return file;
+      })
+      // Serve markdown reference docs from docs/*.md. Restricted to flat .md
+      // filenames (no path traversal, no nested directories) so an agent
+      // anywhere on the tailnet can fetch e.g. /docs/SELF_INJECT.md without
+      // accidentally exposing the rest of the repo.
+      .get("/docs/:name", async ({ params, set }) => {
+        const name = params.name;
+        if (!/^[A-Za-z0-9_.-]+\.md$/.test(name)) {
+          set.status = 404;
+          return "not found";
+        }
+        const file = Bun.file(path.join(repoRoot, "docs", name));
+        if (!(await file.exists())) {
+          set.status = 404;
+          return `doc '${name}' not present on disk`;
+        }
+        set.headers["content-type"] = "text/markdown; charset=utf-8";
+        return file;
+      })
+  );
 }
 
 /** Exported for tests. */

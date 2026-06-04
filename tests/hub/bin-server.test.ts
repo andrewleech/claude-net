@@ -54,6 +54,31 @@ describe("bin-server /bin/:name", () => {
     const r1 = await fetch(`${baseUrl}/bin/..%2fpackage.json`);
     expect(r1.status).toBe(404);
   });
+
+  describe("/docs/:name", () => {
+    test("serves a .md file from docs/ with text/markdown content-type", async () => {
+      const r = await fetch(`${baseUrl}/docs/SELF_INJECT.md`);
+      expect(r.status).toBe(200);
+      expect(r.headers.get("content-type")).toContain("text/markdown");
+      const body = await r.text();
+      expect(body.length).toBeGreaterThan(0);
+    });
+
+    test("404 for non-markdown extensions", async () => {
+      const r = await fetch(`${baseUrl}/docs/SELF_INJECT.txt`);
+      expect(r.status).toBe(404);
+    });
+
+    test("404 for path traversal attempts", async () => {
+      const r = await fetch(`${baseUrl}/docs/..%2fpackage.json`);
+      expect(r.status).toBe(404);
+    });
+
+    test("404 for a non-existent .md filename", async () => {
+      const r = await fetch(`${baseUrl}/docs/NOPE.md`);
+      expect(r.status).toBe(404);
+    });
+  });
 });
 
 describe("substituteBuildHash", () => {

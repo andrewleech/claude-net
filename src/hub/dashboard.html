@@ -2390,6 +2390,8 @@
                 <kbd>↵</kbd>send
                 <br>
                 <kbd>⇧↵</kbd>newline
+                <br>
+                <kbd>↑</kbd>recall
               </div>
               <button id="mirror-compose-send" type="button">Transmit</button>
             </div>
@@ -5792,6 +5794,121 @@
       catch (e) { return s.length; }
     }
 
+    // ── Compose history (per-session, localStorage) ───────────────────
+    // Press Up / Down in the compose textarea to recall previous sends —
+    // shell-style. Trigger only at the very start / end of the textarea
+    // so normal multi-line caret navigation still works mid-edit.
+    //
+    // Storage: cn-compose-history-<sid>, JSON array, newest first.
+    // Caps: COMPOSE_HISTORY_MAX entries, COMPOSE_HISTORY_ENTRY_MAX bytes
+    // per entry. Oversize entries (uploads + huge prompts) are skipped to
+    // keep localStorage from blowing the per-origin quota.
+    var COMPOSE_HISTORY_KEY = 'cn-compose-history-' + sid;
+    var COMPOSE_HISTORY_MAX = 30;
+    var COMPOSE_HISTORY_ENTRY_MAX = 64 * 1024;
+    var composeHistoryIdx = -1;
+
+    function loadComposeHistory() {
+      try {
+        var raw = localStorage.getItem(COMPOSE_HISTORY_KEY);
+        if (!raw) return [];
+        var arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    function saveComposeHistory(arr) {
+      try {
+        localStorage.setItem(COMPOSE_HISTORY_KEY, JSON.stringify(arr));
+      } catch (e) {
+        // Quota exceeded or storage disabled — shrink and retry once.
+        try {
+          localStorage.setItem(
+            COMPOSE_HISTORY_KEY,
+            JSON.stringify(arr.slice(0, 5)),
+          );
+        } catch (_e) { /* give up silently */ }
+      }
+    }
+
+    function pushComposeHistory(text) {
+      if (!text || !text.trim()) return;
+      if (utf8Bytes(text) > COMPOSE_HISTORY_ENTRY_MAX) return;
+      var arr = loadComposeHistory();
+      // Dedupe consecutive identical sends (shell-style HISTCONTROL=ignoredups).
+      if (arr.length > 0 && arr[0] === text) return;
+      arr.unshift(text);
+      if (arr.length > COMPOSE_HISTORY_MAX) arr.length = COMPOSE_HISTORY_MAX;
+      saveComposeHistory(arr);
+    }
+
+    function applyHistoryEntry(text) {
+      composeText.value = text;
+      // Caret to end so Up again loads the next entry up.
+      var len = composeText.value.length;
+      try { composeText.setSelectionRange(len, len); } catch (e) { /* ignore */ }
+      autoresizeCompose();
+    }
+
+    function autoresizeCompose() {
+      // Compose textarea has rows=2; on history load with long entries
+      // it would otherwise scroll internally without growing. Match the
+      // behaviour the user expects from typing.
+      if (!composeText) return;
+      composeText.style.height = 'auto';
+      var max = Math.floor(window.innerHeight * 0.5);
+      composeText.style.height = Math.min(composeText.scrollHeight, max) + 'px';
+    }
+
+    function handleComposeKeydown(e) {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
+        // Any other navigation key invalidates the cycle. Use a sentinel
+        // so the next Up starts from history[0] again.
+        if (e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Meta' && e.key !== 'Alt') {
+          composeHistoryIdx = -1;
+        }
+        return;
+      }
+      // Defer to the slash-command popover when it owns Up/Down for
+      // suggestion navigation. The user can still recall from history
+      // by clearing the leading slash first.
+      if (typeof slashOpen !== 'undefined' && slashOpen) return;
+      var atStart = composeText.selectionStart === 0 && composeText.selectionEnd === 0;
+      var atEnd =
+        composeText.selectionStart === composeText.value.length &&
+        composeText.selectionEnd === composeText.value.length;
+      var arr = loadComposeHistory();
+      if (arr.length === 0) return;
+
+      if (e.key === 'ArrowUp' && atStart) {
+        // Step to an older entry; pin at oldest.
+        var nextIdx = composeHistoryIdx < arr.length - 1 ? composeHistoryIdx + 1 : composeHistoryIdx;
+        if (nextIdx === composeHistoryIdx && composeHistoryIdx !== -1) return; // pinned, no change
+        composeHistoryIdx = nextIdx === -1 ? 0 : nextIdx;
+        applyHistoryEntry(arr[composeHistoryIdx]);
+        e.preventDefault();
+      } else if (e.key === 'ArrowDown' && atEnd && composeHistoryIdx >= 0) {
+        // Step toward newer; below 0 means we left history — clear.
+        composeHistoryIdx -= 1;
+        if (composeHistoryIdx < 0) {
+          composeText.value = '';
+          autoresizeCompose();
+        } else {
+          applyHistoryEntry(arr[composeHistoryIdx]);
+        }
+        e.preventDefault();
+      }
+    }
+
+    if (composeText) {
+      composeText.addEventListener('keydown', handleComposeKeydown, { signal: attachSig });
+      composeText.addEventListener('input', function() {
+        composeHistoryIdx = -1;
+      }, { signal: attachSig });
+    }
+
     function doInject() {
       var text = composeText.value;
       if (!text || !text.trim()) return;
@@ -5819,7 +5936,10 @@
             composeErr.className = 'mirror-compose-err';
             composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
           } else {
+            pushComposeHistory(text);
+            composeHistoryIdx = -1;
             composeText.value = '';
+            autoresizeCompose();
             composeErr.className = 'mirror-compose-err is-notice';
             if (useLargeBlobPath && r.body && r.body.path) {
               composeErr.textContent =

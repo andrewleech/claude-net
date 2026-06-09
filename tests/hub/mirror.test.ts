@@ -74,6 +74,101 @@ describe("MirrorRegistry", () => {
     expect(r2.entry.ownerAgent).toBe("renamed:u@h");
   });
 
+  test("createSession bypasses owner mismatch when (host, ccPid) identity matches", () => {
+    // Production version of the keep-alive case above: the hub-side
+    // entry has a host AND was renamed, so the old guard fires the
+    // mismatch check and 409s. With matching host + ccPid the new
+    // POST proves it's the same process, so the rename is accepted as
+    // a keep-alive and the existing (likely better) label is kept.
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-h1",
+      "laptop",
+      4815,
+    );
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    r1.entry.ownerAgent = "renamed-by-mcp:u@h"; // MCP rename happened
+    const r2 = reg.createSession(
+      "alice:u@h", // stale owner the agent is re-POSTing
+      "/home/alice",
+      "sid-h1",
+      "laptop",
+      4815,
+    );
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.restored).toBe(true);
+    // Existing post-rename label preserved.
+    expect(r2.entry.ownerAgent).toBe("renamed-by-mcp:u@h");
+  });
+
+  test("createSession still rejects owner mismatch when host differs", () => {
+    // Hostile-peer guard: same sid claimed from a different host with
+    // a different owner should still 409. Identity proof requires BOTH
+    // host AND ccPid to match the recorded entry.
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-h2",
+      "laptop",
+      4815,
+    );
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = reg.createSession(
+      "evil:u@h",
+      "/home/alice",
+      "sid-h2",
+      "different-host",
+      4815,
+    );
+    expect(r2.ok).toBe(false);
+  });
+
+  test("createSession still rejects owner mismatch when ccPid differs", () => {
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-h3",
+      "laptop",
+      4815,
+    );
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = reg.createSession(
+      "evil:u@h",
+      "/home/alice",
+      "sid-h3",
+      "laptop",
+      9999,
+    );
+    expect(r2.ok).toBe(false);
+  });
+
+  test("createSession rejects owner mismatch when existing ccPid is null", () => {
+    // Defensive: pre-rollout sessions without ccPid stay strict on
+    // owner check — identity proof requires non-null ccPid match.
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-h4",
+      "laptop",
+      null,
+    );
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = reg.createSession(
+      "evil:u@h",
+      "/home/alice",
+      "sid-h4",
+      "laptop",
+      4815,
+    );
+    expect(r2.ok).toBe(false);
+  });
+
   test("getSession returns the entry for a known sid, 404 otherwise", () => {
     const r = reg.createSession("alice:u@h", "/home/alice");
     expect(r.ok).toBe(true);

@@ -119,12 +119,18 @@ const MAX_SELF_INJECT_BYTES = (() => {
   return kb * 1024;
 })();
 
-/** Recovery retry schedule. Hub redeploys typically take 10–30 s so the
- *  worst-case ~8 min window here covers nearly anything short of total
- *  hub failure. */
+/** Recovery retry schedule. Burst phase covers the common case (hub
+ *  redeploys, 10–30 s outages) with exponential backoff up to
+ *  RECOVERY_MAX_DELAY_MS over RECOVERY_BURST_ATTEMPTS attempts (~8 min
+ *  worst case). After the burst the loop switches to slow-retry mode —
+ *  one attempt every RECOVERY_SLOW_DELAY_MS, indefinitely — so a
+ *  prolonged hub outage eventually self-heals without operator
+ *  intervention instead of leaving the session permanently wedged with
+ *  a full outbox eating events into the bit bucket. */
 const RECOVERY_INITIAL_DELAY_MS = 1_000;
 const RECOVERY_MAX_DELAY_MS = 30_000;
-const RECOVERY_MAX_ATTEMPTS = 20;
+const RECOVERY_BURST_ATTEMPTS = 20;
+const RECOVERY_SLOW_DELAY_MS = 5 * 60 * 1000;
 
 /** Maximum age of an isApiErrorMessage JSONL record we'll report to the
  *  hub. The JSONL tail re-reads from byte 0 on every agent start, so
@@ -764,8 +770,11 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
 
       let delayMs = RECOVERY_INITIAL_DELAY_MS;
-      for (let attempt = 1; attempt <= RECOVERY_MAX_ATTEMPTS; attempt++) {
+      let slowMode = false;
+      let attempt = 0;
+      while (true) {
         if (session.closed) return;
+        attempt++;
         try {
           const res = await fetch(`${hubUrl}/api/mirror/session`, {
             method: "POST",
@@ -784,20 +793,31 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             return;
           }
           log(
-            `[${session.sid}] recovery: HTTP ${res.status} on attempt ${attempt}/${RECOVERY_MAX_ATTEMPTS}; retry in ${delayMs}ms`,
+            `[${session.sid}] recovery: HTTP ${res.status} on attempt ${attempt}${slowMode ? " (slow)" : ""}; retry in ${delayMs}ms`,
           );
         } catch (err) {
           log(
-            `[${session.sid}] recovery: fetch threw on attempt ${attempt}/${RECOVERY_MAX_ATTEMPTS}: ${String(err)}; retry in ${delayMs}ms`,
+            `[${session.sid}] recovery: fetch threw on attempt ${attempt}${slowMode ? " (slow)" : ""}: ${String(err)}; retry in ${delayMs}ms`,
           );
         }
-        if (attempt === RECOVERY_MAX_ATTEMPTS) break;
         await sleep(delayMs);
-        delayMs = Math.min(delayMs * 2, RECOVERY_MAX_DELAY_MS);
+        // Burst phase grows the delay exponentially up to the burst cap;
+        // after RECOVERY_BURST_ATTEMPTS we switch to slow-retry mode and
+        // keep going indefinitely. This replaces the older "give up after
+        // 20 attempts" behaviour that left sessions permanently wedged
+        // with overflowing outboxes whenever the hub took longer than
+        // ~8 min to come back (or returned 409 the whole time, e.g. an
+        // identity mismatch the hub side has since been taught to allow).
+        if (attempt < RECOVERY_BURST_ATTEMPTS) {
+          delayMs = Math.min(delayMs * 2, RECOVERY_MAX_DELAY_MS);
+        } else if (!slowMode) {
+          slowMode = true;
+          log(
+            `[${session.sid}] recovery burst exhausted; switching to slow retry every ${Math.round(RECOVERY_SLOW_DELAY_MS / 60_000)}min`,
+          );
+          delayMs = RECOVERY_SLOW_DELAY_MS;
+        }
       }
-      log(
-        `[${session.sid}] recovery exhausted after ${RECOVERY_MAX_ATTEMPTS} attempts — session wedged, restart claude-channels to retry`,
-      );
     } finally {
       session.recovering = false;
     }

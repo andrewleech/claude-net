@@ -455,11 +455,26 @@ export class MirrorRegistry {
       // the incoming owner differs. Legitimate keep-alive reconnects always
       // send the same cwd-derived owner; a mismatch from a different peer
       // would silently relabel the session on a shared Tailscale network.
-      // Exception: existing.ownerAgent may be blank for pre-rollout sessions.
+      // Exception 1: existing.ownerAgent may be blank for pre-rollout
+      // sessions. Exception 2: if the incoming POST proves it's the same
+      // process via (host, ccPid) — both non-null and identical — trust
+      // it. This is the MCP-rename-during-recovery path: the agent stores
+      // the cwd-derived owner from its initial POST and never learns the
+      // MCP-registered label, so its recovery POST after a WS drop sends
+      // a "stale" owner. Rejecting that POST permanently wedges the
+      // session until claude-channels restarts.
+      const identityMatches =
+        !!existing.host &&
+        !!host &&
+        existing.host === host &&
+        existing.ccPid !== null &&
+        ccPid !== null &&
+        existing.ccPid === ccPid;
       if (
         existing.host &&
         existing.ownerAgent &&
-        ownerAgent !== existing.ownerAgent
+        ownerAgent !== existing.ownerAgent &&
+        !identityMatches
       ) {
         return { ok: false, error: "Session owner mismatch." };
       }

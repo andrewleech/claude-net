@@ -5930,6 +5930,19 @@
       return composeText.value.length === 0 || inHistoryMode();
     }
 
+    // Overscroll guards: only step history when the textarea can't
+    // scroll any further in the swipe direction. This lets the user
+    // read a long recalled entry with a normal scroll gesture before
+    // continuing past the edge to step to another entry.
+    function canScrollUp() {
+      return composeText.scrollTop > 0;
+    }
+    function canScrollDown() {
+      // -1 grace for sub-pixel rounding at the bottom edge.
+      return composeText.scrollTop + composeText.clientHeight <
+        composeText.scrollHeight - 1;
+    }
+
     function swipeOlder(arr) {
       if (composeHistoryIdx < arr.length - 1) {
         composeHistoryIdx = composeHistoryIdx < 0 ? 0 : composeHistoryIdx + 1;
@@ -5978,22 +5991,34 @@
         if (arr.length === 0) return;
         var deltaY = swipeStartY - e.touches[0].clientY; // up positive
         var stepped = false;
-        // Up — older
-        while (deltaY - swipeAccumulated >= SWIPE_STEP_PX) {
-          if (!swipeOlder(arr)) break;
-          swipeAccumulated += SWIPE_STEP_PX;
-          stepped = true;
+        // Up swipe steps to older only when the textarea is already at
+        // the top (overscroll). Otherwise the user is scrolling the
+        // recalled entry's content — leave it alone.
+        if (deltaY > 0 && !canScrollUp()) {
+          while (deltaY - swipeAccumulated >= SWIPE_STEP_PX) {
+            if (!swipeOlder(arr)) break;
+            swipeAccumulated += SWIPE_STEP_PX;
+            stepped = true;
+          }
         }
-        // Down — newer
-        while (swipeAccumulated - deltaY >= SWIPE_STEP_PX) {
-          if (!swipeNewer(arr)) break;
-          swipeAccumulated -= SWIPE_STEP_PX;
-          stepped = true;
+        // Down swipe steps to newer (and eventually clears) only when
+        // the textarea is already at the bottom.
+        if (deltaY < 0 && !canScrollDown()) {
+          while (swipeAccumulated - deltaY >= SWIPE_STEP_PX) {
+            if (!swipeNewer(arr)) break;
+            swipeAccumulated -= SWIPE_STEP_PX;
+            stepped = true;
+          }
         }
         if (stepped) {
-          // Stop the OS from also scrolling the page / textarea during
-          // a recall swipe.
+          // Stop the OS from also scrolling the page / textarea past
+          // the edge while we're cycling history.
           if (e.cancelable) e.preventDefault();
+          // Reset the gesture origin to the current pointer position
+          // so a future direction reversal doesn't have to "undo" the
+          // accumulated travel — feels like a fresh gesture from here.
+          swipeStartY = e.touches[0].clientY;
+          swipeAccumulated = 0;
         }
       }, { signal: attachSig, passive: false });
 

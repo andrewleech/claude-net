@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   encodeProjectDirName,
   findActiveSessionForCcPid,
+  readTmuxPaneFromCcEnv,
 } from "@/mirror-agent/agent";
 
 describe("encodeProjectDirName", () => {
@@ -114,5 +115,38 @@ describe("findActiveSessionForCcPid", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "scratch.txt"), "no transcripts here");
     expect(findActiveSessionForCcPid(0, cwd, tmpHome)).toBe(null);
+  });
+});
+
+describe("readTmuxPaneFromCcEnv", () => {
+  test("reads TMUX_PANE from this process's own environ when set", () => {
+    if (process.platform !== "linux") return; // /proc-only path
+    // Bun preserves the parent env via process.env — use self.
+    const previous = process.env.TMUX_PANE;
+    try {
+      // We can't actually set our own /proc/<self>/environ — it's
+      // snapshot at exec. Verify only that a missing var returns
+      // undefined, and that an existing var (when present) is read.
+      const ownPane = readTmuxPaneFromCcEnv(process.pid);
+      if (previous) {
+        expect(ownPane).toBe(previous);
+      } else {
+        expect(ownPane).toBeUndefined();
+      }
+    } finally {
+      // Don't mutate state; nothing was written.
+      void previous;
+    }
+  });
+
+  test("returns undefined for an obviously bogus pid", () => {
+    if (process.platform !== "linux") return;
+    expect(readTmuxPaneFromCcEnv(2 ** 31 - 1)).toBeUndefined();
+  });
+
+  test("returns undefined for non-finite pid input", () => {
+    expect(readTmuxPaneFromCcEnv(Number.NaN)).toBeUndefined();
+    expect(readTmuxPaneFromCcEnv(0)).toBeUndefined();
+    expect(readTmuxPaneFromCcEnv(-1)).toBeUndefined();
   });
 });

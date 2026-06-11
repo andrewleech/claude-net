@@ -281,13 +281,20 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // with two rows per CC — a placeholder probe row that never gets
       // events, and a separate hook-created row that does.
       const discovered = findActiveSessionForCcPid(ccPid, cwd);
+      // Also pull TMUX_PANE from the CC process's environ so probe-
+      // created sessions can be inject targets without waiting for a
+      // hook to bring TMUX_PANE through. Hooks remain the source of
+      // truth — once one fires, the same value gets reapplied via the
+      // hook handler's tmuxPane field — but the agent has the pane on
+      // hand from session-open onwards instead of "until first hook".
+      const tmuxPane = readTmuxPaneFromCcEnv(ccPid);
       const sid = probeAttempts.begin(ccPid, discovered?.sessionId);
       log(
         `[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}${
           discovered ? " (from disk)" : ""
-        }`,
+        }${tmuxPane ? ` pane=${tmuxPane}` : ""}`,
       );
-      openSession(sid, cwd, discovered?.transcriptPath, undefined, ccPid)
+      openSession(sid, cwd, discovered?.transcriptPath, tmuxPane, ccPid)
         .then((session) => {
           if (session) {
             probeAttempts.succeeded(ccPid);
@@ -1580,6 +1587,31 @@ function deriveOwnerAgent(cwd: string): string {
   const user = os.userInfo().username || process.env.USER || "user";
   const host = os.hostname() || "host";
   return `${session}:${user}@${host}`;
+}
+
+/**
+ * Read TMUX_PANE from the process's environ. Linux-only path: parses
+ * /proc/<pid>/environ. Returns `undefined` when the file is missing,
+ * the env var isn't set (CC not running under tmux), or anything goes
+ * wrong reading it. Mirrors the behaviour of the existing hook wrapper
+ * (claude-net-mirror-push) which picks the same field out of its own
+ * `process.env` — this path just lets the agent see it without
+ * waiting for a hook to fire.
+ */
+export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
+  if (!Number.isFinite(ccPid) || ccPid <= 0) return undefined;
+  try {
+    const raw = fs.readFileSync(`/proc/${ccPid}/environ`, "utf8");
+    for (const entry of raw.split("\0")) {
+      if (entry.startsWith("TMUX_PANE=")) {
+        const value = entry.slice("TMUX_PANE=".length);
+        return value || undefined;
+      }
+    }
+  } catch {
+    // /proc not available (non-Linux) or pid gone — fall through.
+  }
+  return undefined;
 }
 
 /**

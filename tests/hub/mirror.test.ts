@@ -147,6 +147,95 @@ describe("MirrorRegistry", () => {
     expect(r2.ok).toBe(false);
   });
 
+  test("createSession dedupes zombie placeholders sharing (host, ccPid)", () => {
+    // An older-bundle agent that mints fresh UUIDs per probe will pile
+    // up zombie entries on the hub — the sweeper can't touch them
+    // because they're agent-bound. When a new session POST arrives with
+    // the same (host, ccPid) but a different sid AND the existing
+    // session has zero transcript, we close the existing zombie.
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-z1",
+      "laptop",
+      9001,
+    );
+    expect(r1.ok).toBe(true);
+    expect(reg.sessions.has("sid-z1")).toBe(true);
+    const r2 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-z2",
+      "laptop",
+      9001,
+    );
+    expect(r2.ok).toBe(true);
+    // Zombie closed and dropped.
+    expect(reg.sessions.has("sid-z1")).toBe(false);
+    // New session kept.
+    expect(reg.sessions.has("sid-z2")).toBe(true);
+  });
+
+  test("createSession dedup leaves entries with non-empty transcript alone", () => {
+    // Sanity: a real session (any transcript content) is NOT closed by
+    // the zombie dedup, even when a sibling sid arrives for the same
+    // (host, ccPid). Only zero-transcript placeholders are sweepable.
+    const r1 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-real",
+      "laptop",
+      9002,
+    );
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    // Simulate "a real event has flowed".
+    r1.entry.transcript.push({
+      action: "mirror_event",
+      sid: "sid-real",
+      uuid: "u-1",
+      ts: 0,
+      kind: "user_prompt",
+      payload: { kind: "user_prompt", prompt: "hi", cwd: "/home/alice" },
+    });
+    const r2 = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-newcomer",
+      "laptop",
+      9002,
+    );
+    expect(r2.ok).toBe(true);
+    expect(reg.sessions.has("sid-real")).toBe(true);
+    expect(reg.sessions.has("sid-newcomer")).toBe(true);
+  });
+
+  test("createSession dedup leaves sessions on a different ccPid alone", () => {
+    reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-other-ccpid",
+      "laptop",
+      1234,
+    );
+    reg.createSession("alice:u@h", "/home/alice", "sid-new", "laptop", 5678);
+    expect(reg.sessions.has("sid-other-ccpid")).toBe(true);
+    expect(reg.sessions.has("sid-new")).toBe(true);
+  });
+
+  test("createSession dedup leaves sessions on a different host alone", () => {
+    reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-other-host",
+      "desktop",
+      9003,
+    );
+    reg.createSession("alice:u@h", "/home/alice", "sid-laptop", "laptop", 9003);
+    expect(reg.sessions.has("sid-other-host")).toBe(true);
+    expect(reg.sessions.has("sid-laptop")).toBe(true);
+  });
+
   test("createSession rejects owner mismatch when existing ccPid is null", () => {
     // Defensive: pre-rollout sessions without ccPid stay strict on
     // owner check — identity proof requires non-null ccPid match.
@@ -499,21 +588,44 @@ describe("MirrorRegistry", () => {
   test("attachAgent rewrites sessions matching (host, ccPid) and broadcasts", () => {
     const events: Record<string, unknown>[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
-    // Two sessions belong to CC pid 1000 on host "laptop".
-    reg.createSession(
+    // Two sessions belong to CC pid 1000 on host "laptop". This is the
+    // legitimate "fork" shape (e.g. /clear or /compact starts a new
+    // session_id with the same ccPid) — both have real transcript
+    // content, so the zombie-dedup in createSession leaves them alone.
+    const r1 = reg.createSession(
       "skydeck:alice@laptop",
       "/work/sky",
       "s1",
       "laptop",
       1000,
     );
-    reg.createSession(
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    r1.entry.transcript.push({
+      action: "mirror_event",
+      sid: "s1",
+      uuid: "u1",
+      ts: 0,
+      kind: "user_prompt",
+      payload: { kind: "user_prompt", prompt: "x", cwd: "/work/sky" },
+    });
+    const r2 = reg.createSession(
       "skydeck:alice@laptop",
       "/work/sky",
       "s2",
       "laptop",
       1000,
     );
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    r2.entry.transcript.push({
+      action: "mirror_event",
+      sid: "s2",
+      uuid: "u2",
+      ts: 0,
+      kind: "user_prompt",
+      payload: { kind: "user_prompt", prompt: "y", cwd: "/work/sky" },
+    });
     // Third belongs to a different CC pid — must NOT be touched.
     reg.createSession(
       "skydeck:alice@laptop",

@@ -275,9 +275,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
       // Skip if a probe is in-flight or recently failed (cooldown).
       if (probeAttempts.shouldSkip(ccPid)) return;
-      const sid = probeAttempts.begin(ccPid);
-      log(`[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}`);
-      openSession(sid, cwd, undefined, undefined, ccPid)
+      // Discover the CC's real session_id + transcript path from disk
+      // so the probe row converges with the hook-fired session. Without
+      // this the probe mints a fresh UUID and the dashboard ends up
+      // with two rows per CC — a placeholder probe row that never gets
+      // events, and a separate hook-created row that does.
+      const discovered = findActiveSessionForCcPid(ccPid, cwd);
+      const sid = probeAttempts.begin(ccPid, discovered?.sessionId);
+      log(
+        `[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}${
+          discovered ? " (from disk)" : ""
+        }`,
+      );
+      openSession(sid, cwd, discovered?.transcriptPath, undefined, ccPid)
         .then((session) => {
           if (session) {
             probeAttempts.succeeded(ccPid);
@@ -1570,6 +1580,80 @@ function deriveOwnerAgent(cwd: string): string {
   const user = os.userInfo().username || process.env.USER || "user";
   const host = os.hostname() || "host";
   return `${session}:${user}@${host}`;
+}
+
+/**
+ * Encode a cwd to the directory name Claude Code uses under
+ * ~/.claude/projects/. Replaces every non-alphanumeric byte with '-'.
+ * Verified against real on-disk layouts (e.g. /home/anl/claude-net →
+ * -home-anl-claude-net, /home/anl/claude_marketplace/.claude/worktrees
+ * → -home-anl-claude-marketplace--claude-worktrees).
+ */
+export function encodeProjectDirName(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+export interface DiscoveredSession {
+  sessionId: string;
+  transcriptPath: string;
+}
+
+/**
+ * Locate the most recently-modified JSONL transcript for a CC pid +
+ * cwd, returning its filename-derived session_id and absolute path.
+ * Used by the probe handler so probe-created sessions converge on the
+ * same sid the CC will fire its hooks with (rather than minting a
+ * fresh UUID that's guaranteed to disagree).
+ *
+ * Returns null when the projects dir is absent, empty, or unreadable
+ * — the probe falls back to its old "fresh UUID" path in that case so
+ * the broader behaviour is unchanged.
+ *
+ * `ccPid` is currently unused but kept on the signature so a future
+ * refinement (e.g. /proc/<pid>/fd scan for a held JSONL on Linux) can
+ * land without touching call sites. The mtime fallback covers macOS
+ * and is robust against CC's open/close-per-write pattern on Linux.
+ */
+export function findActiveSessionForCcPid(
+  _ccPid: number,
+  cwd: string,
+  home: string = os.homedir(),
+): DiscoveredSession | null {
+  if (!cwd) return null;
+  const projectDir = path.join(
+    home,
+    ".claude",
+    "projects",
+    encodeProjectDirName(cwd),
+  );
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(projectDir);
+  } catch {
+    return null;
+  }
+  let best: { name: string; mtimeMs: number } | null = null;
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    try {
+      const stat = fs.statSync(path.join(projectDir, name));
+      if (best === null || stat.mtimeMs > best.mtimeMs) {
+        best = { name, mtimeMs: stat.mtimeMs };
+      }
+    } catch {
+      // skip unreadable file
+    }
+  }
+  if (!best) return null;
+  const sessionId = best.name.slice(0, -".jsonl".length);
+  // Belt-and-braces: the session_id should be a UUID. If the filename
+  // doesn't look like one, treat the discovery as a miss so we don't
+  // feed a malformed sid into the rest of the pipeline.
+  if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) return null;
+  return {
+    sessionId,
+    transcriptPath: path.join(projectDir, best.name),
+  };
 }
 
 /**

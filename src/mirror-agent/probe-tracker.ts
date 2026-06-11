@@ -52,10 +52,17 @@ export class ProbeAttemptTracker {
    * Mark a probe as in-flight and return the sid to use. Reuses the
    * cached sid if a prior attempt for this ccPid failed, so the retry
    * is idempotent against the hub's by-sid dedup.
+   *
+   * If `preassignedSid` is provided AND no sid is cached yet for this
+   * ccPid, the preassigned value wins over the fresh-UUID fallback.
+   * This lets callers seed the probe with a real Claude Code session_id
+   * discovered from disk so the probe row and the eventual hook-fired
+   * session converge on the same sid (without it, the probe creates a
+   * throwaway UUID and the dashboard ends up with two rows per CC).
    */
-  begin(ccPid: number): string {
+  begin(ccPid: number, preassignedSid?: string): string {
     const existing = this.attempts.get(ccPid);
-    const sid = existing?.sid ?? this.genSid();
+    const sid = existing?.sid ?? preassignedSid ?? this.genSid();
     this.attempts.set(ccPid, {
       sid,
       pending: true,

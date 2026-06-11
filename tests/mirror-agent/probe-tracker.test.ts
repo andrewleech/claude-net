@@ -81,6 +81,37 @@ describe("ProbeAttemptTracker", () => {
     expect(() => t.succeeded(999)).not.toThrow();
   });
 
+  test("preassigned sid wins over the fresh-UUID fallback on first begin", () => {
+    let counter = 0;
+    const t = new ProbeAttemptTracker(
+      30_000,
+      () => 0,
+      () => `sid-${++counter}`,
+    );
+    const sid = t.begin(123, "real-session-id");
+    expect(sid).toBe("real-session-id");
+    expect(counter).toBe(0); // genSid was never called
+  });
+
+  test("cached sid from a prior begin wins over a later preassignment", () => {
+    let counter = 0;
+    let now = 0;
+    const t = new ProbeAttemptTracker(
+      30_000,
+      () => now,
+      () => `sid-${++counter}`,
+    );
+    // First probe lays down a cached sid (the fresh-UUID one).
+    const sid1 = t.begin(123);
+    expect(sid1).toBe("sid-1");
+    t.failed(123);
+    // Later retry passes a preassigned sid, but the cached one wins so
+    // the retry stays idempotent against the hub's by-sid dedup.
+    now = 31_000;
+    const sid2 = t.begin(123, "different-real-id");
+    expect(sid2).toBe("sid-1");
+  });
+
   test("failed() on an unknown ccPid is a no-op (no record created)", () => {
     const t = new ProbeAttemptTracker();
     t.failed(999);

@@ -504,6 +504,28 @@ export class MirrorRegistry {
       if (matched) resolvedOwner = matched;
     }
 
+    // Dedup zombie placeholders: if any existing session shares this
+    // (host, ccPid) but has a different sid AND has never seen an event,
+    // close it. Happens when an older-bundle mirror-agent mints fresh
+    // UUIDs on every probe instead of using the disk-discovered
+    // session_id — the hub then accumulates zombies the sweeper can't
+    // touch because they're agent-bound. Match on identity, never on
+    // ownerAgent string (it may have been MCP-renamed since).
+    if (host && ccPid !== null) {
+      const sweep: string[] = [];
+      for (const existing of this.sessions.values()) {
+        if (existing.closedAt) continue;
+        if (existing.sid === actualSid) continue;
+        if (existing.host !== host) continue;
+        if (existing.ccPid !== ccPid) continue;
+        if (existing.transcript.length > 0) continue;
+        sweep.push(existing.sid);
+      }
+      for (const sid of sweep) {
+        this.closeAndDrop(sid, "agent_timeout");
+      }
+    }
+
     const now = new Date();
     const entry: MirrorSessionEntry = {
       sid: actualSid,

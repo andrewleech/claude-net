@@ -5909,6 +5909,105 @@
       }, { signal: attachSig });
     }
 
+    // ── Touch swipe history recall ───────────────────────────────────
+    // On phones there's no Up arrow, so a vertical swipe inside the
+    // compose textarea cycles through the same per-session history the
+    // keyboard handler uses. Up = older, down = newer (towards empty).
+    // Only fires when the textarea is empty OR the user is already in
+    // history-recall mode (composeHistoryIdx >= 0) so normal touch-
+    // scroll inside a multi-line draft isn't hijacked.
+    var SWIPE_STEP_PX = 40;
+    var swipeStartY = null;
+    var swipeAccumulated = 0;
+
+    function inHistoryMode() {
+      return composeHistoryIdx >= 0;
+    }
+
+    function maySwipeRecall() {
+      if (typeof slashOpen !== 'undefined' && slashOpen) return false;
+      // Empty textarea OR already cycling history.
+      return composeText.value.length === 0 || inHistoryMode();
+    }
+
+    function swipeOlder(arr) {
+      if (composeHistoryIdx < arr.length - 1) {
+        composeHistoryIdx = composeHistoryIdx < 0 ? 0 : composeHistoryIdx + 1;
+        applyHistoryEntry(arr[composeHistoryIdx]);
+        return true;
+      }
+      return false;
+    }
+
+    function swipeNewer(arr) {
+      if (composeHistoryIdx > 0) {
+        composeHistoryIdx -= 1;
+        applyHistoryEntry(arr[composeHistoryIdx]);
+        return true;
+      }
+      if (composeHistoryIdx === 0) {
+        composeHistoryIdx = -1;
+        composeText.value = '';
+        autoresizeCompose();
+        return true;
+      }
+      return false;
+    }
+
+    if (composeText) {
+      composeText.addEventListener('touchstart', function(e) {
+        if (e.touches.length !== 1) {
+          swipeStartY = null;
+          return;
+        }
+        if (!maySwipeRecall()) {
+          swipeStartY = null;
+          return;
+        }
+        swipeStartY = e.touches[0].clientY;
+        swipeAccumulated = 0;
+      }, { signal: attachSig, passive: true });
+
+      composeText.addEventListener('touchmove', function(e) {
+        if (swipeStartY === null || e.touches.length !== 1) return;
+        if (!maySwipeRecall()) {
+          swipeStartY = null;
+          return;
+        }
+        var arr = loadComposeHistory();
+        if (arr.length === 0) return;
+        var deltaY = swipeStartY - e.touches[0].clientY; // up positive
+        var stepped = false;
+        // Up — older
+        while (deltaY - swipeAccumulated >= SWIPE_STEP_PX) {
+          if (!swipeOlder(arr)) break;
+          swipeAccumulated += SWIPE_STEP_PX;
+          stepped = true;
+        }
+        // Down — newer
+        while (swipeAccumulated - deltaY >= SWIPE_STEP_PX) {
+          if (!swipeNewer(arr)) break;
+          swipeAccumulated -= SWIPE_STEP_PX;
+          stepped = true;
+        }
+        if (stepped) {
+          // Stop the OS from also scrolling the page / textarea during
+          // a recall swipe.
+          if (e.cancelable) e.preventDefault();
+        }
+      }, { signal: attachSig, passive: false });
+
+      composeText.addEventListener('touchend', function() {
+        swipeStartY = null;
+        swipeAccumulated = 0;
+      }, { signal: attachSig, passive: true });
+
+      composeText.addEventListener('touchcancel', function() {
+        swipeStartY = null;
+        swipeAccumulated = 0;
+      }, { signal: attachSig, passive: true });
+    }
+
     function doInject() {
       var text = composeText.value;
       if (!text || !text.trim()) return;

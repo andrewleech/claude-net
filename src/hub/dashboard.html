@@ -745,6 +745,25 @@
     text-transform: uppercase;
   }
   .m-evt-notif::after { background: var(--text-muted); }
+  /* Permission-prompt notifications carry a multi-line numbered menu
+     appended by the mirror-agent. Preserve newlines and keep the
+     case as-typed; the uppercase telegraphic style would mangle the
+     option labels into shouting. */
+  .m-evt-prompt {
+    padding: 6px 24px 6px 128px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .m-evt-prompt .m-prompt-title {
+    color: var(--gold);
+    font-weight: 600;
+  }
+  .m-evt-prompt .m-prompt-option {
+    display: block;
+  }
   .m-evt-compact {
     text-align: center;
     color: var(--text-muted);
@@ -1257,10 +1276,11 @@
     margin-right: 4px;
   }
   .cn-prompt-actions {
-    display: inline-flex;
-    align-items: center;
+    display: flex;
+    align-items: stretch;
     gap: 6px;
     flex-wrap: wrap;
+    flex: 1 1 100%;
   }
   .cn-prompt-actions .btn {
     font-family: var(--font-mono);
@@ -1272,6 +1292,17 @@
     --bs-btn-hover-color: var(--on-accent);
     --bs-btn-hover-bg: var(--gold);
     --bs-btn-hover-border-color: var(--gold);
+  }
+  /* Labeled option buttons stretch full-width so the text stays
+     readable; bare 1/2/3 fallback buttons (no parsed menu) keep
+     their compact size. */
+  .cn-prompt-actions .cn-prompt-opt {
+    flex: 1 1 200px;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+    padding: 6px 10px;
   }
   .cn-prompt-dismiss {
     filter: invert(1) grayscale(100%) brightness(2);
@@ -2369,13 +2400,7 @@
              after the user answered. -->
         <div class="cn-prompt-banner" id="mirror-prompt-banner" hidden>
           <div class="cn-prompt-text" id="mirror-prompt-text"></div>
-          <div class="cn-prompt-actions">
-            <button type="button" data-prompt-key="1" class="btn btn-sm btn-outline-light">1</button>
-            <button type="button" data-prompt-key="2" class="btn btn-sm btn-outline-light">2</button>
-            <button type="button" data-prompt-key="3" class="btn btn-sm btn-outline-light">3</button>
-            <button type="button" data-prompt-key="esc" class="btn btn-sm btn-outline-light">Esc</button>
-            <button type="button" class="btn-close cn-prompt-dismiss" aria-label="Dismiss"></button>
-          </div>
+          <div class="cn-prompt-actions" id="mirror-prompt-actions"></div>
         </div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
@@ -5277,9 +5302,43 @@
         else renderUnknownToolResult(payload, el, { images: images });
         appendImageCard(el, images);
       } else if (kind === 'notification') {
-        el = document.createElement('div');
-        el.className = 'm-evt m-evt-notif';
-        el.innerHTML = escapeHtml(payload.text || '');
+        var notifText = payload.text || '';
+        var parsedMenu = parsePromptMenu(notifText);
+        // Drop the previous notification card if this one is a
+        // richer (menu-bearing) version of it — same title, plus the
+        // numbered options the mirror-agent scraped from tmux. Keeps
+        // the chat from stacking "CLAUDE NEEDS YOUR PERMISSION" rows.
+        if (parsedMenu && parsedMenu.options.length > 0 && lastNotifEl) {
+          var prev = lastNotifTitle || '';
+          if (prev && notifText.indexOf(prev) === 0 && lastNotifEl.parentNode === transcriptEl) {
+            transcriptEl.removeChild(lastNotifEl);
+            lastNotifEl = null;
+            lastNotifTitle = '';
+          }
+        }
+        if (parsedMenu && parsedMenu.options.length > 0) {
+          el = document.createElement('div');
+          el.className = 'm-evt m-evt-prompt';
+          var titleEl = document.createElement('span');
+          titleEl.className = 'm-prompt-title';
+          titleEl.textContent = parsedMenu.title;
+          el.appendChild(titleEl);
+          el.appendChild(document.createTextNode('\n'));
+          for (var pi = 0; pi < parsedMenu.options.length; pi++) {
+            var optEl = document.createElement('span');
+            optEl.className = 'm-prompt-option';
+            optEl.textContent = parsedMenu.options[pi].key + '. ' + parsedMenu.options[pi].label;
+            el.appendChild(optEl);
+          }
+          lastNotifEl = el;
+          lastNotifTitle = notifText;
+        } else {
+          el = document.createElement('div');
+          el.className = 'm-evt m-evt-notif';
+          el.innerHTML = escapeHtml(notifText);
+          lastNotifEl = el;
+          lastNotifTitle = notifText;
+        }
         // Fire the permission-banner side-effect for attention-
         // getting notifications. Inline card still renders as
         // history; the banner is the at-a-glance affordance.
@@ -5287,7 +5346,7 @@
         // "paste from …") — their text can quote user input that
         // happens to contain the permission regex keywords, which
         // would misfire the banner on the user's own message.
-        onNotificationEvent(payload.text || '', payload.source || '');
+        onNotificationEvent(notifText, payload.source || '');
       } else if (kind === 'compact') {
         el = document.createElement('div');
         el.className = 'm-evt m-evt-compact';
@@ -5473,13 +5532,63 @@
     // with quick-inject buttons covering the common modal options.
     var promptBannerEl = document.getElementById('mirror-prompt-banner');
     var promptTextEl = document.getElementById('mirror-prompt-text');
+    var promptActionsEl = document.getElementById('mirror-prompt-actions');
     // Keep in sync with isPermissionNotification in mirror-agent/agent.ts.
     var PROMPT_RE = /permission|approval|allow|needs your|waiting for input/i;
 
+    // Tracks the most recently rendered notification card so a
+    // follow-up augmented notification (same title + menu) can
+    // replace it rather than stacking duplicate rows.
+    var lastNotifEl = null;
+    var lastNotifTitle = '';
+
+    // Bridge to the extracted parser so behaviour is unit-tested.
+    function parsePromptMenu(text) { return window.Parsers.parsePromptMenu(text); }
+
     function showPromptBanner(text) {
       if (!promptBannerEl) return;
-      promptTextEl.textContent = text;
+      var parsed = parsePromptMenu(text);
+      // Render the text portion. With a parsed menu, show only the
+      // title — the options live on their own buttons below. Without
+      // a menu (just the title-only notification, fired before the
+      // mirror-agent scraped the pane), show the whole text.
+      promptTextEl.textContent = parsed ? parsed.title : text;
+      renderPromptActions(parsed);
       promptBannerEl.removeAttribute('hidden');
+    }
+    function renderPromptActions(parsed) {
+      if (!promptActionsEl) return;
+      // Wipe existing buttons; rebuild from parsed options.
+      promptActionsEl.textContent = '';
+      var options =
+        parsed && parsed.options.length > 0
+          ? parsed.options.map(function (o) {
+              return { key: o.key, label: o.key + '. ' + o.label };
+            })
+          : [
+              { key: '1', label: '1' },
+              { key: '2', label: '2' },
+              { key: '3', label: '3' },
+            ];
+      for (var i = 0; i < options.length; i++) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-light cn-prompt-opt';
+        btn.setAttribute('data-prompt-key', options[i].key);
+        btn.textContent = options[i].label;
+        promptActionsEl.appendChild(btn);
+      }
+      var escBtn = document.createElement('button');
+      escBtn.type = 'button';
+      escBtn.className = 'btn btn-sm btn-outline-light';
+      escBtn.setAttribute('data-prompt-key', 'esc');
+      escBtn.textContent = 'Esc';
+      promptActionsEl.appendChild(escBtn);
+      var dismiss = document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.className = 'btn-close cn-prompt-dismiss';
+      dismiss.setAttribute('aria-label', 'Dismiss');
+      promptActionsEl.appendChild(dismiss);
     }
     function hidePromptBanner() {
       if (!promptBannerEl) return;

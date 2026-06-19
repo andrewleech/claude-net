@@ -15,6 +15,7 @@ import {
   extractWebSearchResults,
   extractWebSearchSummary,
   hostFromUrl,
+  parsePromptMenu,
   parseReadContent,
   toWebSearchText,
   unwrapMcpText,
@@ -288,5 +289,59 @@ describe("hostFromUrl", () => {
 
   test("returns empty string for empty input", () => {
     expect(hostFromUrl("")).toBe("");
+  });
+});
+
+describe("parsePromptMenu", () => {
+  test("returns null on empty or non-string input", () => {
+    expect(parsePromptMenu("")).toBe(null);
+    expect(parsePromptMenu(null as unknown as string)).toBe(null);
+    expect(parsePromptMenu(123 as unknown as string)).toBe(null);
+  });
+
+  test("returns null when no numbered options are present", () => {
+    expect(parsePromptMenu("Claude needs your permission to use Write")).toBe(
+      null,
+    );
+  });
+
+  test("parses title + options from an augmented notification", () => {
+    const text = [
+      "Claude needs your permission to use Bash",
+      "",
+      "1. Host batch first, then #48",
+      "2. Pod-side (the teammate's preferred split).",
+      "3. Both",
+    ].join("\n");
+    const parsed = parsePromptMenu(text);
+    expect(parsed).not.toBe(null);
+    expect(parsed?.title).toBe("Claude needs your permission to use Bash");
+    expect(parsed?.options).toEqual([
+      { key: "1", label: "Host batch first, then #48" },
+      { key: "2", label: "Pod-side (the teammate's preferred split)." },
+      { key: "3", label: "Both" },
+    ]);
+  });
+
+  test("supports two-digit option numbers", () => {
+    const text = ["Pick a target", "", "1. one", "10. ten", "11. eleven"].join(
+      "\n",
+    );
+    const parsed = parsePromptMenu(text);
+    expect(parsed?.options).toHaveLength(3);
+    expect(parsed?.options[2]).toEqual({ key: "11", label: "eleven" });
+  });
+
+  test("joins multi-line titles with a single space", () => {
+    const text = [
+      "Claude needs your permission",
+      "to run Bash",
+      "",
+      "1. Yes",
+      "2. No",
+    ].join("\n");
+    expect(parsePromptMenu(text)?.title).toBe(
+      "Claude needs your permission to run Bash",
+    );
   });
 });

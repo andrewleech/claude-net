@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  buildAskUserQuestionKeys,
   extractCnList,
   extractImageBlocks,
   extractToolSearchNames,
@@ -343,5 +344,84 @@ describe("parsePromptMenu", () => {
     expect(parsePromptMenu(text)?.title).toBe(
       "Claude needs your permission to run Bash",
     );
+  });
+});
+
+describe("buildAskUserQuestionKeys", () => {
+  test("single question, first option → Enter, Enter (submit)", () => {
+    const questions = [{ question: "Pick", options: [{ label: "A" }] }];
+    const answers = [{ kind: "option", index: 0 }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+    ]);
+  });
+
+  test("single question, third option → Down × 2, Enter, Enter", () => {
+    const questions = [
+      {
+        question: "Pick",
+        options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+      },
+    ];
+    const answers = [{ kind: "option", index: 2 }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      { type: "key", name: "Down" },
+      { type: "key", name: "Down" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+    ]);
+  });
+
+  test("free-text answer navigates past supplied options", () => {
+    const questions = [
+      {
+        question: "Pick",
+        options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+      },
+    ];
+    const answers = [{ kind: "text", value: "hello" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      { type: "key", name: "Down" },
+      { type: "key", name: "Down" },
+      { type: "key", name: "Down" },
+      { type: "key", name: "Enter" },
+      { type: "text", value: "hello" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+    ]);
+  });
+
+  test("multi-question batches answers and ends on a single submit Enter", () => {
+    const questions = [
+      { question: "Q1", options: [{ label: "A" }, { label: "B" }] },
+      {
+        question: "Q2",
+        options: [{ label: "X" }, { label: "Y" }, { label: "Z" }],
+      },
+    ];
+    const answers = [
+      { kind: "option", index: 1 },
+      { kind: "option", index: 0 },
+    ];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      { type: "key", name: "Down" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+    ]);
+  });
+
+  test("free text with empty value still navigates and confirms", () => {
+    // Defensive — the UI gates Submit on empty text, but the helper
+    // shouldn't choke if it gets here anyway.
+    const questions = [{ question: "Q", options: [{ label: "A" }] }];
+    const answers = [{ kind: "text", value: "" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      { type: "key", name: "Down" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+      { type: "key", name: "Enter" },
+    ]);
   });
 });

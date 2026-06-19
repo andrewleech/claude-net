@@ -126,4 +126,88 @@ describe("TmuxInjector", () => {
       // ignore
     }
   });
+
+  describe("sendKeySequence", () => {
+    test("emits one send-keys per part, key vs literal mode", async () => {
+      const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+      const r = await inj.sendKeySequence("s-1", "%0", [
+        { type: "key", name: "Down" },
+        { type: "key", name: "Enter" },
+        { type: "text", value: "hello" },
+        { type: "key", name: "Enter" },
+      ]);
+      expect(r.ok).toBe(true);
+      const calls = readLog(logFile);
+      expect(calls).toHaveLength(4);
+      expect(calls[0]).toEqual(["send-keys", "-t", "%0", "Down"]);
+      expect(calls[1]).toEqual(["send-keys", "-t", "%0", "Enter"]);
+      expect(calls[2]).toEqual(["send-keys", "-t", "%0", "-l", "--", "hello"]);
+      expect(calls[3]).toEqual(["send-keys", "-t", "%0", "Enter"]);
+    });
+
+    test("rejects disallowed key names", async () => {
+      const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+      const r = await inj.sendKeySequence("s-1", "%0", [
+        { type: "key", name: "C-c" },
+      ]);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.code).toBe("tmux_failed");
+      expect(r.error).toMatch(/Disallowed/);
+      // No call should have been emitted.
+      expect(readLog(logFile)).toHaveLength(0);
+    });
+
+    test("rejects empty sequences", async () => {
+      const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+      const r = await inj.sendKeySequence("s-1", "%0", []);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.code).toBe("empty");
+    });
+
+    test("rate-limits a follow-up sequence", async () => {
+      const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+      const r1 = await inj.sendKeySequence("s-1", "%0", [
+        { type: "key", name: "Enter" },
+      ]);
+      expect(r1.ok).toBe(true);
+      const r2 = await inj.sendKeySequence("s-1", "%0", [
+        { type: "key", name: "Enter" },
+      ]);
+      expect(r2.ok).toBe(false);
+      if (r2.ok) return;
+      expect(r2.code).toBe("rate_limited");
+    });
+
+    test("aborts the rest of the sequence when a part fails", async () => {
+      const failing = makeFakeTmux(logFile, 1);
+      const inj = new TmuxInjector({ tmuxBin: failing });
+      const r = await inj.sendKeySequence("s-1", "%0", [
+        { type: "key", name: "Enter" },
+        { type: "key", name: "Enter" },
+      ]);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.code).toBe("tmux_failed");
+      // Only one send-keys was attempted before bailing.
+      expect(readLog(logFile)).toHaveLength(1);
+      try {
+        fs.rmSync(path.dirname(failing), { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    });
+
+    test("skips empty text parts without erroring", async () => {
+      const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+      const r = await inj.sendKeySequence("s-1", "%0", [
+        { type: "text", value: "" },
+        { type: "key", name: "Enter" },
+      ]);
+      expect(r.ok).toBe(true);
+      // The empty text part is skipped; only the Enter is sent.
+      expect(readLog(logFile)).toHaveLength(1);
+    });
+  });
 });

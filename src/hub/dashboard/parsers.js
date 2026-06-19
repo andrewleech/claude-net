@@ -388,6 +388,43 @@ export function parsePromptMenu(text) {
   return { title: titleLines.join(" ").trim(), options };
 }
 
+/**
+ * Compose the tmux key-sequence that answers a multi-question
+ * AskUserQuestion modal. Per question:
+ *   - option j (0-based) → Down × j, Enter
+ *   - free text          → Down × N (one past the supplied options,
+ *                          landing on Claude Code's built-in "Type
+ *                          something." slot), Enter, text, Enter
+ * After the last question's Enter the modal lands on its review
+ * tab; "Submit answers" is the default highlight, so one final
+ * Enter accepts the batch.
+ */
+export function buildAskUserQuestionKeys(questions, answers) {
+  const parts = [];
+  for (let i = 0; i < questions.length; i++) {
+    const answer = answers[i];
+    const opts = questions[i]?.options || [];
+    if (!answer) continue;
+    if (answer.kind === "option") {
+      for (let d = 0; d < answer.index; d++) {
+        parts.push({ type: "key", name: "Down" });
+      }
+      parts.push({ type: "key", name: "Enter" });
+    } else if (answer.kind === "text") {
+      for (let dd = 0; dd < opts.length; dd++) {
+        parts.push({ type: "key", name: "Down" });
+      }
+      parts.push({ type: "key", name: "Enter" });
+      if (answer.value && answer.value.length > 0) {
+        parts.push({ type: "text", value: answer.value });
+      }
+      parts.push({ type: "key", name: "Enter" });
+    }
+  }
+  parts.push({ type: "key", name: "Enter" });
+  return parts;
+}
+
 export function extractWebSearchSummary(resp) {
   if (!resp) return "";
   let raw = "";

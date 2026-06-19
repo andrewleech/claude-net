@@ -368,6 +368,33 @@ export interface MirrorStopFrame {
   origin: { watcher: string; ts: number };
 }
 
+/**
+ * One element of a key sequence sent through the mirror-agent's
+ * tmux send-keys path. `key` parts use tmux key names (Enter, Tab,
+ * Down, Up, Escape, etc.) and are typed without literal mode; `text`
+ * parts are sent literally so they don't get interpreted as key
+ * names. Used for stepping through Claude Code's AskUserQuestion
+ * modal: arrow keys to navigate options, Enter to select+advance,
+ * inline text for the "Type something" free-text option.
+ */
+export type MirrorKeyPart =
+  | { type: "key"; name: string }
+  | { type: "text"; value: string };
+
+/**
+ * Hub → agent request to send a sequence of keys and literal text
+ * fragments to the session's pane. Each part becomes one tmux
+ * send-keys invocation; the agent applies a per-key delay so the
+ * TUI has time to redraw between transitions.
+ */
+export interface MirrorKeysFrame {
+  event: "mirror_keys";
+  sid: string;
+  seq: number;
+  parts: MirrorKeyPart[];
+  origin: { watcher: string; ts: number };
+}
+
 export interface MirrorControlFrame {
   event: "mirror_control";
   sid: string;
@@ -384,6 +411,7 @@ export type HubFrame =
   | MirrorListCommandsFrame
   | MirrorHistoryRequestFrame
   | MirrorStopFrame
+  | MirrorKeysFrame
   | MirrorControlFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────

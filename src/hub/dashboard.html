@@ -735,6 +735,109 @@
     color: var(--text-muted);
   }
 
+  /* ── AskUserQuestion (multi-question) cards ──────────────────────
+     Vertical sections, one per question, each with option buttons
+     and a free-text fallback. Answers are local to the card until
+     Submit dispatches the full key sequence to the modal. */
+  .m-evt-aq .m-aq-q {
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    padding: 12px 14px;
+    margin-top: 14px;
+  }
+  .m-evt-aq .m-aq-q-head {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 13.5px;
+    line-height: 1.5;
+    margin-bottom: 10px;
+  }
+  .m-aq-opts {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .m-aq-opt {
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 9px 12px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 0.1s, background 0.1s;
+  }
+  .m-aq-opt:hover {
+    border-color: var(--text-accent);
+  }
+  .m-aq-opt.selected {
+    border-color: var(--text-accent);
+    background: var(--accent-ink);
+    color: var(--text-accent);
+  }
+  .m-aq-opt-label {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .m-aq-opt-desc {
+    color: var(--text-muted);
+    font-size: 11.5px;
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .m-aq-text {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px dashed var(--border);
+    background: transparent;
+  }
+  .m-aq-text.selected {
+    border-style: solid;
+    border-color: var(--text-accent);
+    background: var(--accent-ink);
+  }
+  .m-aq-text-head {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .m-aq-text-area {
+    width: 100%;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    resize: vertical;
+    min-height: 38px;
+  }
+  .m-aq-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .m-aq-actions .m-q-action {
+    flex: 1 1 auto;
+    min-width: 140px;
+    text-align: center;
+    padding: 10px 16px;
+  }
+  .m-aq-actions .m-q-action[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  @media (max-width: 767.98px) {
+    .m-aq-opt { padding: 11px 14px; font-size: 14px; }
+    .m-aq-opt-label { font-size: 14px; }
+    .m-aq-text-area { font-size: 14px; min-height: 56px; }
+  }
+
   /* ── System events — telegraphic lines aligned to the timeline. ── */
   .m-evt-notif {
     padding: 4px 24px 4px 128px;
@@ -5066,35 +5169,203 @@
       return card;
     }
 
+    /**
+     * Render the AskUserQuestion card.
+     *
+     * Each question becomes a vertical section with radio-style
+     * option buttons plus a "type your own" textarea (Claude Code's
+     * built-in "Type something." modal slot). Per-question state is
+     * tracked locally; nothing is sent to the agent until the user
+     * hits Submit at the bottom.
+     *
+     * On Submit we POST a key sequence to /:sid/keys that walks
+     * Claude Code's terminal modal: for each question we press
+     * Down N times to land on the chosen option then Enter to
+     * advance to the next tab; for free-text we navigate to the
+     * "Type something." slot (always one past the supplied options
+     * in CC's modal), Enter to open the text input, then literal
+     * text + Enter. A final Enter accepts the default "Submit
+     * answers" choice on the review tab.
+     *
+     * Cancel sends Escape to abort the modal.
+     */
     function renderQuestionAskUserQuestion(evt, payload) {
       var card = document.createElement('div');
-      card.className = 'm-evt m-evt-question';
+      card.className = 'm-evt m-evt-question m-evt-aq';
       card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
       var qs = (payload.input && payload.input.questions) || [];
-      var html = '<span class="m-q-banner">awaiting answer</span>';
-      for (var i = 0; i < qs.length; i++) {
-        var q = qs[i];
-        html += '<div class="m-q-body"><strong>' + escapeHtml(q.question || '') + '</strong></div>';
-        html += '<div class="m-q-actions">';
-        var opts = q.options || [];
-        for (var j = 0; j < opts.length; j++) {
-          var o = opts[j];
-          html += '<button type="button" class="m-q-action" data-inject="' + escapeAttr(o.label || '') + '">' +
-            escapeHtml(o.label || '') +
-            (o.description ? '<span class="m-q-action-desc">' + escapeHtml(o.description) + '</span>' : '') +
-          '</button>';
+      // answers[i] is { kind: 'option', index: number } or
+      //              { kind: 'text', value: string }
+      var answers = new Array(qs.length).fill(null);
+
+      var bannerEl = document.createElement('span');
+      bannerEl.className = 'm-q-banner';
+      bannerEl.textContent = 'awaiting answer · ' + qs.length + (qs.length === 1 ? ' question' : ' questions');
+      card.appendChild(bannerEl);
+
+      function updateSubmitEnabled() {
+        for (var i = 0; i < answers.length; i++) {
+          if (answers[i] === null) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submit (' + (answers.length - countAnswered()) + ' unanswered)';
+            return;
+          }
         }
-        html += '</div>';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Submit answers';
       }
-      card.innerHTML = html;
-      var btns = card.querySelectorAll('.m-q-action[data-inject]');
-      for (var k = 0; k < btns.length; k++) {
-        btns[k].addEventListener('click', function(e) {
-          var text = e.currentTarget.getAttribute('data-inject');
-          sendInject(text);
+      function countAnswered() {
+        var n = 0;
+        for (var i = 0; i < answers.length; i++) if (answers[i] !== null) n++;
+        return n;
+      }
+
+      for (var qi = 0; qi < qs.length; qi++) {
+        (function (i, q) {
+          var section = document.createElement('div');
+          section.className = 'm-aq-q';
+          var header = document.createElement('div');
+          header.className = 'm-aq-q-head';
+          header.textContent = (qs.length > 1 ? 'Question ' + (i + 1) + '. ' : '') + (q.question || '');
+          section.appendChild(header);
+
+          var optsList = document.createElement('div');
+          optsList.className = 'm-aq-opts';
+          var opts = q.options || [];
+          var optionButtons = [];
+          for (var j = 0; j < opts.length; j++) {
+            (function (jj, o) {
+              var btn = document.createElement('button');
+              btn.type = 'button';
+              btn.className = 'm-aq-opt';
+              var label = document.createElement('div');
+              label.className = 'm-aq-opt-label';
+              label.textContent = o.label || '';
+              btn.appendChild(label);
+              if (o.description) {
+                var desc = document.createElement('div');
+                desc.className = 'm-aq-opt-desc';
+                desc.textContent = o.description;
+                btn.appendChild(desc);
+              }
+              btn.addEventListener('click', function () {
+                answers[i] = { kind: 'option', index: jj };
+                for (var k = 0; k < optionButtons.length; k++) {
+                  optionButtons[k].classList.toggle('selected', k === jj);
+                }
+                textWrap.classList.remove('selected');
+                textArea.value = '';
+                updateSubmitEnabled();
+              });
+              optionButtons.push(btn);
+              optsList.appendChild(btn);
+            })(j, opts[j]);
+          }
+          section.appendChild(optsList);
+
+          // "Type your own" — mirrors Claude Code's "Type something." modal
+          // slot. Selecting it deselects the option buttons; typing updates
+          // the answer in place.
+          var textWrap = document.createElement('div');
+          textWrap.className = 'm-aq-text';
+          var textHeader = document.createElement('div');
+          textHeader.className = 'm-aq-text-head';
+          textHeader.textContent = 'Or type your own answer:';
+          textWrap.appendChild(textHeader);
+          var textArea = document.createElement('textarea');
+          textArea.className = 'm-aq-text-area';
+          textArea.rows = 2;
+          textArea.placeholder = 'Type something…';
+          textArea.addEventListener('input', function () {
+            var v = textArea.value;
+            if (v.length === 0) {
+              if (answers[i] && answers[i].kind === 'text') {
+                answers[i] = null;
+                textWrap.classList.remove('selected');
+              }
+            } else {
+              answers[i] = { kind: 'text', value: v };
+              for (var k = 0; k < optionButtons.length; k++) {
+                optionButtons[k].classList.remove('selected');
+              }
+              textWrap.classList.add('selected');
+            }
+            updateSubmitEnabled();
+          });
+          textWrap.appendChild(textArea);
+          section.appendChild(textWrap);
+
+          card.appendChild(section);
+        })(qi, qs[qi]);
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'm-aq-actions';
+      var submitBtn = document.createElement('button');
+      submitBtn.type = 'button';
+      submitBtn.className = 'm-q-action primary';
+      var cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'm-q-action';
+      cancelBtn.textContent = 'Cancel (Esc)';
+      submitBtn.addEventListener('click', function () {
+        submitBtn.disabled = true;
+        submitAskUserQuestion(qs, answers).catch(function () {
+          // Re-enable for a retry; submitAskUserQuestion shows the
+          // error inline via the existing compose-error surface.
+          submitBtn.disabled = false;
+          updateSubmitEnabled();
         });
-      }
+      });
+      cancelBtn.addEventListener('click', function () {
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ watcher: 'web-aq-cancel' }),
+        }).catch(function () {});
+      });
+      actions.appendChild(submitBtn);
+      actions.appendChild(cancelBtn);
+      card.appendChild(actions);
+      updateSubmitEnabled();
       return card;
+    }
+
+    // Bridge to the extracted helper so the key-sequence logic is
+    // unit-tested in tests/hub/dashboard-parsers.test.ts.
+    function buildAskUserQuestionKeys(questions, answers) {
+      return window.Parsers.buildAskUserQuestionKeys(questions, answers);
+    }
+
+    function submitAskUserQuestion(questions, answers) {
+      var parts = buildAskUserQuestionKeys(questions, answers);
+      var errEl = document.getElementById('mirror-compose-err');
+      return fetch('/api/mirror/' + encodeURIComponent(sid) + '/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts: parts, watcher: 'web-aq' }),
+      })
+        .then(function (r) {
+          return r.json().then(function (j) {
+            return { status: r.status, body: j };
+          });
+        })
+        .then(function (r) {
+          if (r.status >= 400 && errEl) {
+            errEl.className = 'mirror-compose-err';
+            errEl.textContent =
+              'AskUserQuestion submit failed: ' +
+              ((r.body && r.body.error) || ('HTTP ' + r.status));
+            throw new Error(r.body && r.body.error);
+          }
+        })
+        .catch(function (err) {
+          if (errEl) {
+            errEl.className = 'mirror-compose-err';
+            errEl.textContent = 'AskUserQuestion submit failed: ' + (err && err.message ? err.message : err);
+          }
+          throw err;
+        });
     }
 
     function markQuestionAnswered(cardEl, payload) {
@@ -5303,6 +5574,17 @@
         appendImageCard(el, images);
       } else if (kind === 'notification') {
         var notifText = payload.text || '';
+        // Suppress entirely when an active AskUserQuestion card is
+        // already in the transcript — the augmented notification is
+        // just the tmux-scraped version of the same modal and adds no
+        // information beyond what the card already shows.
+        if (
+          payload.source !== 'mirror-agent' &&
+          /needs your|waiting for input/i.test(notifText) &&
+          transcriptEl.querySelector('.m-evt-aq:not(.answered)')
+        ) {
+          return;
+        }
         var parsedMenu = parsePromptMenu(notifText);
         // Drop the previous notification card if this one is a
         // richer (menu-bearing) version of it — same title, plus the
@@ -5644,6 +5926,12 @@
         return;
       }
       if (!text || !PROMPT_RE.test(text)) return;
+      // An AskUserQuestion card is already on screen — that's the
+      // authoritative interaction surface. Skip the banner; the
+      // augmented "1. Foo / 4. Type something / 5. Chat about this"
+      // text from the tmux scrape doesn't add information and
+      // double-renders the same modal.
+      if (transcriptEl.querySelector('.m-evt-aq:not(.answered)')) return;
       showPromptBanner(text);
     }
     function onAssistantReply() {

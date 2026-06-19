@@ -12,7 +12,11 @@ import crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { MirrorEventFrame, MirrorStatuslineFrame } from "@/shared/types";
+import type {
+  MirrorEventFrame,
+  MirrorKeyPart,
+  MirrorStatuslineFrame,
+} from "@/shared/types";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { type HostChannelHandle, startHostChannel } from "./host-channel";
@@ -1080,6 +1084,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       void handleStop(session, watcher).catch((err: unknown) => {
         log(`[${session.sid}] stop handler threw: ${String(err)}`);
       });
+    } else if (data.event === "mirror_keys") {
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      const parts = Array.isArray((data as { parts?: unknown }).parts)
+        ? ((data as { parts: unknown[] }).parts as MirrorKeyPart[])
+        : [];
+      void handleKeys(session, parts, watcher).catch((err: unknown) => {
+        log(`[${session.sid}] keys handler threw: ${String(err)}`);
+      });
     }
   }
 
@@ -1181,6 +1196,40 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
       log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
     }
+  }
+
+  /** Handle a hub-initiated key-sequence inject: send the ordered
+   *  list of tmux key names and literal text fragments to the session
+   *  pane. Used by the dashboard's AskUserQuestion modal-answer flow. */
+  async function handleKeys(
+    session: SessionState,
+    parts: MirrorKeyPart[],
+    watcher: string,
+  ): Promise<void> {
+    if (!session.tmuxPane) {
+      emitAuditEvent(
+        session,
+        "keys rejected: session is not running inside tmux (no pane recorded)",
+      );
+      return;
+    }
+    const result = await injector.sendKeySequence(
+      session.sid,
+      session.tmuxPane,
+      parts,
+    );
+    if (!result.ok) {
+      emitAuditEvent(session, `keys failed (${result.code}): ${result.error}`);
+      return;
+    }
+    const summary = parts
+      .map((p) => {
+        if (p.type === "key") return p.name;
+        const v = p.value ?? "";
+        return `"${v.length > 40 ? `${v.slice(0, 40)}…` : v}"`;
+      })
+      .join(" ");
+    emitAuditEvent(session, `keys from ${watcher}: ${summary}`);
   }
 
   /** Handle a hub-initiated stop: send Escape to the session's tmux

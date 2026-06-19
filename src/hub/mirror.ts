@@ -8,6 +8,8 @@ import type {
   MirrorEventPayload,
   MirrorHistoryRequestFrame,
   MirrorInjectFrame,
+  MirrorKeyPart,
+  MirrorKeysFrame,
   MirrorListCommandsFrame,
   MirrorPasteFrame,
   MirrorSessionSummary,
@@ -919,6 +921,47 @@ export class MirrorRegistry {
     return { ok: true, seq };
   }
 
+  /**
+   * Forward a key-sequence frame to the session's mirror-agent.
+   * Caller has already validated the parts list against the allowed
+   * key-name set. Returns the assigned sequence number on success.
+   */
+  relayKeys(
+    sid: string,
+    parts: MirrorKeyPart[],
+    watcher: string,
+  ): { ok: true; seq: number } | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const seq = ++entry.nextInjectSeq;
+    const frame: MirrorKeysFrame = {
+      event: "mirror_keys",
+      sid,
+      seq,
+      parts,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true, seq };
+  }
+
   /** Relay a "stop" (Esc) signal to the session's agent. Fire and
    *  forget — no correlated ack. */
   relayStop(
@@ -1558,6 +1601,104 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
       })
 
       /**
+       * POST /:sid/keys — send a sequence of tmux keys (and literal
+       * text fragments) to the session's pane. Used by the dashboard
+       * to drive Claude Code's AskUserQuestion modal without sending
+       * the answers as raw chat text (which would abort the modal).
+       *
+       * Body shape:
+       *   { parts: [{type:"key",name:"Down"} | {type:"text",value:"..."}],
+       *     watcher?: "web-aq" }
+       *
+       * Same two-tier rate limit as /inject (burst floor + RPM ceiling).
+       */
+      .post("/:sid/keys", ({ params, body, set, request }) => {
+        const found = mirrorRegistry.getSession(params.sid);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const payload = body as {
+          parts?: unknown;
+          watcher?: string;
+        };
+        if (!Array.isArray(payload.parts) || payload.parts.length === 0) {
+          set.status = 400;
+          return { error: "Missing required field: parts (non-empty array)." };
+        }
+        if (payload.parts.length > MAX_KEYS_PARTS) {
+          set.status = 413;
+          return { error: `Too many parts (max ${MAX_KEYS_PARTS}).` };
+        }
+        const validatedParts: MirrorKeyPart[] = [];
+        let totalBytes = 0;
+        for (let i = 0; i < payload.parts.length; i++) {
+          const part = payload.parts[i] as {
+            type?: unknown;
+            name?: unknown;
+            value?: unknown;
+          };
+          if (part?.type === "key") {
+            if (
+              typeof part.name !== "string" ||
+              !ALLOWED_KEYS_HUB.has(part.name)
+            ) {
+              set.status = 400;
+              return {
+                error: `Disallowed key name at parts[${i}]: ${String(part.name)}`,
+              };
+            }
+            totalBytes += part.name.length;
+            validatedParts.push({ type: "key", name: part.name });
+          } else if (part?.type === "text") {
+            if (typeof part.value !== "string") {
+              set.status = 400;
+              return { error: `parts[${i}].value must be a string.` };
+            }
+            totalBytes += Buffer.byteLength(part.value, "utf8");
+            validatedParts.push({ type: "text", value: part.value });
+          } else {
+            set.status = 400;
+            return {
+              error: `parts[${i}].type must be "key" or "text".`,
+            };
+          }
+        }
+        if (totalBytes > MAX_KEYS_BYTES) {
+          set.status = 413;
+          return { error: `Sequence exceeds ${MAX_KEYS_BYTES} bytes.` };
+        }
+        if (!injectBurstLimiter.allow(params.sid)) {
+          set.status = 429;
+          set.headers["retry-after"] = "1";
+          return { error: "Rate limit: bursts under 250ms rejected." };
+        }
+        if (!injectMinuteLimiter.allow(params.sid)) {
+          const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return {
+            error: `Rate limit: ${INJECT_RPM} injects per minute.`,
+          };
+        }
+        const watcher = sanitizeWatcher(
+          payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayKeys(
+          params.sid,
+          validatedParts,
+          watcher,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true, seq: result.seq };
+      })
+
+      /**
        * POST /:sid/paste — oversized-prompt path. The web compose box falls back
        * to this when the payload exceeds the inject cap: hub relays the blob to
        * the mirror-agent, which writes it to a local temp file; hub then injects
@@ -1728,6 +1869,34 @@ const injectMinuteLimiter = new RateLimiter({
   max: INJECT_RPM,
   windowMs: 60_000,
 });
+
+/**
+ * Allowed tmux key names a /:sid/keys client may emit. Kept in
+ * lockstep with ALLOWED_KEY_NAMES in src/mirror-agent/tmux-inject.ts
+ * — the agent re-validates, but rejecting at the hub returns a
+ * cleaner 400 to the dashboard rather than an opaque downstream
+ * failure. Excludes modifier chords (C-c / M-…) to keep clients from
+ * interrupting the Claude Code process or backgrounding it.
+ */
+const ALLOWED_KEYS_HUB = new Set([
+  "Enter",
+  "Tab",
+  "BTab",
+  "Up",
+  "Down",
+  "Left",
+  "Right",
+  "Home",
+  "End",
+  "Escape",
+  "Space",
+  "BSpace",
+]);
+/** Max combined byte size of a single /keys payload. */
+const MAX_KEYS_BYTES = MAX_INJECT_BYTES;
+/** Hard cap on the number of parts in one /keys sequence — prevents
+ *  a tight loop from a hostile client from saturating the agent. */
+const MAX_KEYS_PARTS = 256;
 
 // Session-create rate limit per remote IP. Idempotent re-POSTs for an
 // already-known sid bypass this — see route handler. The cap needs to

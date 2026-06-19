@@ -13,6 +13,7 @@
 // The tmux binary is looked up via $TMUX_BIN (for tests) → $PATH.
 
 import { spawn } from "node:child_process";
+import type { MirrorKeyPart } from "@/shared/types";
 
 export const MAX_PROMPT_BYTES = (() => {
   const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_MAX_KB);
@@ -22,6 +23,33 @@ export const MAX_PROMPT_BYTES = (() => {
 export const RATE_LIMIT_MS = 250;
 const SEND_KEYS_TIMEOUT_MS = 2_000;
 const POST_ENTER_DELAY_MS = 40;
+/**
+ * Per-step delay inside a key sequence. Long enough for Claude Code's
+ * AskUserQuestion modal to redraw between option select / tab advance
+ * transitions; short enough that a 5-key answer still feels snappy.
+ */
+const KEY_DELAY_MS = 60;
+/**
+ * Tmux key names accepted in a MirrorKeyPart `key` part. Restricting
+ * keeps a hostile client from issuing arbitrary key chords (e.g.
+ * `C-c`, `C-z`) that would interrupt or background the Claude Code
+ * process. Add to this set only after verifying the key is benign in
+ * the AskUserQuestion modal context.
+ */
+export const ALLOWED_KEY_NAMES = new Set<string>([
+  "Enter",
+  "Tab",
+  "BTab",
+  "Up",
+  "Down",
+  "Left",
+  "Right",
+  "Home",
+  "End",
+  "Escape",
+  "Space",
+  "BSpace",
+]);
 
 export type InjectResult =
   | { ok: true }
@@ -115,6 +143,87 @@ export class TmuxInjector {
       return { ok: false, code: "tmux_failed", error: enterResult2.error };
     }
 
+    return { ok: true };
+  }
+
+  /**
+   * Send an ordered sequence of keys and literal-text fragments to
+   * the pane. Each `key` part becomes a single `send-keys NAME`
+   * invocation (no -l, so tmux interprets the name); each `text`
+   * part is sent literally with `send-keys -l -- VALUE`. A small
+   * delay between parts lets the TUI redraw before the next event
+   * arrives — crucial for AskUserQuestion modals that transition
+   * tabs on Enter.
+   *
+   * Rate-limit is applied once for the whole sequence so a single
+   * modal answer doesn't burn the per-session quota.
+   */
+  async sendKeySequence(
+    sid: string,
+    pane: string,
+    parts: readonly MirrorKeyPart[],
+  ): Promise<InjectResult> {
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return { ok: false, code: "empty", error: "Empty key sequence." };
+    }
+    let totalBytes = 0;
+    for (const part of parts) {
+      if (part.type === "text") {
+        totalBytes += Buffer.byteLength(part.value ?? "", "utf8");
+      } else {
+        totalBytes += (part.name ?? "").length;
+      }
+    }
+    if (totalBytes > MAX_PROMPT_BYTES) {
+      return {
+        ok: false,
+        code: "too_long",
+        error: `Sequence exceeds ${MAX_PROMPT_BYTES} bytes.`,
+      };
+    }
+    const now = Date.now();
+    const last = this.lastInjectAt.get(sid) ?? 0;
+    if (now - last < this.rateLimitMs) {
+      return {
+        ok: false,
+        code: "rate_limited",
+        error: `Rate limit: one inject per ${this.rateLimitMs}ms per session.`,
+      };
+    }
+    this.lastInjectAt.set(sid, now);
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      let result: RunResult;
+      if (part.type === "key") {
+        const name = part.name;
+        if (!ALLOWED_KEY_NAMES.has(name)) {
+          return {
+            ok: false,
+            code: "tmux_failed",
+            error: `Disallowed key name: ${name}`,
+          };
+        }
+        result = await runTmux(this.tmuxBin, ["send-keys", "-t", pane, name]);
+      } else {
+        const value = part.value ?? "";
+        if (value.length === 0) continue;
+        result = await runTmux(this.tmuxBin, [
+          "send-keys",
+          "-t",
+          pane,
+          "-l",
+          "--",
+          value,
+        ]);
+      }
+      if (!result.ok) {
+        return { ok: false, code: "tmux_failed", error: result.error };
+      }
+      if (i + 1 < parts.length) {
+        await new Promise((resolve) => setTimeout(resolve, KEY_DELAY_MS));
+      }
+    }
     return { ok: true };
   }
 

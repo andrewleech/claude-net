@@ -61,6 +61,12 @@ Resolution modes (most to least specific):
 - `user@host` — across sessions
 - plain string — tries session, then user, then host
 
+Name persistence and `/rename` sync:
+- The plugin persists the last-registered name next to the CC transcript at `~/.claude/projects/<encoded-cwd>/<sid>.claude-net.json` and restores it on `/mcp reconnect`.
+- Claude Code's `/rename` writes a `custom-title` line into the session JSONL. The plugin reads it on startup and polls every 5 s while running, so claude-net auto-follows CC's renames without `/mcp reconnect`.
+- The freshest of (persisted name, custom-title) wins at startup; the default `cwd-basename:user@host` is only used when neither exists.
+- `/claude-net:rename <name>` is an MCP-prompt slash command that drives both surfaces in one step (calls `register(name)` and injects CC's `/rename` via the mirror-agent self-inject).
+
 ## Plugin
 
 `src/plugin/plugin.ts` is a single self-contained file served by the hub at `GET /plugin.ts`. It runs on client machines as an MCP stdio subprocess, connecting back to the hub via WebSocket. It cannot import local project files — types are duplicated inline.

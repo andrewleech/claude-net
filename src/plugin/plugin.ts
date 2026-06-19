@@ -13,6 +13,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import WebSocket from "ws";
@@ -81,6 +83,12 @@ const CHANNEL_SELF_TEST_DELAY_MS = 2_000;
  *  session and stop expecting it; channel_capable stays false until the
  *  next plugin launch. */
 const CHANNEL_SELF_TEST_TIMEOUT_MS = 60_000;
+/** How often to re-stat the Claude Code transcript looking for a new
+ *  `/rename` (custom-title) line. Long enough that polling is a
+ *  negligible background cost; short enough that the user doesn't
+ *  notice a lag between typing `/rename foo` and the dashboard
+ *  sidebar updating. */
+const RENAME_WATCH_INTERVAL_MS = 5_000;
 
 // Single source of truth for the plugin version. Consumed by both the
 // MCP `Server({ version })` declaration below AND the register frame
@@ -145,6 +153,21 @@ tool available, use it:
 If AskUserQuestion is not available, ask in plain text instead.
 After the user picks, call register(name) and proceed. Just a session name
 like "reviewer" gets auto-expanded to "reviewer:user@host".
+
+NAME PERSISTENCE AND /rename SYNC:
+- Once registered, the chosen name is persisted next to the Claude Code
+  session transcript and restored automatically on /mcp reconnect — so
+  the previous custom name survives plugin restarts without re-prompting
+  the user.
+- Claude Code's own /rename slash command is also honoured: the plugin
+  reads the session's latest custom-title line from the transcript at
+  startup, and polls for new ones while running. When the user runs
+  /rename, claude-net follows within a few seconds (no /mcp reconnect
+  needed).
+- A /claude-net:rename <name> slash command is available too. It
+  drives both surfaces in one go (calls register(name) and runs CC's
+  /rename via mirror-agent self-inject). Suggest this to the user when
+  they want to set an explicit name.
 
 CHANNEL CAPABILITY SELF-TEST (startup probe — trust model):
 Shortly after registration the plugin emits ONE notification with
@@ -229,6 +252,228 @@ export function buildDefaultName(): string {
   const user = process.env.USER || os.userInfo().username;
   const host = os.hostname();
   return `${session}:${user}@${host}`;
+}
+
+/**
+ * Encode a cwd to the directory name Claude Code uses under
+ * ~/.claude/projects/. Replaces every non-alphanumeric byte with '-'.
+ * Inlined here (rather than imported from mirror-agent) because the
+ * plugin is served as a single file and cannot import project-local code.
+ */
+export function encodeProjectDirName(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+export interface DiscoveredSession {
+  sessionId: string;
+  transcriptPath: string;
+}
+
+/**
+ * Locate the most recently-modified JSONL transcript for the given cwd
+ * under ~/.claude/projects/<encoded>/. Returns null when the dir is
+ * absent, empty, or unreadable. The filename's UUID portion is the
+ * session_id Claude Code uses for this session.
+ *
+ * `ccPid` is currently unused but kept on the signature so a future
+ * refinement (e.g. /proc/<pid>/fd scan on Linux) can land without
+ * touching call sites. Mirrors the mirror-agent helper of the same name.
+ */
+export function findActiveSessionForCcPid(
+  _ccPid: number,
+  cwd: string,
+  home: string = os.homedir(),
+): DiscoveredSession | null {
+  if (!cwd) return null;
+  const projectDir = path.join(
+    home,
+    ".claude",
+    "projects",
+    encodeProjectDirName(cwd),
+  );
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(projectDir);
+  } catch {
+    return null;
+  }
+  let best: { name: string; mtimeMs: number } | null = null;
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    try {
+      const stat = fs.statSync(path.join(projectDir, name));
+      if (best === null || stat.mtimeMs > best.mtimeMs) {
+        best = { name, mtimeMs: stat.mtimeMs };
+      }
+    } catch {
+      // skip unreadable file
+    }
+  }
+  if (!best) return null;
+  const sessionId = best.name.slice(0, -".jsonl".length);
+  if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) return null;
+  return {
+    sessionId,
+    transcriptPath: path.join(projectDir, best.name),
+  };
+}
+
+/**
+ * Latest `{"type":"custom-title","customTitle":"…"}` line in a Claude
+ * Code session JSONL, written by the `/rename` slash command. Returns
+ * null when the file is missing, unreadable, or has never been
+ * renamed. `ts` is the file's mtime in ms — the JSONL line itself
+ * carries no timestamp, but mtime is a good-enough proxy for "when was
+ * this rename written" because /rename is the most recent kind of
+ * write that touches the file when no other activity is happening.
+ */
+export interface CustomTitleRecord {
+  title: string;
+  ts: number;
+}
+
+export function readCustomTitleFromTranscript(
+  transcriptPath: string,
+): CustomTitleRecord | null {
+  let raw: string;
+  let mtimeMs: number;
+  try {
+    raw = fs.readFileSync(transcriptPath, "utf8");
+    mtimeMs = fs.statSync(transcriptPath).mtimeMs;
+  } catch {
+    return null;
+  }
+  // Walk lines in reverse so the latest custom-title wins.
+  const lines = raw.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || !line.includes('"custom-title"')) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (
+        obj &&
+        obj.type === "custom-title" &&
+        typeof obj.customTitle === "string" &&
+        obj.customTitle.length > 0
+      ) {
+        return { title: obj.customTitle, ts: mtimeMs };
+      }
+    } catch {
+      // skip malformed JSON
+    }
+  }
+  return null;
+}
+
+/**
+ * Strip characters that would break the hub's `session:user@host`
+ * regex (the colon and at-sign), collapse whitespace, replace
+ * remaining non-alphanumeric runs with `-`, trim leading/trailing
+ * dashes, and cap to 64 chars. Returns empty string when nothing
+ * usable remains — caller is responsible for falling back.
+ */
+export function sanitizeSessionPart(raw: string): string {
+  return raw
+    .replace(/[:@]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+/**
+ * Persistence layer for the last-registered claude-net name. Lives
+ * next to the session transcript so it survives /tmp wipes and is
+ * naturally scoped to one CC session.
+ */
+export interface PersistedAgentName {
+  name: string;
+  ts: number;
+}
+
+function persistedNamePath(
+  sessionId: string,
+  cwd: string,
+  home: string = os.homedir(),
+): string {
+  return path.join(
+    home,
+    ".claude",
+    "projects",
+    encodeProjectDirName(cwd),
+    `${sessionId}.claude-net.json`,
+  );
+}
+
+export function readPersistedAgentName(
+  sessionId: string,
+  cwd: string,
+  home: string = os.homedir(),
+): PersistedAgentName | null {
+  try {
+    const raw = fs.readFileSync(
+      persistedNamePath(sessionId, cwd, home),
+      "utf8",
+    );
+    const obj = JSON.parse(raw);
+    if (
+      obj &&
+      typeof obj.name === "string" &&
+      obj.name.length > 0 &&
+      typeof obj.ts === "number" &&
+      Number.isFinite(obj.ts)
+    ) {
+      return { name: obj.name, ts: obj.ts };
+    }
+  } catch {
+    // missing / malformed — caller falls back
+  }
+  return null;
+}
+
+export function writePersistedAgentName(
+  sessionId: string,
+  cwd: string,
+  name: string,
+  ts: number,
+  home: string = os.homedir(),
+): void {
+  const file = persistedNamePath(sessionId, cwd, home);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ name, ts }));
+  } catch (err) {
+    log(`Failed to persist agent name: ${err}`);
+  }
+}
+
+/**
+ * Pick the startup claude-net name from three candidate sources,
+ * preferring the freshest. The `defaultName` always wins by default
+ * when none of the other candidates exist. The persisted name and the
+ * Claude Code custom-title carry timestamps; the freshest wins. The
+ * returned name is always a full `session:user@host` string ready to
+ * register.
+ */
+export function resolveStartupName(
+  defaultName: string,
+  persisted: PersistedAgentName | null,
+  customTitle: CustomTitleRecord | null,
+  buildFullName: (sessionPart: string) => string = (s) => {
+    const colon = defaultName.indexOf(":");
+    if (colon < 0) return s;
+    return `${s}${defaultName.slice(colon)}`;
+  },
+): string {
+  const candidates: Array<{ name: string; ts: number }> = [];
+  if (persisted) candidates.push({ name: persisted.name, ts: persisted.ts });
+  if (customTitle) {
+    const clean = sanitizeSessionPart(customTitle.title);
+    if (clean)
+      candidates.push({ name: buildFullName(clean), ts: customTitle.ts });
+  }
+  candidates.sort((a, b) => b.ts - a.ts);
+  return candidates[0]?.name ?? defaultName;
 }
 
 /**
@@ -486,6 +731,65 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
+// ── MCP prompt definitions ───────────────────────────────────────────────
+//
+// MCP prompts surface in Claude Code as `/<server>:<prompt-name>` slash
+// commands. When the user runs `/claude-net:rename my-name`, CC calls
+// prompts/get with name="rename" and arguments={name:"my-name"}, and
+// the returned messages are injected into the conversation as if the
+// user had typed them — so the LLM follows the instructions.
+
+export const PROMPT_DEFINITIONS = [
+  {
+    name: "rename",
+    description:
+      "Rename this claude-net session. Updates the claude-net agent identity (and Claude Code's own /rename title in sync).",
+    arguments: [
+      {
+        name: "name",
+        description:
+          'New session name (e.g. "reviewer"). Auto-expanded to session:user@host.',
+        required: true,
+      },
+    ],
+  },
+];
+
+/**
+ * Build the prompts/get response body for `/claude-net:rename <name>`.
+ * Returns instructions that drive the LLM to (a) update Claude Code's
+ * own session title via /rename (using the mirror-agent self-inject so
+ * the slash command actually fires), and (b) call register(name) to
+ * update the claude-net identity. Exported for unit testability.
+ */
+export function buildRenamePromptMessages(name: string): {
+  description: string;
+  messages: { role: "user"; content: { type: "text"; text: string } }[];
+} {
+  const safe = sanitizeSessionPart(name);
+  return {
+    description: `Rename this claude-net session to "${safe}"`,
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Rename this session to "${safe}" on both surfaces, in this order:
+
+1. Update Claude Code's own session title — run a Bash tool call:
+   \`claude-net-mirror-agent inject '/rename ${safe}'\`
+   This injects the /rename slash command at the prompt; the title appears in the session list and Claude Code's sidebar.
+
+2. Update the claude-net identity — call the register tool with name="${safe}".
+   The plugin auto-expands "${safe}" to "${safe}:user@host" and persists the choice so /mcp reconnect restores it.
+
+Report back the new full agent name once both steps complete. If the self-inject in step 1 fails (e.g. mirror-agent not installed), proceed with step 2 anyway and tell the user that Claude Code's title was not updated.`,
+        },
+      },
+    ],
+  };
+}
+
 // ── Plugin class ─────────────────────────────────────────────────────────
 //
 // All mutable runtime state lives on an instance of this class. Keeping
@@ -535,6 +839,18 @@ export class Plugin {
   // registeredName through the guarded nudge queue.
   private storedName = "";
   registeredName = "";
+
+  // ── Discovered Claude Code session ───────
+  // sid is the CC session_id (JSONL filename UUID), discovered on
+  // start() by scanning ~/.claude/projects/<encoded-cwd>/. Used to key
+  // the persisted-name file and to drive the /rename auto-mirror tail.
+  // `discoveredCwd` is captured at start() so process.cwd() changes
+  // don't shift the persistence target.
+  private discoveredSid = "";
+  private discoveredCwd = "";
+  private transcriptPath = "";
+  private renameWatchTimer: ReturnType<typeof setInterval> | null = null;
+  private lastCustomTitleSeen = "";
 
   // ── MCP lifecycle ────────────────────────
   // channelCapable is public so tests can pin it and mapToolToFrame
@@ -722,12 +1038,14 @@ export class Plugin {
     try {
       const data = await this.request(frame);
 
-      // Update stored+registered name on successful register.
+      // Update stored+registered name on successful register, and
+      // persist the choice so /mcp reconnect restores it.
       // A manual register cancels any pending rename nudge — the user has
       // already chosen a name, so we don't want to prompt them again.
       if (name === "register" && effectiveArgs.name) {
         this.storedName = effectiveArgs.name;
         this.registeredName = effectiveArgs.name;
+        this.persistName(effectiveArgs.name);
         // Clear any pending rename nudge — user explicitly chose a name.
         const renameIdx = this.pendingNudges.findIndex(
           (n) => n.guard && n.text.startsWith("Rename suggestion:"),
@@ -916,6 +1234,7 @@ export class Plugin {
         }
         this.storedName = candidate;
         this.registeredName = candidate;
+        this.persistName(candidate);
         if (attempt > 0) {
           this.pendingNudges.push({
             text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
@@ -1083,6 +1402,7 @@ export class Plugin {
         capabilities: {
           experimental: { "claude/channel": {} },
           tools: {},
+          prompts: {},
         },
         instructions: INSTRUCTIONS,
       },
@@ -1095,6 +1415,22 @@ export class Plugin {
     this.mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { name, arguments: args } = req.params;
       return this.handleToolCall(name, (args ?? {}) as Record<string, string>);
+    });
+
+    this.mcpServer.setRequestHandler(ListPromptsRequestSchema, async () => ({
+      prompts: PROMPT_DEFINITIONS,
+    }));
+
+    this.mcpServer.setRequestHandler(GetPromptRequestSchema, async (req) => {
+      const { name, arguments: args } = req.params;
+      if (name !== "rename") {
+        throw new Error(`Unknown prompt: ${name}`);
+      }
+      const newName = (args as { name?: string } | undefined)?.name ?? "";
+      if (!newName) {
+        throw new Error("rename prompt requires a 'name' argument");
+      }
+      return buildRenamePromptMessages(newName);
     });
 
     // Wire the initialize-complete hook BEFORE connecting the transport.
@@ -1121,16 +1457,106 @@ export class Plugin {
 
     if (this.hubEnvUrl) {
       this.hubWsUrl = `${this.hubEnvUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
-      this.storedName = buildDefaultName();
+      this.storedName = this.resolveInitialName();
+      this.startRenameWatch();
       this.connectWebSocket();
     } else {
       log("CLAUDE_NET_HUB not set — running without hub connection");
     }
   }
 
+  /** Best-effort write of the latest registered name keyed by CC sid.
+   *  Silently no-ops when discovery never ran (e.g. no transcript yet);
+   *  the next startup will fall back to the default — which is the
+   *  pre-feature behaviour, not a regression. */
+  private persistName(name: string): void {
+    if (!this.discoveredSid || !this.discoveredCwd) return;
+    writePersistedAgentName(
+      this.discoveredSid,
+      this.discoveredCwd,
+      name,
+      Date.now(),
+    );
+  }
+
+  /**
+   * Pick the name to auto-register with at startup. Three sources, in
+   * priority order:
+   *   1. Persisted name from a previous register on this CC session
+   *      (survives /mcp reconnect)
+   *   2. Claude Code's `/rename` title from the JSONL custom-title line
+   *   3. The default cwd-basename:user@host
+   * Source #1 and #2 carry timestamps; the freshest wins.
+   */
+  private resolveInitialName(): string {
+    const defaultName = buildDefaultName();
+    this.discoveredCwd = process.cwd();
+    const discovered = findActiveSessionForCcPid(
+      process.ppid,
+      this.discoveredCwd,
+    );
+    if (!discovered) return defaultName;
+    this.discoveredSid = discovered.sessionId;
+    this.transcriptPath = discovered.transcriptPath;
+    const persisted = readPersistedAgentName(
+      this.discoveredSid,
+      this.discoveredCwd,
+    );
+    const customTitle = readCustomTitleFromTranscript(this.transcriptPath);
+    if (customTitle) this.lastCustomTitleSeen = customTitle.title;
+    const resolved = resolveStartupName(defaultName, persisted, customTitle);
+    if (resolved !== defaultName) {
+      log(`Startup name resolved to "${resolved}" (sid=${this.discoveredSid})`);
+    }
+    return resolved;
+  }
+
+  /**
+   * Poll the discovered transcript for new `/rename` (custom-title)
+   * lines. When the title changes, re-register so claude-net follows
+   * Claude Code's own session name. Cheap enough to run every 5s — we
+   * stat the file once and only read when it grew.
+   */
+  private startRenameWatch(): void {
+    if (!this.transcriptPath) return;
+    let lastSize = 0;
+    try {
+      lastSize = fs.statSync(this.transcriptPath).size;
+    } catch {
+      // file gone between resolveInitialName and here — skip the watch
+      return;
+    }
+    this.renameWatchTimer = setInterval(() => {
+      let size: number;
+      try {
+        size = fs.statSync(this.transcriptPath).size;
+      } catch {
+        return;
+      }
+      if (size === lastSize) return;
+      lastSize = size;
+      const latest = readCustomTitleFromTranscript(this.transcriptPath);
+      if (!latest) return;
+      if (latest.title === this.lastCustomTitleSeen) return;
+      this.lastCustomTitleSeen = latest.title;
+      const cleaned = sanitizeSessionPart(latest.title);
+      if (!cleaned) return;
+      const defaultName = buildDefaultName();
+      const colon = defaultName.indexOf(":");
+      if (colon < 0) return;
+      const nextName = `${cleaned}${defaultName.slice(colon)}`;
+      if (nextName === this.registeredName) return;
+      log(`Detected /rename → ${latest.title}; re-registering as ${nextName}`);
+      this.autoRegisterWithRetry(nextName).catch(() => {
+        // already handled (logged + state write) inside the helper
+      });
+    }, RENAME_WATCH_INTERVAL_MS).unref();
+  }
+
   shutdown(): void {
     deleteSessionState();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.renameWatchTimer) clearInterval(this.renameWatchTimer);
     this.clearWatchdog();
     if (this.ws) {
       this.ws.removeAllListeners();

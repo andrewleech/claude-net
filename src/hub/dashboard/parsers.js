@@ -352,6 +352,42 @@ export function toWebSearchText(resp) {
 // alongside the link objects; the legacy string shape had the
 // prose follow a "Links: [...]" line. Trailing "REMINDER: ..."
 // sentinel text gets trimmed in either case.
+/**
+ * Parse the augmented notification text the mirror-agent emits when
+ * it scrapes a numbered Claude Code modal off the tmux pane. The
+ * shape is roughly:
+ *   <title line(s)>
+ *
+ *   1. option text
+ *   2. option text
+ *   …
+ *
+ * Returns `{ title, options: [{key, label}] }`, or `null` when the
+ * text contains no numbered options (e.g. the title-only notification
+ * fired before the pane scrape ran).
+ */
+export function parsePromptMenu(text) {
+  if (!text || typeof text !== "string") return null;
+  const lines = text.split("\n");
+  const optionRx = /^\s*(\d{1,2})\.\s+(.+?)\s*$/;
+  const options = [];
+  const titleLines = [];
+  let seenOption = false;
+  for (const ln of lines) {
+    const m = ln.match(optionRx);
+    if (m) {
+      seenOption = true;
+      options.push({ key: m[1], label: m[2] });
+      continue;
+    }
+    if (!seenOption && ln.trim().length > 0) {
+      titleLines.push(ln.trim());
+    }
+  }
+  if (options.length === 0) return null;
+  return { title: titleLines.join(" ").trim(), options };
+}
+
 export function extractWebSearchSummary(resp) {
   if (!resp) return "";
   let raw = "";

@@ -435,9 +435,8 @@ describe("WebSocket Plugin (integration)", () => {
     );
     await p1;
 
-    expect(hub.mirror.sessions.get("sid-1")?.ownerAgent).toBe(
-      "thisisnew:alice@host",
-    );
+    const g1 = hub.mirror.getSession("sid-1");
+    expect(g1.ok && g1.entry.ownerAgent).toBe("thisisnew:alice@host");
     expect(hub.registry.agents.has("thisisnew:alice@host")).toBe(true);
   });
 
@@ -464,8 +463,7 @@ describe("WebSocket Plugin (integration)", () => {
     );
     await p1;
 
-    expect(hub.mirror.sessions.get("sid-noPid")?.ownerAgent).toBe(
-      "skydeck:old@host",
-    );
+    const gNoPid = hub.mirror.getSession("sid-noPid");
+    expect(gNoPid.ok && gNoPid.entry.ownerAgent).toBe("skydeck:old@host");
   });
 });

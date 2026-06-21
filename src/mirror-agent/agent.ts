@@ -711,7 +711,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
       session.ws = null;
     }
-    const wsUrl = toWsUrl(hubUrl, session.sid);
+    const wsUrl = toWsUrl(hubUrl, session.sid, session.host);
     const sid = session.sid;
     const client = new HubClient({
       url: wsUrl,
@@ -1540,9 +1540,11 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function toWsUrl(hubUrl: string, sid: string): string {
+function toWsUrl(hubUrl: string, sid: string, host: string): string {
   const wsBase = hubUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-  return `${wsBase}/ws/mirror/${encodeURIComponent(sid)}?as=agent`;
+  const sidEnc = encodeURIComponent(sid);
+  const hostEnc = host ? `&host=${encodeURIComponent(host)}` : "";
+  return `${wsBase}/ws/mirror/${sidEnc}?as=agent${hostEnc}`;
 }
 
 /**

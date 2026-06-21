@@ -195,7 +195,23 @@ interface PendingHistoryRequest {
 }
 
 export class MirrorRegistry {
+  /**
+   * Composite-keyed session map. Key is `${host}|${sid}` so two
+   * mirror-agents on different hosts can hold the same session_id
+   * without colliding — UUID collisions across hosts are rare but
+   * real (resumed sessions, copied JSONLs, the rare RNG dup), and
+   * keying by sid alone produced an unrecoverable wedge for the
+   * second host.
+   *
+   * Callers with host context use `sessionByKey(host, sid)` for an
+   * unambiguous lookup. Callers with only sid (REST endpoints with
+   * no host query) go through `resolveSidLookup(sid)`, which
+   * disambiguates against the secondary `sidIndex` and returns
+   * `ambiguous` when multiple hosts hold the same sid.
+   */
   readonly sessions = new Map<string, MirrorSessionEntry>();
+  /** Secondary index: sid → set of composite keys carrying that sid. */
+  private readonly sidIndex = new Map<string, Set<string>>();
   private transcriptRing: number;
   private retentionMs: number;
   private orphanCloseMs: number;
@@ -345,7 +361,7 @@ export class MirrorRegistry {
    * branch — no new row, no work to throttle).
    */
   hasSession(sid: string): boolean {
-    return this.sessions.has(sid);
+    return this.sidIndex.has(sid);
   }
 
   /**
@@ -432,6 +448,135 @@ export class MirrorRegistry {
     this.sessionClosedHooks.push(fn);
   }
 
+  // ── Composite-key plumbing ─────────────────────────────────────────
+  //
+  // The session map is keyed by `${host}|${sid}` so two hosts can
+  // hold the same UUID without colliding. `setEntry` / `deleteEntry`
+  // keep the secondary sid index in lockstep so sid-only lookups stay
+  // O(1). Direct `this.sessions.{set,delete,get,has}` calls outside
+  // these helpers will desync the index — go through them instead.
+
+  private compositeKey(host: string, sid: string): string {
+    return `${host}|${sid}`;
+  }
+
+  /** Insert or replace an entry. Maintains sidIndex. */
+  private setEntry(entry: MirrorSessionEntry): void {
+    const key = this.compositeKey(entry.host, entry.sid);
+    this.sessions.set(key, entry);
+    let keys = this.sidIndex.get(entry.sid);
+    if (!keys) {
+      keys = new Set();
+      this.sidIndex.set(entry.sid, keys);
+    }
+    keys.add(key);
+  }
+
+  /** Remove an entry. Maintains sidIndex. */
+  private deleteEntry(entry: MirrorSessionEntry): void {
+    const key = this.compositeKey(entry.host, entry.sid);
+    this.sessions.delete(key);
+    const keys = this.sidIndex.get(entry.sid);
+    if (keys) {
+      keys.delete(key);
+      if (keys.size === 0) this.sidIndex.delete(entry.sid);
+    }
+  }
+
+  /**
+   * Direct lookup by (host, sid). Unambiguous — returns the exact
+   * entry for that host or undefined. Used by `createSession` and
+   * by callers that already know which host they want (agent WS
+   * open, /api/mirror/* endpoints with `?host=` provided).
+   */
+  private entryByKey(
+    host: string,
+    sid: string,
+  ): MirrorSessionEntry | undefined {
+    return this.sessions.get(this.compositeKey(host, sid));
+  }
+
+  /**
+   * Resolve a sid to an entry when host is unknown. Returns the
+   * entry when exactly one host holds that sid; null when zero or
+   * more than one. Callers that need to distinguish the ambiguous
+   * case should use `resolveSidLookup` instead.
+   */
+  private entryBySid(sid: string): MirrorSessionEntry | null {
+    const keys = this.sidIndex.get(sid);
+    if (!keys || keys.size !== 1) return null;
+    const k = keys.values().next().value;
+    return (k && this.sessions.get(k)) || null;
+  }
+
+  /**
+   * Public-method helper: resolve a sid (with optional host hint) to
+   * an entry. When host is provided, uses composite key directly.
+   * When host is null, falls back to the sid index (returns null if
+   * 0 or ambiguous). Callers handle null as 404.
+   */
+  private resolveEntry(sid: string, host?: string): MirrorSessionEntry | null {
+    if (host) return this.entryByKey(host, sid) ?? null;
+    return this.entryBySid(sid);
+  }
+
+  /**
+   * Sid-only lookup with explicit error states. Returns:
+   *   - { ok:true, entry } — exactly one host holds the sid.
+   *   - { ok:false, status:404 } — no host holds the sid.
+   *   - { ok:false, status:409, hosts:[…] } — multiple hosts hold
+   *     the sid; the caller must disambiguate (e.g. require a
+   *     `?host=` query param).
+   *
+   * The caller can also pass an explicit `host` to skip the index
+   * and do a direct composite-key lookup, which is unambiguous.
+   */
+  private resolveSidLookup(
+    sid: string,
+    host?: string,
+  ):
+    | { ok: true; entry: MirrorSessionEntry }
+    | { ok: false; status: 404 | 409; error: string; hosts?: string[] } {
+    if (host) {
+      const entry = this.entryByKey(host, sid);
+      if (entry) return { ok: true, entry };
+      return {
+        ok: false,
+        status: 404,
+        error: `Session '${sid}' not found on host '${host}'.`,
+      };
+    }
+    const keys = this.sidIndex.get(sid);
+    if (!keys || keys.size === 0) {
+      return {
+        ok: false,
+        status: 404,
+        error: `Session '${sid}' not found.`,
+      };
+    }
+    if (keys.size === 1) {
+      const k = keys.values().next().value;
+      const entry = k ? this.sessions.get(k) : undefined;
+      if (entry) return { ok: true, entry };
+      return {
+        ok: false,
+        status: 404,
+        error: `Session '${sid}' not found.`,
+      };
+    }
+    const hosts: string[] = [];
+    for (const k of keys) {
+      const sep = k.indexOf("|");
+      if (sep > 0) hosts.push(k.slice(0, sep));
+    }
+    return {
+      ok: false,
+      status: 409,
+      error: `Session '${sid}' exists on multiple hosts (${hosts.join(", ")}); specify host to disambiguate.`,
+      hosts,
+    };
+  }
+
   /**
    * Create a new mirror session, or return an existing one idempotently if
    * the same owner is reconnecting with the same sid.
@@ -451,7 +596,18 @@ export class MirrorRegistry {
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
     const actualSid = sid ?? crypto.randomUUID();
-    const existing = this.sessions.get(actualSid);
+    // Composite-key lookup: an entry on a different host with the same
+    // sid no longer counts as a collision (cross-host UUID dups are
+    // tracked separately). Only an entry on this same host matters.
+    // When host is unknown (legacy callers without host context), fall
+    // back to a sid-only lookup; that branch matches the pre-composite
+    // behaviour and only resolves to an entry when exactly one host
+    // holds the sid — ambiguity is treated as "no existing entry"
+    // and the create proceeds (which is the right thing because the
+    // caller has no host to match against).
+    const existing = host
+      ? this.entryByKey(host, actualSid)
+      : this.entryBySid(actualSid);
     if (existing) {
       // Owner mismatch: reject if the session already has a known host and
       // the incoming owner differs. Legitimate keep-alive reconnects always
@@ -466,13 +622,12 @@ export class MirrorRegistry {
       // a "stale" owner. Rejecting that POST permanently wedges the
       // session until claude-channels restarts.
       const identityMatches =
-        !!existing.host &&
-        !!host &&
-        existing.host === host &&
-        existing.ccPid !== null &&
-        ccPid !== null &&
-        existing.ccPid === ccPid;
+        existing.ccPid !== null && ccPid !== null && existing.ccPid === ccPid;
       if (
+        // `existing.host` is the rollout guard for the original 409:
+        // pre-rollout entries (legacy fixture-driven calls without a host)
+        // never carried hostile-peer risk, and skipping the check keeps
+        // their idempotent re-POSTs behaving as keep-alives.
         existing.host &&
         existing.ownerAgent &&
         ownerAgent !== existing.ownerAgent &&
@@ -546,7 +701,7 @@ export class MirrorRegistry {
       retentionTimerId: null,
       activityState: "awaiting_input",
     };
-    this.sessions.set(actualSid, entry);
+    this.setEntry(entry);
 
     this.store.recordOpen({
       sid: actualSid,
@@ -568,13 +723,11 @@ export class MirrorRegistry {
 
   getSession(
     sid: string,
+    host?: string,
   ):
     | { ok: true; entry: MirrorSessionEntry }
-    | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
-    if (!entry)
-      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
-    return { ok: true, entry };
+    | { ok: false; error: string; status: 404 | 409; hosts?: string[] } {
+    return this.resolveSidLookup(sid, host);
   }
 
   /**
@@ -583,8 +736,9 @@ export class MirrorRegistry {
   recordEvent(
     sid: string,
     frame: MirrorEventFrame,
+    host?: string,
   ): { ok: true; duplicate: boolean } | { ok: false; error: string } {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry) return { ok: false, error: `Session '${sid}' not found.` };
     if (entry.closedAt) return { ok: false, error: "Session is closed." };
 
@@ -648,8 +802,8 @@ export class MirrorRegistry {
     return { ok: true, duplicate: false };
   }
 
-  addWatcher(sid: string, watcher: SessionWatcher): void {
-    const entry = this.sessions.get(sid);
+  addWatcher(sid: string, watcher: SessionWatcher, host?: string): void {
+    const entry = this.resolveEntry(sid, host);
     if (!entry) return;
     entry.watchers.add(watcher);
     this.dashboardBroadcast({
@@ -659,8 +813,8 @@ export class MirrorRegistry {
     });
   }
 
-  removeWatcher(sid: string, watcher: SessionWatcher): void {
-    const entry = this.sessions.get(sid);
+  removeWatcher(sid: string, watcher: SessionWatcher, host?: string): void {
+    const entry = this.resolveEntry(sid, host);
     if (!entry) return;
     entry.watchers.delete(watcher);
     this.dashboardBroadcast({
@@ -670,8 +824,12 @@ export class MirrorRegistry {
     });
   }
 
-  setAgentConnection(sid: string, agent: AgentConnection | null): void {
-    const entry = this.sessions.get(sid);
+  setAgentConnection(
+    sid: string,
+    agent: AgentConnection | null,
+    host?: string,
+  ): void {
+    const entry = this.resolveEntry(sid, host);
     if (!entry) return;
     const wasAttached = entry.agent !== null;
     entry.agent = agent;
@@ -708,7 +866,7 @@ export class MirrorRegistry {
    * retention cleanup. Idempotent.
    */
   closeSession(sid: string, reason: "exit" | "agent_timeout" = "exit"): void {
-    const entry = this.sessions.get(sid);
+    const entry = this.entryBySid(sid);
     if (!entry || entry.closedAt) return;
     entry.closedAt = new Date();
 
@@ -756,14 +914,14 @@ export class MirrorRegistry {
 
     if (this.retentionMs > 0) {
       const timer = setTimeout(() => {
-        this.sessions.delete(sid);
+        this.deleteEntry(entry);
       }, this.retentionMs);
       if (typeof timer === "object" && "unref" in timer) {
         timer.unref();
       }
       entry.retentionTimerId = timer;
     } else {
-      this.sessions.delete(sid);
+      this.deleteEntry(entry);
     }
 
     for (const fn of this.sessionClosedHooks) {
@@ -803,14 +961,14 @@ export class MirrorRegistry {
     // null out entry.agent depending on retention timing, but
     // closeAndDrop must always disconnect any still-bound mirror-agent
     // so the per-session WS recovers via reconnect+recreate.
-    const entry = this.sessions.get(sid);
+    const entry = this.entryBySid(sid);
     const agentClose = entry?.agent?.close;
     this.closeSession(sid, reason);
     if (entry?.retentionTimerId) {
       clearTimeout(entry.retentionTimerId);
       entry.retentionTimerId = null;
     }
-    this.sessions.delete(sid);
+    if (entry) this.deleteEntry(entry);
     if (agentClose) {
       try {
         agentClose();
@@ -863,7 +1021,7 @@ export class MirrorRegistry {
   ):
     | { ok: true; old_owner: string; new_owner: string }
     | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
+    const entry = this.entryBySid(sid);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
     const oldName = entry.ownerAgent;
@@ -889,8 +1047,9 @@ export class MirrorRegistry {
     sid: string,
     text: string,
     watcher: string,
+    host?: string,
   ): { ok: true; seq: number } | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
     if (entry.closedAt)
@@ -930,8 +1089,9 @@ export class MirrorRegistry {
     sid: string,
     parts: MirrorKeyPart[],
     watcher: string,
+    host?: string,
   ): { ok: true; seq: number } | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
     if (entry.closedAt)
@@ -967,8 +1127,9 @@ export class MirrorRegistry {
   relayStop(
     sid: string,
     watcher: string,
+    host?: string,
   ): { ok: true } | { ok: false; error: string; status: number } {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
     if (entry.closedAt)
@@ -1007,10 +1168,11 @@ export class MirrorRegistry {
     text: string,
     watcher: string,
     timeoutMs: number,
+    host?: string,
   ): Promise<
     { ok: true; path: string } | { ok: false; error: string; status: number }
   > {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return Promise.resolve({
         ok: false,
@@ -1116,11 +1278,12 @@ export class MirrorRegistry {
   relayListCommands(
     sid: string,
     timeoutMs: number,
+    host?: string,
   ): Promise<
     | { ok: true; commands: SlashCommand[] }
     | { ok: false; error: string; status: number }
   > {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return Promise.resolve({
         ok: false,
@@ -1219,11 +1382,12 @@ export class MirrorRegistry {
     beforeTs: number | null,
     limit: number,
     timeoutMs: number,
+    host?: string,
   ): Promise<
     | { ok: true; frames: MirrorEventFrame[]; exhausted: boolean }
     | { ok: false; error: string; status: number }
   > {
-    const entry = this.sessions.get(sid);
+    const entry = this.resolveEntry(sid, host);
     if (!entry)
       return Promise.resolve({
         ok: false,
@@ -1334,7 +1498,7 @@ export class MirrorRegistry {
       ts: number;
     },
   ): void {
-    const entry = this.sessions.get(sid);
+    const entry = this.entryBySid(sid);
     if (!entry) return;
     // Cache the snapshot so new watchers see the current value on
     // attach, instead of waiting for the next usage row.
@@ -1367,7 +1531,7 @@ export class MirrorRegistry {
     sid: string,
     payload: { active: boolean; startedAt?: number; tool?: string | null },
   ): void {
-    const entry = this.sessions.get(sid);
+    const entry = this.entryBySid(sid);
     if (!entry) return;
     const msg = JSON.stringify({
       event: "mirror:thinking",
@@ -1485,8 +1649,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         return mirrorRegistry.listOwnedBy(owner);
       })
 
-      .get("/:sid/transcript", ({ params, set }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .get("/:sid/transcript", ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1512,8 +1677,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         };
       })
 
-      .post("/:sid/close", ({ params, set }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .post("/:sid/close", ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1556,8 +1722,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         return archived;
       })
 
-      .post("/:sid/inject", ({ params, body, set, request }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .post("/:sid/inject", ({ params, body, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1592,7 +1759,12 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const watcher = sanitizeWatcher(
           payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
         );
-        const result = mirrorRegistry.relayInject(params.sid, text, watcher);
+        const result = mirrorRegistry.relayInject(
+          params.sid,
+          text,
+          watcher,
+          host,
+        );
         if (!result.ok) {
           set.status = result.status;
           return { error: result.error };
@@ -1612,8 +1784,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
        *
        * Same two-tier rate limit as /inject (burst floor + RPM ceiling).
        */
-      .post("/:sid/keys", ({ params, body, set, request }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .post("/:sid/keys", ({ params, body, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1690,6 +1863,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           params.sid,
           validatedParts,
           watcher,
+          host,
         );
         if (!result.ok) {
           set.status = result.status;
@@ -1705,8 +1879,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
        * `@<path>` via the existing tmux path so the user's Claude picks it up
        * with the Read tool.
        */
-      .post("/:sid/paste", async ({ params, body, set, request }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .post("/:sid/paste", async ({ params, body, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1746,6 +1921,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           text,
           watcher,
           PASTE_TIMEOUT_MS,
+          host,
         );
         if (!pasted.ok) {
           set.status = pasted.status;
@@ -1757,6 +1933,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           params.sid,
           reference,
           watcher,
+          host,
         );
         if (!relay.ok) {
           // File is written but inject failed — surface both.
@@ -1790,8 +1967,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
        * Fire-and-forget; response is just confirmation that the frame
        * was relayed.
        */
-      .post("/:sid/stop", ({ params, set, request }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .post("/:sid/stop", ({ params, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1804,7 +1982,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const watcher = sanitizeWatcher(
           request.headers.get("user-agent") ?? "unknown",
         );
-        const result = mirrorRegistry.relayStop(params.sid, watcher);
+        const result = mirrorRegistry.relayStop(params.sid, watcher, host);
         if (!result.ok) {
           set.status = result.status;
           return { error: result.error };
@@ -1818,8 +1996,9 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
        * on the agent's host). The response is agent-scoped and can leak
        * plugin names from the user's install — trusted-network only.
        */
-      .get("/:sid/commands", async ({ params, set }) => {
-        const found = mirrorRegistry.getSession(params.sid);
+      .get("/:sid/commands", async ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
         if (!found.ok) {
           set.status = found.status;
           return { error: found.error };
@@ -1827,6 +2006,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const result = await mirrorRegistry.relayListCommands(
           params.sid,
           COMMANDS_TIMEOUT_MS,
+          host,
         );
         if (!result.ok) {
           set.status = result.status;
@@ -1964,6 +2144,14 @@ interface MirrorWs {
 interface ConnMeta {
   role: "agent" | "watcher";
   sid: string;
+  /**
+   * Host claimed via `?host=` on the WS open URL. Lets the message
+   * handler resolve the right entry when two hosts hold the same sid.
+   * Optional for back-compat with older agents/clients that haven't
+   * been refreshed — when absent we fall through to the sid-only
+   * resolver (which returns null for the ambiguous case).
+   */
+  host?: string;
   watcher?: SessionWatcher;
 }
 
@@ -1978,8 +2166,9 @@ export function wsMirrorPlugin(
       const sid = ws.data.params.sid;
       const q = ws.data.query ?? {};
       const asParam = q.as;
+      const host = typeof q.host === "string" && q.host ? q.host : undefined;
 
-      const found = mirrorRegistry.getSession(sid);
+      const found = mirrorRegistry.getSession(sid, host);
       if (!found.ok) {
         ws.send(JSON.stringify({ event: "error", message: found.error }));
         ws.close(1008, found.error);
@@ -1992,18 +2181,22 @@ export function wsMirrorPlugin(
       };
 
       if (asParam === "agent") {
-        mirrorRegistry.setAgentConnection(sid, {
-          ws: { send: sendRaw },
-          wsIdentity: ws.raw,
-          close: () => {
-            try {
-              ws.close();
-            } catch {
-              // ignore
-            }
+        mirrorRegistry.setAgentConnection(
+          sid,
+          {
+            ws: { send: sendRaw },
+            wsIdentity: ws.raw,
+            close: () => {
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+            },
           },
-        });
-        connMeta.set(ws.raw, { role: "agent", sid });
+          host ?? entry.host,
+        );
+        connMeta.set(ws.raw, { role: "agent", sid, host: entry.host });
         ws.send(JSON.stringify({ event: "mirror:agent_ready", sid }));
         return;
       }
@@ -2020,8 +2213,13 @@ export function wsMirrorPlugin(
           }
         },
       };
-      mirrorRegistry.addWatcher(sid, watcher);
-      connMeta.set(ws.raw, { role: "watcher", sid, watcher });
+      mirrorRegistry.addWatcher(sid, watcher, host ?? entry.host);
+      connMeta.set(ws.raw, {
+        role: "watcher",
+        sid,
+        host: entry.host,
+        watcher,
+      });
 
       ws.send(
         JSON.stringify({
@@ -2076,7 +2274,7 @@ export function wsMirrorPlugin(
               ? Math.max(1, Math.min(1000, Math.floor(frame.limit)))
               : 200;
           mirrorRegistry
-            .relayHistoryRequest(meta.sid, beforeTs, limit, 15_000)
+            .relayHistoryRequest(meta.sid, beforeTs, limit, 15_000, meta.host)
             .then((res) => {
               if (res.ok) {
                 ws.send(
@@ -2118,6 +2316,7 @@ export function wsMirrorPlugin(
         mirrorRegistry.recordEvent(
           meta.sid,
           frame as unknown as MirrorEventFrame,
+          meta.host,
         );
       } else if (
         frame.action === "mirror_paste_done" &&
@@ -2181,7 +2380,7 @@ export function wsMirrorPlugin(
       if (meta.role === "agent") {
         mirrorRegistry.handleAgentDisconnect(ws.raw);
       } else if (meta.watcher) {
-        mirrorRegistry.removeWatcher(meta.sid, meta.watcher);
+        mirrorRegistry.removeWatcher(meta.sid, meta.watcher, meta.host);
       }
     },
     // biome-ignore lint/suspicious/noExplicitAny: Elysia WS handler typing requires flexible return

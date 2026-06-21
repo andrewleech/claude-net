@@ -48,8 +48,10 @@ describe("mirror session loss + recovery", () => {
     expect(c1.ok).toBe(true);
     if (!c1.ok) return;
 
-    // Simulate hub restart wiping in-memory state.
-    reg.sessions.delete("stable-sid");
+    // Simulate hub restart wiping in-memory state. Composite-keyed
+    // map + the sidIndex must both be cleared together to leave the
+    // registry in a clean state; closeAndDrop walks both correctly.
+    reg.closeAndDrop("stable-sid");
 
     const c2 = reg.createSession("a:u@h", "/a", "stable-sid");
     expect(c2.ok).toBe(true);
@@ -64,7 +66,7 @@ describe("mirror session loss + recovery", () => {
   test("recreated session shows up in listAll()", () => {
     const c1 = reg.createSession("a:u@h", "/a", "rewind-sid");
     if (!c1.ok) return;
-    reg.sessions.delete("rewind-sid");
+    reg.closeAndDrop("rewind-sid");
     const c2 = reg.createSession("a:u@h", "/a", "rewind-sid");
     if (!c2.ok) return;
     const listed = reg.listAll();
@@ -85,9 +87,11 @@ describe("mirror session loss + recovery", () => {
       }),
     });
     expect(res.ok).toBe(true);
-    const entry = reg.sessions.get("wire-sid");
-    expect(entry?.host).toBe("laptop");
-    expect(entry?.ccPid).toBe(4242);
+    const found = reg.getSession("wire-sid");
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    expect(found.entry.host).toBe("laptop");
+    expect(found.entry.ccPid).toBe(4242);
   });
 
   test("hub-restart rename flow: agent's pre-registered name re-applies to a freshly-POSTed session", () => {

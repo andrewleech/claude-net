@@ -104,10 +104,11 @@ describe("MirrorRegistry", () => {
     expect(r2.entry.ownerAgent).toBe("renamed-by-mcp:u@h");
   });
 
-  test("createSession still rejects owner mismatch when host differs", () => {
-    // Hostile-peer guard: same sid claimed from a different host with
-    // a different owner should still 409. Identity proof requires BOTH
-    // host AND ccPid to match the recorded entry.
+  test("createSession on a different host coexists at the same sid", () => {
+    // Cross-host UUID collisions are real (resumed sessions, copied
+    // JSONLs, the rare RNG dup). The hub keys sessions by `(host, sid)`
+    // so two hosts can each own an entry with the same sid without
+    // any wedge. Each entry tracks its own watchers + transcript.
     const r1 = reg.createSession(
       "alice:u@h",
       "/home/alice",
@@ -118,13 +119,70 @@ describe("MirrorRegistry", () => {
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
     const r2 = reg.createSession(
-      "evil:u@h",
-      "/home/alice",
+      "other:u@h",
+      "/home/other",
       "sid-h2",
       "different-host",
-      4815,
+      9001,
     );
-    expect(r2.ok).toBe(false);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.restored).toBe(false);
+    // Both entries are present; `getSession(sid)` without a host hint
+    // sees them as ambiguous and returns 409.
+    const ambig = reg.getSession("sid-h2");
+    expect(ambig.ok).toBe(false);
+    if (ambig.ok) return;
+    expect(ambig.status).toBe(409);
+    expect(ambig.hosts?.sort()).toEqual(["different-host", "laptop"]);
+    // Disambiguated lookups return the right entry per host.
+    const onLaptop = reg.getSession("sid-h2", "laptop");
+    expect(onLaptop.ok && onLaptop.entry.ownerAgent).toBe("alice:u@h");
+    const onOther = reg.getSession("sid-h2", "different-host");
+    expect(onOther.ok && onOther.entry.ownerAgent).toBe("other:u@h");
+    // listAll surfaces both entries so the dashboard's session list
+    // can render two distinct rows under their respective host groups.
+    const summaries = reg.listAll().filter((s) => s.sid === "sid-h2");
+    expect(summaries.map((s) => s.host).sort()).toEqual([
+      "different-host",
+      "laptop",
+    ]);
+  });
+
+  test("relayInject scoped per (host, sid) when host hint supplied", () => {
+    // The two-host collision case must allow inject to target the
+    // right entry; without the host hint the resolver returns 404
+    // (ambiguous) and the caller gets a clean failure rather than
+    // a silent cross-host inject.
+    const sent: string[] = [];
+    reg.createSession("a:u@h", "/a", "sid-x", "laptop", 1);
+    reg.createSession("b:u@h", "/b", "sid-x", "desktop", 2);
+    reg.setAgentConnection(
+      "sid-x",
+      {
+        ws: { send: (s: string) => sent.push(`laptop:${s}`) },
+        wsIdentity: {},
+        close: () => {},
+      },
+      "laptop",
+    );
+    reg.setAgentConnection(
+      "sid-x",
+      {
+        ws: { send: (s: string) => sent.push(`desktop:${s}`) },
+        wsIdentity: {},
+        close: () => {},
+      },
+      "desktop",
+    );
+    // Ambiguous: no host hint, sid alone matches two entries — 404.
+    const ambig = reg.relayInject("sid-x", "hi", "web");
+    expect(ambig.ok).toBe(false);
+    // Disambiguated: explicit host routes to that entry only.
+    const r1 = reg.relayInject("sid-x", "to-laptop", "web", "laptop");
+    expect(r1.ok).toBe(true);
+    expect(sent.some((s) => s.startsWith("laptop:"))).toBe(true);
+    expect(sent.some((s) => s.startsWith("desktop:"))).toBe(false);
   });
 
   test("createSession still rejects owner mismatch when ccPid differs", () => {
@@ -161,7 +219,7 @@ describe("MirrorRegistry", () => {
       9001,
     );
     expect(r1.ok).toBe(true);
-    expect(reg.sessions.has("sid-z1")).toBe(true);
+    expect(reg.hasSession("sid-z1")).toBe(true);
     const r2 = reg.createSession(
       "alice:u@h",
       "/home/alice",
@@ -171,9 +229,9 @@ describe("MirrorRegistry", () => {
     );
     expect(r2.ok).toBe(true);
     // Zombie closed and dropped.
-    expect(reg.sessions.has("sid-z1")).toBe(false);
+    expect(reg.hasSession("sid-z1")).toBe(false);
     // New session kept.
-    expect(reg.sessions.has("sid-z2")).toBe(true);
+    expect(reg.hasSession("sid-z2")).toBe(true);
   });
 
   test("createSession dedup leaves entries with non-empty transcript alone", () => {
@@ -206,8 +264,8 @@ describe("MirrorRegistry", () => {
       9002,
     );
     expect(r2.ok).toBe(true);
-    expect(reg.sessions.has("sid-real")).toBe(true);
-    expect(reg.sessions.has("sid-newcomer")).toBe(true);
+    expect(reg.hasSession("sid-real")).toBe(true);
+    expect(reg.hasSession("sid-newcomer")).toBe(true);
   });
 
   test("createSession dedup leaves sessions on a different ccPid alone", () => {
@@ -219,8 +277,8 @@ describe("MirrorRegistry", () => {
       1234,
     );
     reg.createSession("alice:u@h", "/home/alice", "sid-new", "laptop", 5678);
-    expect(reg.sessions.has("sid-other-ccpid")).toBe(true);
-    expect(reg.sessions.has("sid-new")).toBe(true);
+    expect(reg.hasSession("sid-other-ccpid")).toBe(true);
+    expect(reg.hasSession("sid-new")).toBe(true);
   });
 
   test("createSession dedup leaves sessions on a different host alone", () => {
@@ -232,8 +290,8 @@ describe("MirrorRegistry", () => {
       9003,
     );
     reg.createSession("alice:u@h", "/home/alice", "sid-laptop", "laptop", 9003);
-    expect(reg.sessions.has("sid-other-host")).toBe(true);
-    expect(reg.sessions.has("sid-laptop")).toBe(true);
+    expect(reg.hasSession("sid-other-host")).toBe(true);
+    expect(reg.hasSession("sid-laptop")).toBe(true);
   });
 
   test("createSession rejects owner mismatch when existing ccPid is null", () => {
@@ -637,9 +695,12 @@ describe("MirrorRegistry", () => {
 
     const affected = reg.attachAgent("laptop", 1000, "yos:alice@laptop");
     expect(affected.sort()).toEqual(["s1", "s2"]);
-    expect(reg.sessions.get("s1")?.ownerAgent).toBe("yos:alice@laptop");
-    expect(reg.sessions.get("s2")?.ownerAgent).toBe("yos:alice@laptop");
-    expect(reg.sessions.get("s3")?.ownerAgent).toBe("skydeck:alice@laptop");
+    const g1 = reg.getSession("s1");
+    expect(g1.ok && g1.entry.ownerAgent).toBe("yos:alice@laptop");
+    const g2 = reg.getSession("s2");
+    expect(g2.ok && g2.entry.ownerAgent).toBe("yos:alice@laptop");
+    const g3 = reg.getSession("s3");
+    expect(g3.ok && g3.entry.ownerAgent).toBe("skydeck:alice@laptop");
 
     const rename = events.find((e) => e.event === "mirror:owner_renamed");
     expect(rename).toBeDefined();
@@ -671,7 +732,8 @@ describe("MirrorRegistry", () => {
     reg.createSession("a:u@h", "/x", "s1", "", null);
     expect(reg.attachAgent("", 1000, "b:u@h").length).toBe(0);
     expect(reg.attachAgent("laptop", Number.NaN, "b:u@h").length).toBe(0);
-    expect(reg.sessions.get("s1")?.ownerAgent).toBe("a:u@h");
+    const ga = reg.getSession("s1");
+    expect(ga.ok && ga.entry.ownerAgent).toBe("a:u@h");
   });
 
   test("createSession applies agentLookup at session birth", () => {
@@ -720,7 +782,8 @@ describe("MirrorRegistry", () => {
       "laptop",
       1111,
     );
-    expect(reg.sessions.get("s1")?.ownerAgent).toBe("skydeck:alice@laptop");
+    const gs = reg.getSession("s1");
+    expect(gs.ok && gs.entry.ownerAgent).toBe("skydeck:alice@laptop");
 
     // --continue: same sid, new pid. The lookup now resolves.
     const r = reg.createSession(
@@ -841,14 +904,15 @@ describe("MirrorRegistry", () => {
     expect(r.ok).toBe(true);
 
     // No agent connected yet.
-    const entry = reg.sessions.get("s1");
-    expect(entry?.agent).toBeNull();
+    const entry = reg.getSession("s1");
+    expect(entry.ok && entry.entry.agent).toBeNull();
 
     reg.setAgentConnection("s1", {
       ws: { send: () => {} },
       wsIdentity: {},
     });
-    expect(reg.sessions.get("s1")?.agent).not.toBeNull();
+    const e2 = reg.getSession("s1");
+    expect(e2.ok && e2.entry.agent).not.toBeNull();
   });
 
   // ── broadcastStatusline + lastStatusline on init ────────────────────
@@ -896,10 +960,12 @@ describe("MirrorRegistry", () => {
 
     // buildInitMessage is tested indirectly: check the entry's lastStatusline
     // which is what the WS handler embeds in the init response.
-    const entry = reg.sessions.get("s1");
-    expect(entry?.lastStatusline).toBeDefined();
-    expect(entry?.lastStatusline?.ctx_pct).toBe(75);
-    expect(entry?.lastStatusline?.ctx_tokens).toBe(150_000);
+    const entry = reg.getSession("s1");
+    expect(entry.ok).toBe(true);
+    if (!entry.ok) return;
+    expect(entry.entry.lastStatusline).toBeDefined();
+    expect(entry.entry.lastStatusline?.ctx_pct).toBe(75);
+    expect(entry.entry.lastStatusline?.ctx_tokens).toBe(150_000);
   });
 });
 
@@ -930,7 +996,7 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(body.restored).toBe(false);
       expect(body).not.toHaveProperty("owner_token");
       expect(body).not.toHaveProperty("mirror_url");
-      expect(reg.sessions.has("auto-sid-1")).toBe(true);
+      expect(reg.hasSession("auto-sid-1")).toBe(true);
 
       const transcript = await fetch(
         `http://localhost:${port}/api/mirror/auto-sid-1/transcript`,
@@ -1048,8 +1114,10 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(body.ok).toBe(true);
       expect(body.owner_agent).toBe("yos-docs:apium@host");
 
-      expect(reg.sessions.get("sid-a")?.ownerAgent).toBe("yos-docs:apium@host");
-      expect(reg.sessions.get("sid-b")?.ownerAgent).toBe("skydeck:apium@host");
+      const ga = reg.getSession("sid-a");
+      expect(ga.ok && ga.entry.ownerAgent).toBe("yos-docs:apium@host");
+      const gb = reg.getSession("sid-b");
+      expect(gb.ok && gb.entry.ownerAgent).toBe("skydeck:apium@host");
     } finally {
       app.stop();
     }

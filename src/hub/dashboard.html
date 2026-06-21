@@ -2587,7 +2587,31 @@
   // Unified sidebar: sessions are grouped under the host they run on.
   // Selection drives the main pane via window.location.hash (#agent=<sid>).
   const agents = new Map(); // fullName -> { name, fullName, status, mirrorSid, cwd }
-  const mirrorBySid = new Map(); // sid -> { sid, owner_agent, cwd, last_event_at, ... }
+  // Keyed by `${host}|${sid}` so two hosts can hold the same sid
+  // (cross-host UUID collisions — resumed sessions, copied JSONLs)
+  // without one overwriting the other in the sidebar. The hub keys
+  // its session map the same way. Rendering iterates values, so both
+  // entries appear as distinct rows under their respective host
+  // groups. Lookups by sid alone go through `mirrorByCompositeKey`
+  // helpers below.
+  const mirrorBySid = new Map(); // (host|sid) -> { sid, host, owner_agent, ... }
+  function mirrorCompositeKey(host, sid) {
+    return (host || '') + '|' + (sid || '');
+  }
+  // Find the entry for a sid when host context is known (e.g.
+  // sidebar click with data-host). Falls back to any matching sid
+  // when host is absent — this is the legacy URL-bookmark case.
+  function findMirrorEntry(sid, host) {
+    if (host) {
+      var k = mirrorCompositeKey(host, sid);
+      if (mirrorBySid.has(k)) return mirrorBySid.get(k);
+    }
+    var match = null;
+    mirrorBySid.forEach(function (s) {
+      if (s.sid === sid && !match) match = s;
+    });
+    return match;
+  }
   const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at }
   const pendingLaunches = []; // { hostId, launchKey, startedAt } — ghost rows replaced by real sessions
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
@@ -2689,7 +2713,18 @@
         break;
 
       case 'mirror:session_ended': {
-        mirrorBySid.delete(event.sid);
+        // Composite map: remove every entry that shares this sid.
+        // Cross-host UUID collisions would normally leave the sibling
+        // entry intact, but the broadcast doesn't carry host today —
+        // the worst case is a sidebar that re-populates from the next
+        // refresh, which is acceptable for the collision corner case.
+        var endedKeys = [];
+        mirrorBySid.forEach(function (s, k) {
+          if (s.sid === event.sid) endedKeys.push(k);
+        });
+        for (var ek = 0; ek < endedKeys.length; ek++) {
+          mirrorBySid.delete(endedKeys[ek]);
+        }
         // An agent can own multiple mirror sessions (fork-sessions in
         // the same cwd). If the one that ended was just the last-wins
         // binding, re-attach to whichever of their remaining sessions
@@ -2749,7 +2784,7 @@
         // (not just ones the dashboard is watching live). Bump last_event_at
         // + debounce re-render so the most-active session floats to the top
         // of the sidebar without thrashing the DOM on every frame.
-        const entry = mirrorBySid.get(event.sid);
+        const entry = findMirrorEntry(event.sid, event.host);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
           if (event.activity_state) entry.activity_state = event.activity_state;
@@ -2767,7 +2802,7 @@
         if (!oldOwner || !newOwner || oldOwner === newOwner) break;
         var sids = Array.isArray(event.sids) ? event.sids : [];
         for (var i = 0; i < sids.length; i++) {
-          var m = mirrorBySid.get(sids[i]);
+          var m = findMirrorEntry(sids[i], event.host);
           if (m) m.owner_agent = newOwner;
         }
         // Re-bind agent→mirror mapping: the old owner loses its binding,
@@ -2841,7 +2876,7 @@
         var liveByOwner = new Map();
         for (var i = 0; i < list.length; i++) {
           var e = list[i];
-          mirrorBySid.set(e.sid, e);
+          mirrorBySid.set(mirrorCompositeKey(e.host, e.sid), e);
           if (e.closed_at) continue;
           if (!agents.has(e.owner_agent)) {
             upsertAgent({
@@ -3027,8 +3062,10 @@
     var dotCls = 'agent-dot online' + (awaiting ? ' awaiting' : '');
     return (
       '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + '"'
-      + ' href="#agent=' + encodeURIComponent(sess.sid) + '"'
+      + ' href="#agent=' + encodeURIComponent(sess.sid)
+        + (sess.host ? '&host=' + encodeURIComponent(sess.host) : '') + '"'
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
+      + ' data-host="' + escapeAttr(sess.host || '') + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
       + '<span class="' + dotCls + '"' + (awaiting ? ' title="Waiting for user input"' : '') + '></span>'
       + '<div class="cn-session-body">'
@@ -3184,20 +3221,28 @@
   // /#agent=SID  → mirror view for that session
   function sidFromHash() {
     var h = window.location.hash || '';
-    var m = h.match(/^#agent=(.+)$/);
-    return m ? decodeURIComponent(m[1]) : null;
+    // `#agent=<sid>` or `#agent=<sid>&host=<host>` — host param
+    // disambiguates the rare cross-host UUID collision case.
+    var m = h.match(/^#agent=([^&]+)(?:&host=(.+))?$/);
+    if (!m) return null;
+    return {
+      sid: decodeURIComponent(m[1]),
+      host: m[2] ? decodeURIComponent(m[2]) : null,
+    };
   }
 
   function applyHashRoute() {
-    var sid = sidFromHash();
-    if (!sid) {
+    var route = sidFromHash();
+    if (!route) {
       detachMirror();
       showMessageLogView();
       renderAgents();
       return;
     }
+    var sid = route.sid;
+    var hostHint = route.host;
     // Valid sid: must match a known mirror session.
-    var known = mirrorBySid.has(sid);
+    var known = !!findMirrorEntry(sid, hostHint);
     if (!known) {
       // Might be an early page-load race where the session list hasn't
       // arrived yet. Fetch + retry once, then fall back.
@@ -3206,15 +3251,18 @@
         .then(function(list) {
           if (Array.isArray(list)) {
             for (var i = 0; i < list.length; i++) {
-              mirrorBySid.set(list[i].sid, list[i]);
+              mirrorBySid.set(
+                mirrorCompositeKey(list[i].host, list[i].sid),
+                list[i],
+              );
               var ag = agents.get(list[i].owner_agent);
               if (ag) { ag.mirrorSid = list[i].sid; ag.cwd = list[i].cwd; }
             }
             renderAgents();
           }
-          if (mirrorBySid.has(sid)) {
+          if (findMirrorEntry(sid, hostHint)) {
             showMirrorView();
-            attachMirror(sid);
+            attachMirror(sid, hostHint);
             renderAgents();
           } else {
             // Unknown sid — show empty-state and reset.
@@ -3232,7 +3280,7 @@
       return;
     }
     showMirrorView();
-    attachMirror(sid);
+    attachMirror(sid, hostHint);
     renderAgents();
   }
 
@@ -3601,9 +3649,22 @@
     activeAgentSid = null;
   }
 
-  function attachMirror(sid) {
+  function attachMirror(sid, hostHint) {
     detachMirror();
     activeAgentSid = sid;
+    // Host context for cross-host UUID disambiguation. When known, we
+    // append `&host=<host>` to every mirror REST/WS URL so the hub
+    // can resolve unambiguously when two hosts hold the same sid.
+    var resolvedEntry = findMirrorEntry(sid, hostHint);
+    var hostQuery = '';
+    if (resolvedEntry && resolvedEntry.host) {
+      hostQuery = '&host=' + encodeURIComponent(resolvedEntry.host);
+    } else if (hostHint) {
+      hostQuery = '&host=' + encodeURIComponent(hostHint);
+    }
+    var hostQueryFirst = hostQuery
+      ? '?' + hostQuery.slice(1) // hostQuery starts with '&', flip to '?'
+      : '';
 
     var cwdEl = document.getElementById('mirror-cwd');
     var ownerEl = document.getElementById('mirror-owner');
@@ -5318,7 +5379,7 @@
         });
       });
       cancelBtn.addEventListener('click', function () {
-        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', {
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop' + hostQueryFirst, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ watcher: 'web-aq-cancel' }),
@@ -5340,7 +5401,7 @@
     function submitAskUserQuestion(questions, answers) {
       var parts = buildAskUserQuestionKeys(questions, answers);
       var errEl = document.getElementById('mirror-compose-err');
-      return fetch('/api/mirror/' + encodeURIComponent(sid) + '/keys', {
+      return fetch('/api/mirror/' + encodeURIComponent(sid) + '/keys' + hostQueryFirst, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parts: parts, watcher: 'web-aq' }),
@@ -5718,7 +5779,7 @@
     function sendInject(text) {
       if (!text || !text.trim()) return;
       var errEl = document.getElementById('mirror-compose-err');
-      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject', {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject' + hostQueryFirst, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, watcher: 'web-button' })
@@ -5954,13 +6015,13 @@
         // Enter — Claude Code's modals accept either bare digit or
         // digit+Enter so the double-Enter safety is harmless here).
         if (key === 'esc') {
-          fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', {
+          fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop' + hostQueryFirst, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ watcher: 'web-prompt-banner' }),
           }).catch(function() {});
         } else {
-          fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject', {
+          fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject' + hostQueryFirst, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: key, watcher: 'web-prompt-banner' }),
@@ -6055,7 +6116,8 @@
     function mConnect() {
       if (teardownCalled) return;
       var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      var url = proto + '//' + location.host + '/ws/mirror/' + encodeURIComponent(sid);
+      var url =
+        proto + '//' + location.host + '/ws/mirror/' + encodeURIComponent(sid) + hostQueryFirst;
       try {
         mws = new WebSocket(url);
       } catch (e) {
@@ -6445,7 +6507,7 @@
       composeErr.textContent = '';
       var useLargeBlobPath = size > injectMaxBytes;
       var endpoint = useLargeBlobPath ? '/paste' : '/inject';
-      fetch('/api/mirror/' + encodeURIComponent(sid) + endpoint, {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + endpoint + hostQueryFirst, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, watcher: 'web' })
@@ -6537,7 +6599,7 @@
       composeErr.textContent = 'Uploading ' + (file.name || '(pasted)') + '…';
       var fd = new FormData();
       fd.append('file', file, file.name || 'pasted');
-      fetch('/api/mirror/' + encodeURIComponent(sid) + '/upload', {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/upload' + hostQueryFirst, {
         method: 'POST',
         body: fd
       })
@@ -6645,7 +6707,7 @@
     var slashFiltered = [];        // current filtered view
     var slashActiveIdx = 0;
     var slashOpen = false;
-    fetch('/api/mirror/' + encodeURIComponent(sid) + '/commands')
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/commands' + hostQueryFirst)
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(j) {
         if (j && Array.isArray(j.commands)) slashCommands = j.commands;
@@ -6810,7 +6872,7 @@
     if (stopBtn) {
       stopBtn.addEventListener('click', function() {
         stopBtn.disabled = true;
-        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop', { method: 'POST' })
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop' + hostQueryFirst, { method: 'POST' })
           .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
           .then(function(r) {
             stopBtn.disabled = false;

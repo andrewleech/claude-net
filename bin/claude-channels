@@ -52,14 +52,28 @@ find_claude_binary() {
         fi
     done
 
-    # Fallback: PATH resolution (may find npm/bun cli.js — still works
-    # but the patcher won't apply binary patches to a JS file)
+    # Fallback: PATH resolution. May find the npm-install launcher
+    # `claude.exe` (a tiny wrapper script under .claude/local/node_modules/)
+    # which is NOT the Bun-compiled ELF the patcher targets — surface
+    # that case with a clear hint instead of letting the patcher fail
+    # with "no anchor strings found" once per patch.
     local claude_bin
     claude_bin=$(which claude 2>/dev/null || true)
     if [ -n "$claude_bin" ]; then
         resolved=$(readlink -f "$claude_bin" 2>/dev/null || echo "$claude_bin")
         if [ -f "$resolved" ]; then
-            echo "$resolved"; return 0
+            if file "$resolved" 2>/dev/null | grep -q "ELF"; then
+                echo "$resolved"; return 0
+            fi
+            echo "ERROR: \$PATH 'claude' resolves to $resolved, which is not the" >&2
+            echo "       Bun-compiled native binary the patcher needs. Likely the" >&2
+            echo "       npm-install launcher (claude.exe / cli.js wrapper)." >&2
+            echo "       Install the native binary alongside the npm one:" >&2
+            echo "           curl -fsSL https://claude.ai/install.sh | bash" >&2
+            echo "       That populates ~/.local/share/claude/versions/<v> and" >&2
+            echo "       symlinks ~/.local/bin/claude to it — claude-channels" >&2
+            echo "       will pick that up automatically." >&2
+            return 1
         fi
     fi
 

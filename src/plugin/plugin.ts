@@ -1057,6 +1057,18 @@ export class Plugin {
           hub: this.hubWsUrl,
           cwd: process.cwd(),
         });
+        // Re-fire the channel self-test when channelCapable is still
+        // false. The initial probe at auto-register can be missed if
+        // the LLM is busy with user work during its 60 s window;
+        // without this, the agent registers under its new name with a
+        // stale `channel_capable: false`, the hub NAKs every inbound
+        // message with reason="no-channel", and the only recovery is
+        // a /mcp reconnect. `scheduleChannelSelfTest` is idempotent
+        // (no-op when already true or already in-flight), so this is
+        // safe to call on every manual register.
+        if (!this.channelCapable) {
+          this.scheduleChannelSelfTest(effectiveArgs.name);
+        }
       }
 
       return this.drainNudges(toolResult(data));

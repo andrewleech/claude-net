@@ -1457,7 +1457,16 @@ export class Plugin {
       // Forward-compatible: if a future Claude Code advertises the
       // experimental flag explicitly, trust it; otherwise we'll wait
       // for the empirical _ack_channel handshake to flip the bit.
-      this.channelCapable = detectChannelCapability(caps);
+      // Belt-and-braces: when launched via `claude-channels`, the
+      // launcher exports CLAUDE_NET_CHANNELS_PATCHED=1 — that proves
+      // the binary patches are in place and channels are loaded, so
+      // we can skip the LLM-visible ceremony entirely. The ceremony
+      // was observed to be ignored by busy agents as noise, leaving
+      // them permanently channel_capable=false even when channels
+      // worked. The env-var path is invisible to the LLM.
+      this.channelCapable =
+        detectChannelCapability(caps) ||
+        process.env.CLAUDE_NET_CHANNELS_PATCHED === "1";
       this.mcpInitialized = true;
 
       // Flush any register that was waiting on this callback.

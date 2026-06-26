@@ -85,6 +85,28 @@ function extFromName(name: string): string {
   return m?.[1] ? m[1].toLowerCase() : "";
 }
 
+/**
+ * Strip path separators, control bytes, and other shell-/URL-unfriendly
+ * characters from the original filename so it can safely appear as the
+ * last path component of the public URL. Returns the stem (no extension)
+ * — the extension is appended back by the caller from the rewritten
+ * INLINE_EXT-allowlisted value. Falls back to "file" when nothing
+ * usable remains.
+ */
+export function sanitizeUploadStem(name: string): string {
+  // Drop directory path, keep only the basename so `../etc/passwd` stays inside.
+  const base = name.split(/[\\/]/).pop() ?? "";
+  // Strip the extension; we re-attach the sanitized one separately.
+  const stem = base.replace(/\.[a-zA-Z0-9]{1,8}$/, "");
+  const cleaned = stem
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ASCII control bytes is the point
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 80);
+  return cleaned || "file";
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────
 
 export interface UploadsRegistryOptions {
@@ -94,7 +116,14 @@ export interface UploadsRegistryOptions {
 }
 
 export interface StoredUpload {
-  name: string; // on-disk filename, uuid + extension
+  /**
+   * URL-relative path component beneath `<root>/<sid>/`. With the
+   * per-upload-subdir layout this is `<uuid>/<safe-original-name>.<ext>`
+   * so the URL's last segment carries the human filename — agents
+   * downloading the URL get a meaningful name without losing
+   * collision safety.
+   */
+  name: string;
   bytes: number;
   ext: string; // no leading dot; "" if none
 }
@@ -143,22 +172,28 @@ export class UploadsRegistry {
     // Containment check for the write side. The static plugin guards the
     // read side, but since we choose the write target ourselves we have
     // to make sure a hostile sid can't escape the root.
-    const dir = path.resolve(this.sidDir(sid));
+    const sidRoot = path.resolve(this.sidDir(sid));
     const rootResolved = path.resolve(this.root);
-    if (!dir.startsWith(rootResolved + path.sep)) {
+    if (!sidRoot.startsWith(rootResolved + path.sep)) {
       throw new Error(`invalid sid: ${sid}`);
     }
-    await fs.mkdir(dir, { recursive: true });
 
     const requested = extFromName(file.name);
     // Rewrite anything we wouldn't want the browser to render inline.
     const ext = INLINE_EXT.has(requested) ? requested : requested ? "bin" : "";
+    // Per-upload subdir keyed by a fresh uuid so the sanitized original
+    // name can live unchanged as the file's basename — the final URL
+    // ends in `/<sid>/<uuid>/<original>.<ext>`, which gives agents a
+    // self-documenting download without any collision risk.
     const id = crypto.randomUUID();
-    const storedName = ext ? `${id}.${ext}` : id;
-    const filePath = path.join(dir, storedName);
+    const stem = sanitizeUploadStem(file.name);
+    const safeName = ext ? `${stem}.${ext}` : stem;
+    const uploadDir = path.join(sidRoot, id);
+    await fs.mkdir(uploadDir, { recursive: true });
+    const filePath = path.join(uploadDir, safeName);
     const buf = Buffer.from(await file.arrayBuffer());
     await fs.writeFile(filePath, buf);
-    return { name: storedName, bytes: buf.byteLength, ext };
+    return { name: `${id}/${safeName}`, bytes: buf.byteLength, ext };
   }
 
   async purgeSession(sid: string): Promise<void> {
@@ -181,29 +216,59 @@ export class UploadsRegistry {
       return; // root doesn't exist yet
     }
     for (const sid of sids) {
-      const dir = this.sidDir(sid);
+      const sidDir = this.sidDir(sid);
       let entries: string[];
       try {
-        entries = await fs.readdir(dir);
+        entries = await fs.readdir(sidDir);
       } catch {
         continue;
       }
       let kept = 0;
-      for (const name of entries) {
-        const p = path.join(dir, name);
+      for (const entryName of entries) {
+        const entryPath = path.join(sidDir, entryName);
+        let stat: Awaited<ReturnType<typeof fs.stat>>;
         try {
-          const stat = await fs.stat(p);
-          if (stat.mtimeMs < cutoff) {
-            await fs.unlink(p).catch(() => {});
+          stat = await fs.stat(entryPath);
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) {
+          // Per-upload subdir holding one renamed file. Recursively
+          // unlink the contents if expired, then drop the directory.
+          let inner: string[];
+          try {
+            inner = await fs.readdir(entryPath);
+          } catch {
+            continue;
+          }
+          let innerKept = 0;
+          for (const fname of inner) {
+            const fpath = path.join(entryPath, fname);
+            try {
+              const fst = await fs.stat(fpath);
+              if (fst.mtimeMs < cutoff) {
+                await fs.unlink(fpath).catch(() => {});
+              } else {
+                innerKept++;
+              }
+            } catch {
+              // vanished under us; fine
+            }
+          }
+          if (innerKept === 0) {
+            await fs.rmdir(entryPath).catch(() => {});
           } else {
             kept++;
           }
-        } catch {
-          // vanished under us; fine
+        } else if (stat.mtimeMs < cutoff) {
+          // Legacy flat-layout file from a pre-subdir upload.
+          await fs.unlink(entryPath).catch(() => {});
+        } else {
+          kept++;
         }
       }
       if (kept === 0) {
-        await fs.rmdir(dir).catch(() => {});
+        await fs.rmdir(sidDir).catch(() => {});
       }
     }
   }
@@ -286,9 +351,16 @@ export function uploadsPlugin(deps: UploadsPluginDeps): Elysia {
         }
 
         const base = resolveCanonicalHubUrl(request, externalHost, port);
+        // stored.name carries the per-upload subdir as `<uuid>/<name>`;
+        // encode segments individually so the slash stays in the path
+        // and the human-readable basename isn't %2F-escaped.
+        const storedSegments = stored.name
+          .split("/")
+          .map((seg) => encodeURIComponent(seg))
+          .join("/");
         const url = `${base}/uploads/${encodeURIComponent(
           params.sid,
-        )}/${encodeURIComponent(stored.name)}`;
+        )}/${storedSegments}`;
         return {
           url,
           name: file.name,

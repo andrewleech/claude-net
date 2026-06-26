@@ -428,4 +428,10 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
     fi
 fi
 
+# Signal to the claude-net plugin that this Claude Code was launched via
+# the patched binary, so channels ARE actually loaded. The plugin uses
+# this to set `channel_capable: true` on register without needing the
+# fragile "LLM call _ack_channel within 60s" ceremony, which agents have
+# been observed to ignore as noise.
+export CLAUDE_NET_CHANNELS_PATCHED=1
 exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"

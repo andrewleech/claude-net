@@ -27,12 +27,12 @@ describe("UploadsRegistry.store", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  test("writes file to <root>/<sid>/<uuid>.<ext> and returns the stored name", async () => {
+  test("writes file under <root>/<sid>/<uuid>/<original>.<ext> and returns the relative path", async () => {
     const file = new File(["hello"], "greet.txt", { type: "text/plain" });
     const out = await reg.store("abc-123", file);
     expect(out.bytes).toBe(5);
     expect(out.ext).toBe("txt");
-    expect(out.name).toMatch(/^[0-9a-f-]+\.txt$/);
+    expect(out.name).toMatch(/^[0-9a-f-]+\/greet\.txt$/);
     const onDisk = path.join(dir, "abc-123", out.name);
     expect(fs.existsSync(onDisk)).toBe(true);
     expect(fs.readFileSync(onDisk, "utf8")).toBe("hello");
@@ -42,7 +42,7 @@ describe("UploadsRegistry.store", () => {
     const file = new File(["x"], "LICENSE");
     const out = await reg.store("s1", file);
     expect(out.ext).toBe("");
-    expect(out.name).toMatch(/^[0-9a-f-]+$/);
+    expect(out.name).toMatch(/^[0-9a-f-]+\/LICENSE$/);
   });
 
   test("rewrites script-executable extensions to .bin", async () => {
@@ -51,8 +51,27 @@ describe("UploadsRegistry.store", () => {
     for (const unsafe of ["html", "svg", "js", "ts", "css", "exe", "sh"]) {
       const out = await reg.store("s-bin", new File(["x"], `file.${unsafe}`));
       expect(out.ext).toBe("bin");
-      expect(out.name).toMatch(/^[0-9a-f-]+\.bin$/);
+      expect(out.name).toMatch(/^[0-9a-f-]+\/file\.bin$/);
     }
+  });
+
+  test("sanitizes shell- and URL-unfriendly chars in original names", async () => {
+    const out = await reg.store(
+      "s-clean",
+      new File(["x"], "weird name (1)+?.png"),
+    );
+    expect(out.ext).toBe("png");
+    // Spaces, parens, +, ? collapsed to single dashes; .png kept.
+    expect(out.name).toMatch(/^[0-9a-f-]+\/weird-name-1.png$/);
+  });
+
+  test("strips parent-directory components from the stored basename", async () => {
+    const out = await reg.store(
+      "s-trav",
+      new File(["x"], "../../etc/passwd.txt"),
+    );
+    // Path separators dropped — only the basename's stem survives.
+    expect(out.name).toMatch(/^[0-9a-f-]+\/passwd\.txt$/);
   });
 
   test("keeps inline-safe extensions as-is", async () => {
@@ -101,17 +120,16 @@ describe("UploadsRegistry.sweep", () => {
     const dir = mkDir();
     const reg = makeRegistry(dir, 1_000);
     try {
-      await reg.store("old-sid", new File(["x"], "x.txt"));
+      const oldOut = await reg.store("old-sid", new File(["x"], "x.txt"));
       await reg.store("fresh-sid", new File(["y"], "y.txt"));
       // Backdate "old-sid"'s file by two seconds so the 1 s TTL trips.
-      const oldFiles = fs.readdirSync(path.join(dir, "old-sid"));
-      const old = path.join(dir, "old-sid", oldFiles[0] ?? "");
+      const oldPath = path.join(dir, "old-sid", oldOut.name);
       const past = Date.now() / 1000 - 2;
-      fs.utimesSync(old, past, past);
+      fs.utimesSync(oldPath, past, past);
 
       await reg.sweep();
 
-      expect(fs.existsSync(old)).toBe(false);
+      expect(fs.existsSync(oldPath)).toBe(false);
       expect(fs.existsSync(path.join(dir, "old-sid"))).toBe(false);
       expect(fs.existsSync(path.join(dir, "fresh-sid"))).toBe(true);
     } finally {
@@ -177,9 +195,9 @@ describe("uploadsPlugin", () => {
       expect(body.name).toBe("pic.png");
       expect(body.bytes).toBe(5);
       expect(body.url).toMatch(
-        /^http:\/\/localhost:4815\/uploads\/sid-upload-1\/[0-9a-f-]+\.png$/,
+        /^http:\/\/localhost:4815\/uploads\/sid-upload-1\/[0-9a-f-]+\/pic\.png$/,
       );
-      expect(body.stored).toMatch(/^[0-9a-f-]+\.png$/);
+      expect(body.stored).toMatch(/^[0-9a-f-]+\/pic\.png$/);
     } finally {
       mirror.stop();
       uploads.stop();

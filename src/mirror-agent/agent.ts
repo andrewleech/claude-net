@@ -319,6 +319,35 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     },
   });
 
+  // Startup rediscovery: scan /proc for live CC processes and adopt
+  // their sessions without waiting for the next hook to fire. Skip
+  // sids already in the map (defensive — sessions is empty on a
+  // fresh process, but a future caller might preload entries).
+  void (async () => {
+    const candidates = discoverRunningCcSessions();
+    if (candidates.length === 0) return;
+    log(`startup rediscovery: found ${candidates.length} live CC session(s)`);
+    for (const c of candidates) {
+      if (sessions.has(c.sessionId)) continue;
+      try {
+        await openSession(
+          c.sessionId,
+          c.cwd,
+          c.transcriptPath,
+          c.tmuxPane,
+          c.ccPid,
+        );
+      } catch (err) {
+        log(
+          `startup rediscovery: openSession failed for sid=${c.sessionId.slice(
+            0,
+            8,
+          )}: ${String(err)}`,
+        );
+      }
+    }
+  })();
+
   // Idle-shutdown watchdog.
   const idleTimer = setInterval(() => {
     const now = Date.now();
@@ -1737,6 +1766,84 @@ export function findActiveSessionForCcPid(
     sessionId,
     transcriptPath: path.join(projectDir, best.name),
   };
+}
+
+/**
+ * One running Claude Code process the mirror-agent can adopt on
+ * startup. Together (ccPid, cwd, tmuxPane, sessionId, transcriptPath)
+ * is everything `openSession` needs to bind a session to the hub
+ * without waiting for a fresh hook event to arrive.
+ */
+export interface DiscoveredCcProcess {
+  ccPid: number;
+  cwd: string;
+  tmuxPane: string | undefined;
+  sessionId: string;
+  transcriptPath: string;
+}
+
+/**
+ * Walk `/proc/*` looking for live Claude Code processes, then pull the
+ * data needed to re-attach each one to its on-disk JSONL session. Used
+ * at mirror-agent startup so a restart (idle exit, /setup pkill,
+ * upgrade) doesn't black-out the dashboard until each CC happens to
+ * fire its next hook.
+ *
+ * Linux-only — non-Linux platforms return [] because /proc isn't
+ * portable. Hook-driven session creation still works on macOS/Windows,
+ * just without the rediscovery shortcut.
+ *
+ * Identification heuristic: read /proc/<pid>/exe → matches a path that
+ * contains `/claude/versions/` (Anthropic's native install layout) or
+ * ends in `/claude`. Skips anything else (bun runner, npm wrapper).
+ * False positives are absorbed by `findActiveSessionForCcPid` — a
+ * non-CC process won't have a matching JSONL on disk, so discovery
+ * silently skips it.
+ */
+export function discoverRunningCcSessions(
+  procRoot = "/proc",
+  home: string = os.homedir(),
+): DiscoveredCcProcess[] {
+  if (process.platform !== "linux") return [];
+  let pidDirs: string[];
+  try {
+    pidDirs = fs.readdirSync(procRoot);
+  } catch {
+    return [];
+  }
+  const out: DiscoveredCcProcess[] = [];
+  const seenSids = new Set<string>();
+  for (const dirName of pidDirs) {
+    if (!/^\d+$/.test(dirName)) continue;
+    const pid = Number(dirName);
+    let exe: string;
+    try {
+      exe = fs.readlinkSync(`${procRoot}/${pid}/exe`);
+    } catch {
+      continue;
+    }
+    if (!/\/claude\/versions\//.test(exe) && !/\/claude$/.test(exe)) continue;
+    let cwd: string;
+    try {
+      cwd = fs.readlinkSync(`${procRoot}/${pid}/cwd`);
+    } catch {
+      continue;
+    }
+    const discovered = findActiveSessionForCcPid(pid, cwd, home);
+    if (!discovered) continue;
+    // Two CC processes can share a sid only across hosts (impossible
+    // on /proc) or via a fork that we'd resolve to one. Dedup defensively.
+    if (seenSids.has(discovered.sessionId)) continue;
+    seenSids.add(discovered.sessionId);
+    out.push({
+      ccPid: pid,
+      cwd,
+      tmuxPane: readTmuxPaneFromCcEnv(pid),
+      sessionId: discovered.sessionId,
+      transcriptPath: discovered.transcriptPath,
+    });
+  }
+  return out;
 }
 
 /**

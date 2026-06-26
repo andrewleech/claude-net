@@ -1,7 +1,5 @@
 node_modules
 .git
-docs
 tests
-*.md
 biome.json
 tsconfig.json

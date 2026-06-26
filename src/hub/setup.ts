@@ -75,24 +75,32 @@ for f in claude-channels claude-net-mirror-push claude-net-mirror-agent; do
     ln -snf "\$INSTALL_DIR/\$f" "\$BIN_DIR/\$f"
 done
 
-# Retire any running mirror-agent daemon so the next claude-channels launch
-# respawns against the just-installed bundle. The launcher's /health probe
-# only detects liveness, not version, so a stale daemon would otherwise
-# keep running the old code and the dashboard would show "NO MIRROR".
-pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
-rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
-
 echo "[2/5] Registering claude-net MCP server…"
 # Remove any previous entry first — 'claude mcp add' refuses to
 # overwrite, so on re-install the existing server (which may point at
 # a stale hub URL) would otherwise silently survive. 'remove' exits
 # non-zero when the name is not registered; tolerate that.
+#
+# IMPORTANT: register the MCP entry BEFORE the pkill below. The
+# mirror-agent resolves its hub URL by reading ~/.claude.json on
+# startup, so any respawn (incl. the watchdog's own 5 s race) needs
+# the file to already point at the right hub — otherwise the agent
+# falls back to localhost:4815 and silently can't reach the hub.
 claude mcp remove --scope user claude-net >/dev/null 2>&1 || true
 claude mcp add \\
     --scope user \\
     -e CLAUDE_NET_HUB="\$HUB" \\
     --transport stdio \\
     claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"'
+
+# Retire any running mirror-agent daemon so the next claude-channels
+# launch (or the watchdog's automatic respawn) brings up a fresh
+# process against both the just-installed bundle AND the just-written
+# hub URL. The launcher's /health probe only detects liveness, not
+# version, so a stale daemon would otherwise keep running the old
+# code and the dashboard would show "NO MIRROR".
+pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
+rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
 echo "[3/5] Merging mirror hooks + launch config into \${SETTINGS}…"
 if [ ! -f "\$SETTINGS" ]; then

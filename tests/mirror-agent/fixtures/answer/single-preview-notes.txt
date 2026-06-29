@@ -1,0 +1,38 @@
+
+
+❯ Call AskUserQuestion, single question multiSelect TRUE, header Pick, question "Choose any", options One (desc "first", preview "PV-ONE"), Two (desc
+  "second", preview "PV-TWO"). No preamble.
+
+● User declined to answer questions
+  ⎿  · Choose any (One / Two)
+
+❯ Call AskUserQuestion, single question multiSelect false, header Pick, question "Choose one", options One (desc "first", preview "PV-ONE"), Two (desc
+  "second", preview "PV-TWO"). No preamble.
+
+● User answered Claude's questions:
+  ⎿  · Choose one → (notes only)
+
+● The user provided a note instead of selecting an option: NOTEX.
+
+  How would you like me to proceed?
+
+✻ Cooked for 5s
+
+❯ Call AskUserQuestion single question multiSelect false, header Pick, question "Choose one", options One (desc "first", preview "PV-ONE"), Two (desc
+  "second", preview "PV-TWO"). No preamble.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Pick
+
+Choose one
+
+❯ 1. One                          ┌──────────────────────────────────────────┐
+  2. Two                          │ PV-ONE                                   │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel

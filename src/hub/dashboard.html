@@ -313,6 +313,23 @@
   }
   .m-evt-subagent .m-label { color: var(--gold); }
 
+  /* ── SUBAGENT TOOL: compact one-liner for tool calls that happen inside
+     a subagent context. Reuses the gold label colour but skips the full
+     tool card — just name + brief target + status badge. The result handler
+     only updates the status badge; no output details are shown. ── */
+  .m-evt-subagent-tool {
+    padding-right: 24px;
+    opacity: 0.65;
+  }
+  .m-evt-subagent-tool .m-label { color: var(--gold); }
+  .m-evt-subagent-tool .m-tool-headline {
+    font-size: 11px;
+  }
+  .m-evt-subagent-tool .m-tool-headline .m-tool-name {
+    font-size: 9px;
+    min-width: 50px;
+  }
+
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
      just a thin left rule anchoring the row to the timeline. The
      row does NOT shift right via margin-left (that would break the
@@ -3716,6 +3733,10 @@
     // user_prompt / assistant_message events as SUBAGENT (collapsed) so
     // the parent's feed doesn't get drowned in verbose subagent prompts.
     var activeSubagents = Object.create(null);
+    // Set when an Agent/Task tool_result clears activeSubagents; covers the
+    // UserPromptSubmit CC fires when packaging tool results for the next API
+    // call, which arrives after PostToolUse has already cleared the marker.
+    var postSubagentCover = false;
     function isSubagentToolCall(payload) {
       if (!payload) return false;
       if (payload.tool_name === 'Agent' || payload.tool_name === 'Task') return true;
@@ -3846,6 +3867,19 @@
       var parts = p.split('/');
       if (parts.length <= 2) return p;
       return '…/' + parts.slice(-2).join('/');
+    }
+
+    function subagentToolDesc(payload) {
+      var name = payload.tool_name || '';
+      var inp = payload.input || {};
+      if (name === 'Bash') {
+        var cmd = String(inp.command || '');
+        var first = cmd.split('\n')[0];
+        return '$ ' + (first.length > 80 ? first.slice(0, 77) + '…' : first);
+      }
+      var fp = inp.file_path || inp.notebook_path || '';
+      if (fp) return shortPath(fp);
+      return '';
     }
 
     function makeHeadline(toolName, target, sub) {
@@ -5521,11 +5555,14 @@
 
       if (kind === 'user_prompt') {
         el = document.createElement('div');
-        if (inSubagent()) {
+        var isSubagentPrompt = inSubagent() || postSubagentCover;
+        postSubagentCover = false; // consume on every user_prompt regardless of branch
+        if (isSubagentPrompt) {
           // The parent dispatched an Agent/Task subagent and the
           // subagent's hook stream is now flowing through the parent's
-          // session. Its UserPromptSubmit is the parent's instruction
-          // to it — visually heavy, semantically not the human typing.
+          // session. Its UserPromptSubmit (including the synthetic one CC
+          // fires when packaging tool results for the API) is not human
+          // input — collapse it rather than labelling it "user".
           var preview = (payload.prompt || '').split('\n')[0].slice(0, 100);
           el.className = 'm-evt m-evt-subagent';
           el.innerHTML =
@@ -5543,6 +5580,7 @@
         }
       } else if (kind === 'assistant_message') {
         el = document.createElement('div');
+        postSubagentCover = false; // an assistant reply means the parent is responding — clear
         // payload.subagent === true comes from the SubagentStop hook on
         // the parent's session (set by hook-ingest in agent.ts). Treat
         // an in-flight Agent/Task as equivalent in case SubagentStop
@@ -5574,6 +5612,21 @@
           el = renderQuestionExitPlanMode(evt, payload);
         } else if (payload.tool_name === 'AskUserQuestion') {
           el = renderQuestionAskUserQuestion(evt, payload);
+        } else if (inSubagent() && !isSubagentToolCall(payload)) {
+          // Tool call from within a subagent context. Render as a compact
+          // one-liner instead of a full card — the result handler only
+          // updates the status badge, no output details are expanded.
+          el = document.createElement('div');
+          el.className = 'm-evt m-evt-subagent-tool';
+          el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+          var stDesc = subagentToolDesc(payload);
+          el.innerHTML =
+            '<div class="m-evt-meta"><span class="m-label">subagent</span> ' + ts + '</div>' +
+            '<div class="m-tool-headline">' +
+              '<span class="m-tool-name">' + escapeHtml(toolLabelFromName(payload.tool_name || 'tool')) + '</span>' +
+              '<span class="m-tool-target">' + escapeHtml(stDesc) + '</span>' +
+              '<span class="m-tool-badge pending" data-role="status">…</span>' +
+            '</div>';
         } else {
           el = document.createElement('div');
           el.className = 'm-evt m-evt-tool';
@@ -5596,9 +5649,12 @@
         // Clear the in-flight marker BEFORE rendering so that any
         // assistant_message arriving in the same tick (race-condition
         // safety, mostly theoretical) is correctly attributed to the
-        // parent again.
+        // parent again. Set postSubagentCover so the UserPromptSubmit CC
+        // fires when packaging the result for the next API call is also
+        // treated as subagent context rather than human input.
         if (payload.tool_use_id && activeSubagents[payload.tool_use_id]) {
           delete activeSubagents[payload.tool_use_id];
+          postSubagentCover = true;
         }
         // Try to attach to the matching tool_call / question card.
         var existing = payload.tool_use_id
@@ -5613,6 +5669,10 @@
         if (existing) {
           if (existing.classList.contains('m-evt-question')) {
             markQuestionAnswered(existing, payload);
+          } else if (existing.classList.contains('m-evt-subagent-tool')) {
+            // Compact subagent tool row: just update the status badge.
+            if (payload.is_error) setStatusError(existing);
+            else setStatusOk(existing, 'ok');
           } else {
             var r = TOOL_RENDERERS[payload.tool_name];
             if (r && typeof r.result === 'function') {

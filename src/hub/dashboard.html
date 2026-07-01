@@ -197,6 +197,17 @@
      tick marks (.m-evt::after) still render and read as standalone
      dashes without the rail. */
 
+  /* Tool-call rows (both full parent-level cards and the compact
+     subagent one-liners) are hidden by default — a busy tool-using turn
+     can produce dozens of rows that bury the actual conversation.
+     ExitPlanMode/AskUserQuestion cards are deliberately NOT covered by
+     this selector: they're interactive prompts, not routine tool noise.
+     Toggled via #mirror-tools-toggle-btn, persisted in localStorage. */
+  .mirror-transcript.hide-tool-calls .m-evt-tool,
+  .mirror-transcript.hide-tool-calls .m-evt-subagent-tool {
+    display: none;
+  }
+
   .m-evt {
     position: relative;
     padding: 8px 24px 8px 128px;
@@ -2485,6 +2496,7 @@
                 data-bs-toggle="collapse" data-bs-target="#mirror-tasks-panel"
                 aria-expanded="false" aria-controls="mirror-tasks-panel"
                 title="Show Claude's task list"></button>
+        <button id="mirror-tools-toggle-btn" class="btn btn-outline-secondary btn-sm" type="button" title="Show/hide tool call rows in the feed">tools</button>
         <button id="mirror-history-btn" class="btn btn-outline-secondary btn-sm" type="button" title="Load earlier history from the on-disk transcript">︽</button>
         <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
       </div>
@@ -2599,6 +2611,37 @@
     if (e.target.closest && e.target.closest('[data-theme-toggle]')) toggleTheme();
   });
   syncThemeLabel();
+
+  // --- Tool-call visibility toggle ---
+  // Hidden by default (missing localStorage key === hidden) — a busy
+  // tool-using turn produces far more rows than the conversation itself,
+  // and #mirror-transcript is the same persistent DOM node across session
+  // switches, so applying the class here (rather than per-attachMirror
+  // call) is enough to cover every session.
+  var TOOLS_HIDDEN_KEY = 'claude-net.mirror.hideTools';
+  function toolsHidden() {
+    try {
+      var v = localStorage.getItem(TOOLS_HIDDEN_KEY);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
+  }
+  function syncToolsToggle() {
+    var hidden = toolsHidden();
+    var btn = document.getElementById('mirror-tools-toggle-btn');
+    if (btn) {
+      btn.textContent = hidden ? 'tools: off' : 'tools: on';
+      btn.classList.toggle('active', !hidden);
+    }
+    var transcriptEl = document.getElementById('mirror-transcript');
+    if (transcriptEl) transcriptEl.classList.toggle('hide-tool-calls', hidden);
+  }
+  document.addEventListener('click', function(e) {
+    if (e.target.closest && e.target.closest('#mirror-tools-toggle-btn')) {
+      try { localStorage.setItem(TOOLS_HIDDEN_KEY, toolsHidden() ? '0' : '1'); } catch (err) {}
+      syncToolsToggle();
+    }
+  });
+  syncToolsToggle();
 
   // --- Dashboard state ---
   // Unified sidebar: sessions are grouped under the host they run on.

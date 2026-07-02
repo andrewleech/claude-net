@@ -310,26 +310,30 @@
      mark "this is the parent steering or hearing back from a child",
      and the body is wrapped in a <details> so the long subagent prompt
      never dominates the feed. ── */
-  .m-evt-subagent {
+  .m-evt-subagent,
+  .m-evt-tasknotif {
     padding-left: 128px;
     padding-right: 24px;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
   }
-  .m-evt-subagent > details {
+  .m-evt-subagent > details,
+  .m-evt-tasknotif > details {
     max-width: min(72ch, 100%);
     background: var(--bg-subtle, rgba(255,255,255,0.02));
     border-left: 3px solid var(--gold);
     padding: 8px 12px;
   }
-  .m-evt-subagent > details > summary {
+  .m-evt-subagent > details > summary,
+  .m-evt-tasknotif > details > summary {
     cursor: pointer;
     color: var(--gold);
     font-family: var(--mono);
     font-size: 0.9em;
   }
-  .m-evt-subagent > details > .m-subagent-body {
+  .m-evt-subagent > details > .m-subagent-body,
+  .m-evt-tasknotif > details > .m-subagent-body {
     margin-top: 6px;
     color: var(--text);
   }
@@ -350,6 +354,27 @@
   .m-evt-subagent-tool .m-tool-headline .m-tool-name {
     font-size: 9px;
     min-width: 50px;
+  }
+
+  /* Task notifications share the subagent disclosure layout above, just
+     tinted with the info accent instead of gold. Only the tint + two
+     caption styles are bespoke — the rest is the single source of truth
+     for collapsible transcript rows. */
+  .m-evt-tasknotif > details { border-left-color: var(--text-accent); }
+  .m-evt-tasknotif > details > summary { color: var(--text-accent); }
+  .m-evt-tasknotif .m-label { color: var(--text-accent); }
+  .m-evt-tasknotif-history { opacity: 0.78; }
+  .m-tn-note {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 11px;
+  }
+  .m-tn-meta {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 10px;
+    word-break: break-all;
   }
 
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
@@ -5748,12 +5773,93 @@
       return html;
     }
 
+    // ── Task-notification cards ──────────────────────────────────────
+    // The Claude Code harness injects <task-notification> blocks as
+    // user-turn content when a background task comes to rest. They arrive
+    // through the user paths (live user_prompt + history_text role=user)
+    // and would otherwise render as a raw <pre> that looks like the human
+    // typed it. Detect them and render a collapsed disclosure box instead:
+    // a header from the XML metadata, with the markdown <result> tucked
+    // inside.
+
+    // Pull the inner text of the first <tag>…</tag> from src. Non-greedy,
+    // dot-all (via [\s\S]) so multi-line bodies like <result> are captured.
+    function taskNotifTag(src, tag) {
+      var m = src.match(new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>'));
+      return m ? m[1].trim() : '';
+    }
+
+    // Returns a parsed struct when text contains a <task-notification>
+    // block, else null. Robust to missing tags — only <result> carries
+    // markdown; everything else is metadata.
+    function parseTaskNotification(text) {
+      if (!text || text.indexOf('<task-notification>') === -1) return null;
+      return {
+        status: taskNotifTag(text, 'status'),
+        summary: taskNotifTag(text, 'summary'),
+        note: taskNotifTag(text, 'note'),
+        result: taskNotifTag(text, 'result'),
+        taskId: taskNotifTag(text, 'task-id'),
+        toolUseId: taskNotifTag(text, 'tool-use-id'),
+        outputFile: taskNotifTag(text, 'output-file'),
+        raw: text
+      };
+    }
+
+    function taskNotifGlyph(status) {
+      var s = (status || '').toLowerCase();
+      if (s === 'completed') return '✅';
+      if (s.indexOf('error') !== -1 || s.indexOf('fail') !== -1) return '⚠️';
+      if (s === 'running' || s === 'in_progress') return '⏳';
+      return '🔔';
+    }
+
+    // Reuses the subagent card layout (.m-evt row + meta line + <details>
+    // + .m-subagent-body) so the disclosure styling lives in one place.
+    // Timestamp comes free from the gutter via data-ts on the row.
+    function buildTaskNotifEl(fields, opts) {
+      opts = opts || {};
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-tasknotif' + (opts.history ? ' m-evt-tasknotif-history' : '');
+      var summary = taskNotifGlyph(fields.status) + ' ' +
+        (fields.summary || 'task notification') +
+        (fields.status ? ' (' + fields.status + ')' : '');
+      var body = fields.result
+        ? '<div class="m-subagent-body md-body">' + renderMarkdown(fields.result) + '</div>'
+        : '<pre class="m-subagent-body">' + escapeHtml(fields.raw || '') + '</pre>';
+      if (fields.note) {
+        body += '<div class="m-tn-note">' + escapeHtml(fields.note) + '</div>';
+      }
+      var meta = [];
+      if (fields.taskId) meta.push('task ' + fields.taskId);
+      if (fields.outputFile) meta.push(fields.outputFile);
+      if (meta.length) {
+        body += '<div class="m-tn-meta">' + escapeHtml(meta.join(' · ')) + '</div>';
+      }
+      el.innerHTML =
+        '<div class="m-evt-meta"><span class="m-label">task</span></div>' +
+        '<details><summary>' + escapeHtml(summary) + '</summary>' + body + '</details>';
+      return el;
+    }
+
     // ── Main renderEvent ─────────────────────────────────────────────
 
     function buildHistoryEl(evt) {
       var payload = evt.payload || {};
       var ts = formatTime(new Date(evt.ts).toISOString());
       var role = payload.role || 'system';
+      // History-backfilled task notifications get the same disclosure
+      // treatment as their live counterparts (just dimmed via the
+      // -history modifier), rather than a raw user <pre>.
+      if (role === 'user') {
+        var tn = parseTaskNotification(payload.text || '');
+        if (tn) {
+          var tnEl = buildTaskNotifEl(tn, { history: true });
+          tnEl.setAttribute('data-uuid', evt.uuid);
+          tnEl.setAttribute('data-ts', ts);
+          return tnEl;
+        }
+      }
       var el = document.createElement('div');
       el.className = 'm-evt m-evt-history m-evt-history-' + role;
       el.setAttribute('data-uuid', evt.uuid);
@@ -5779,6 +5885,18 @@
       var ts = formatTime(new Date(evt.ts).toISOString());
 
       if (kind === 'user_prompt') {
+        // Harness-injected task notifications come in on the user turn but
+        // aren't the human typing — render them as a collapsed disclosure
+        // box instead of a "user" message.
+        var tnLive = parseTaskNotification(payload.prompt || '');
+        if (tnLive) {
+          el = buildTaskNotifEl(tnLive, {});
+          el.setAttribute('data-ts', ts);
+          el.setAttribute('data-uuid', evt.uuid);
+          transcriptEl.appendChild(el);
+          scrollToBottom();
+          return;
+        }
         el = document.createElement('div');
         var isSubagentPrompt = inSubagent() || postSubagentCover;
         postSubagentCover = false; // consume on every user_prompt regardless of branch

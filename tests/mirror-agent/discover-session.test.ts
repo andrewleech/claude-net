@@ -223,6 +223,19 @@ describe("discoverRunningCcSessions", () => {
     expect(found.map((d) => d.ccPid)).toContain(2222);
   });
 
+  test("matches claude-channels' hash-suffixed patched binary", () => {
+    if (process.platform !== "linux") return;
+    const cwd = path.join(tmpHome, "project-c");
+    fs.mkdirSync(cwd, { recursive: true });
+    plantJsonl(cwd, matchingSid);
+    makeFakePid(2223, {
+      exe: "/home/u/.local/share/claude-channels/claude-patched-ab7ea74dfdc8",
+      cwd,
+    });
+    const found = discoverRunningCcSessions(tmpProc, tmpHome);
+    expect(found.map((d) => d.ccPid)).toContain(2223);
+  });
+
   test("ignores processes whose exe doesn't look like claude", () => {
     if (process.platform !== "linux") return;
     const cwd = path.join(tmpHome, "p");

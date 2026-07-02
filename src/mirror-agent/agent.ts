@@ -1794,11 +1794,13 @@ export interface DiscoveredCcProcess {
  * just without the rediscovery shortcut.
  *
  * Identification heuristic: read /proc/<pid>/exe → matches a path that
- * contains `/claude/versions/` (Anthropic's native install layout) or
- * ends in `/claude`. Skips anything else (bun runner, npm wrapper).
- * False positives are absorbed by `findActiveSessionForCcPid` — a
- * non-CC process won't have a matching JSONL on disk, so discovery
- * silently skips it.
+ * contains `/claude/versions/` (Anthropic's native install layout), ends
+ * in `/claude`, or contains `/claude-channels/claude-patched` (bin/claude-
+ * channels' same-length binary patcher, cached at
+ * ~/.local/share/claude-channels/claude-patched-<hash>). Skips anything
+ * else (bun runner, npm wrapper). False positives are absorbed by
+ * `findActiveSessionForCcPid` — a non-CC process won't have a matching
+ * JSONL on disk, so discovery silently skips it.
  */
 export function discoverRunningCcSessions(
   procRoot = "/proc",
@@ -1822,7 +1824,13 @@ export function discoverRunningCcSessions(
     } catch {
       continue;
     }
-    if (!/\/claude\/versions\//.test(exe) && !/\/claude$/.test(exe)) continue;
+    if (
+      !/\/claude\/versions\//.test(exe) &&
+      !/\/claude$/.test(exe) &&
+      !/\/claude-channels\/claude-patched/.test(exe)
+    ) {
+      continue;
+    }
     let cwd: string;
     try {
       cwd = fs.readlinkSync(`${procRoot}/${pid}/cwd`);

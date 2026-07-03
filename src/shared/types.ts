@@ -114,6 +114,18 @@ export interface PingFrame {
   requestId?: string;
 }
 
+/**
+ * Plugin → hub update of the agent's empirically-detected channel
+ * capability. Sent after the `_ack_channel` self-test handshake resolves
+ * (or when the launcher signals the channels patch is active), so the hub
+ * stops promising direct delivery to agents whose LLM can't see channels.
+ */
+export interface UpdateChannelCapableFrame {
+  action: "update_channel_capable";
+  channel_capable: boolean;
+  requestId?: string;
+}
+
 export interface QueryEventsFrame {
   action: "query_events";
   /** Prefix-match on event name: "agent" matches agent.registered, etc. */
@@ -213,6 +225,10 @@ export interface MirrorStatuslineFrame {
   ctx_pct: number;
   ctx_tokens: number;
   ctx_window: number;
+  /** 5h rate-limit usage percent — null when no headers seen yet. */
+  rl_pct?: number | null;
+  /** Unix-ms timestamp when the rate-limit window resets — null if unknown. */
+  rl_resets_at?: number | null;
   ts: number;
 }
 
@@ -226,6 +242,7 @@ export type PluginFrame =
   | ListAgentsFrame
   | ListTeamsFrame
   | PingFrame
+  | UpdateChannelCapableFrame
   | QueryEventsFrame
   | MirrorEventFrame
   | MirrorPasteDoneFrame
@@ -395,6 +412,49 @@ export interface MirrorKeysFrame {
   origin: { watcher: string; ts: number };
 }
 
+/**
+ * One answer to one question of an AskUserQuestion modal, in question
+ * order. The modal is a tabbed form whose options are numbered 1..K,
+ * with the free-text ("Type something") row at K+1.
+ *
+ * One item per question, in question order. The shape selects the TUI
+ * variant the agent drives (see runAnswerChoreography):
+ *
+ * - Single-select option: `{ digit }` — 1-based row to press; the press
+ *   selects and auto-advances.
+ * - Free-text: `{ digit, text }` — `digit` is the "Type something" row
+ *   (optionCount + 1); the agent types `text` and presses Enter.
+ * - multiSelect: `{ multi: true, digits }` — each digit toggles its row
+ *   (no auto-advance); the agent then navigates → to the review tab and
+ *   presses Submit. `text` may accompany for a toggled free-text row.
+ * - Note: `{ note }` — notes-only, or combined with a selection
+ *   (`{ digit, note }`) to submit option+note. Available only on
+ *   single-select "preview" questions (which expose `n to add notes`); the
+ *   agent presses `n`, types the note, then Escape (keep the note and
+ *   select an option) or Enter (notes-only).
+ */
+export interface MirrorAnswerItem {
+  digit?: number;
+  text?: string;
+  digits?: number[];
+  multi?: boolean;
+  note?: string;
+}
+
+/**
+ * Hub → agent request to answer the session's open AskUserQuestion
+ * modal. The agent drives the TUI by tmux send-keys: one digit (plus
+ * literal text + Enter for free-text rows) per question, then "1" on
+ * the final Submit review tab for multi-question modals. Fire and
+ * forget — the eventual AskUserQuestion tool_result confirms.
+ */
+export interface MirrorAnswerFrame {
+  event: "mirror_answer";
+  sid: string;
+  answers: MirrorAnswerItem[];
+  origin: { watcher: string; ts: number };
+}
+
 export interface MirrorControlFrame {
   event: "mirror_control";
   sid: string;
@@ -412,6 +472,7 @@ export type HubFrame =
   | MirrorHistoryRequestFrame
   | MirrorStopFrame
   | MirrorKeysFrame
+  | MirrorAnswerFrame
   | MirrorControlFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────
@@ -712,6 +773,13 @@ export interface MirrorAssistantMessagePayload {
    * the hub does not flip session activity state to awaiting_input.
    */
   subagent?: boolean;
+  /**
+   * Set when this text was scraped off the tmux pane as the preamble above
+   * an open AskUserQuestion modal (see mirror-agent/ask-preamble.ts). Carries
+   * the modal's tool_use_id so the dashboard can insert this frame ABOVE the
+   * matching question card instead of appending it after.
+   */
+  before_tool_use_id?: string;
 }
 
 export interface MirrorToolCallPayload {

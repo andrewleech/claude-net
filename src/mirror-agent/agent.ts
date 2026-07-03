@@ -13,10 +13,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
+  MirrorAnswerItem,
   MirrorEventFrame,
   MirrorKeyPart,
   MirrorStatuslineFrame,
 } from "@/shared/types";
+import { runAnswerChoreography } from "./answer-choreography";
+import { extractAskPreamble } from "./ask-preamble";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { type HostChannelHandle, startHostChannel } from "./host-channel";
@@ -78,6 +81,12 @@ interface SessionState {
    *  single agent run; on restart the timestamp filter in
    *  `maybeReportApiError` keeps us from re-reporting old records. */
   apiErrorUuidsPosted: Set<string>;
+  /** tool_use_ids of AskUserQuestion modals whose preamble we already
+   *  scraped off the tmux pane and emitted as an assistant_message. The
+   *  JSONL tail later reads the same text (the transcript flushes only
+   *  after the modal resolves); these ids let us suppress that duplicate
+   *  text block. See `captureAskPreamble`. */
+  scrapedPreambleToolIds: Set<string>;
 }
 
 export interface AgentHandle {
@@ -110,6 +119,13 @@ const DEFAULT_IDLE_SHUTDOWN_MS = 0;
 const DEFAULT_SESSION_IDLE_MS = 0;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
+
+/** Upper bound on questions answered in one AskUserQuestion submission —
+ *  a sanity cap, real modals carry a handful at most. */
+const ANSWER_MAX_QUESTIONS = 20;
+/** Pause between AskUserQuestion keystrokes so the modal can redraw and
+ *  advance to the next question tab before the next digit is sent. */
+const ANSWER_STEP_DELAY_MS = 500;
 
 /**
  * Per-call cap for the loopback /inject endpoint (claude-net-self-inject).
@@ -219,6 +235,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   // so 429-loops don't accumulate orphan session rows on the hub.
   const probeAttempts = new ProbeAttemptTracker();
   const injector = new TmuxInjector();
+  // Sids with an AskUserQuestion modal currently open (between its
+  // PreToolUse tool_call and PostToolUse tool_result). While set, the
+  // Notification hook it fires ("Claude is waiting for your input") must
+  // NOT be treated as a tool-permission prompt — the dashboard renders a
+  // dedicated answer form for it instead of the generic permission banner.
+  const activeAskQuestion = new Set<string>();
   const redactor = new Redactor({
     configPaths: defaultConfigPaths(
       os.homedir(),
@@ -416,6 +438,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         status: "ok",
         sessions: sessions.size,
         port: server.port,
+        // hub + pid let the launcher detect a daemon running against a
+        // stale hub URL and kill/respawn it (see _mirror_agent_healthy in
+        // bin/claude-channels). Without this, a daemon spawned with the
+        // localhost fallback stays "healthy" forever while every hub call
+        // fails.
+        hub: hubUrl,
+        pid: process.pid,
       });
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -502,6 +531,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       ctx_pct: pct,
       ctx_tokens: tokens,
       ctx_window: session.ctxWindow,
+      rl_pct: null,
+      rl_resets_at: null,
       ts: Date.now(),
     };
     session.ws.send(JSON.stringify(frame));
@@ -628,6 +659,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (
       ingested.frame.kind === "notification" &&
       session.tmuxPane &&
+      !activeAskQuestion.has(session.sid) &&
       isPermissionNotification(ingested.frame.payload)
     ) {
       void capturePermissionMenu(session, ingested.frame.payload).catch(
@@ -644,13 +676,30 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       const payload = ingested.frame.payload as { tool_name?: string };
       const toolName =
         typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
+      // AskUserQuestion blocks on the user — mark it open so its
+      // Notification hook isn't misread as a permission prompt.
+      if (toolName === "AskUserQuestion") {
+        activeAskQuestion.add(session.sid);
+        // The card was already queued above (instant). Scrape the preamble
+        // text off the pane and emit it so the dashboard can place it ABOVE
+        // the card — the transcript won't have it until the modal resolves.
+        if (session.tmuxPane) {
+          void captureAskPreamble(session, ingested.frame.payload).catch(
+            (err: unknown) => {
+              log(`[${session.sid}] captureAskPreamble threw: ${String(err)}`);
+            },
+          );
+        }
+      }
       onToolStart(session, toolName);
     } else if (ingested.frame.kind === "tool_result") {
+      activeAskQuestion.delete(session.sid);
       onToolEnd(session);
     } else if (
       ingested.frame.kind === "assistant_message" ||
       ingested.frame.kind === "session_end"
     ) {
+      activeAskQuestion.delete(session.sid);
       onTurnEnd(session);
     }
 
@@ -715,6 +764,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       lastUsage: null,
       pendingPidUpdate: false,
       apiErrorUuidsPosted: new Set(),
+      scrapedPreambleToolIds: new Set(),
     };
     sessions.set(sid, session);
 
@@ -901,11 +951,27 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             usage?: Record<string, unknown>;
           };
           const content = Array.isArray(msg.content) ? msg.content : [];
+          // If this record bundles an AskUserQuestion tool_use whose
+          // preamble we already scraped off the pane, suppress its text
+          // blocks — they're the same preamble, arriving late.
+          let suppressPreamble = false;
+          for (const raw of content) {
+            const b = raw as { type?: string; id?: string } | undefined;
+            if (
+              b?.type === "tool_use" &&
+              typeof b.id === "string" &&
+              session.scrapedPreambleToolIds.has(b.id)
+            ) {
+              suppressPreamble = true;
+              session.scrapedPreambleToolIds.delete(b.id);
+            }
+          }
           for (let i = 0; i < content.length; i++) {
             const block = content[i] as
               | { type?: string; text?: string }
               | undefined;
             if (
+              !suppressPreamble &&
               block &&
               block.type === "text" &&
               typeof block.text === "string" &&
@@ -1047,6 +1113,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       text?: string;
       seq?: number;
       requestId?: string;
+      answers?: unknown;
       origin?: { watcher?: string };
     };
     try {
@@ -1123,6 +1190,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         : [];
       void handleKeys(session, parts, watcher).catch((err: unknown) => {
         log(`[${session.sid}] keys handler threw: ${String(err)}`);
+      });
+    } else if (data.event === "mirror_answer") {
+      const answers = parseAnswerItems(data.answers);
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      void handleAnswer(session, answers, watcher).catch((err: unknown) => {
+        log(`[${session.sid}] answer handler threw: ${String(err)}`);
       });
     }
   }
@@ -1345,6 +1421,90 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     });
   }
 
+  /**
+   * Validate the answers array relayed from the hub — one item per
+   * question, in order. Three shapes are accepted (see MirrorAnswerItem):
+   *   - note-only: `{ note }` (non-empty) — drives the `n` flow.
+   *   - multiSelect: `{ multi: true, digits }` — `digits` filtered to the
+   *     reachable 1-9 rows; optional `text` for a toggled free-text row.
+   *   - single-select: `{ digit }`, or `{ digit, text }` for free text.
+   * Digit selection is positional in the TUI, so rows beyond 9 cannot be
+   * reached and are dropped (option lists stay well under 9 in practice).
+   * Invalid items are skipped rather than failing the whole answer.
+   */
+  function parseAnswerItems(raw: unknown): MirrorAnswerItem[] {
+    if (!Array.isArray(raw)) return [];
+    const isRow = (d: unknown): d is number =>
+      typeof d === "number" && Number.isInteger(d) && d >= 1 && d <= 9;
+    const out: MirrorAnswerItem[] = [];
+    for (const r of raw) {
+      if (!r || typeof r !== "object") continue;
+      const item = r as {
+        digit?: unknown;
+        digits?: unknown;
+        text?: unknown;
+        multi?: unknown;
+        note?: unknown;
+      };
+      const text = typeof item.text === "string" ? item.text : undefined;
+      const note =
+        typeof item.note === "string" && item.note.trim().length > 0
+          ? item.note
+          : undefined;
+
+      if (item.multi === true || Array.isArray(item.digits)) {
+        // multiSelect has no notes affordance, so a note never rides along.
+        const digits = Array.isArray(item.digits)
+          ? item.digits.filter(isRow)
+          : [];
+        if (digits.length === 0 && !text?.trim()) continue;
+        out.push({ multi: true, digits, ...(text?.trim() ? { text } : {}) });
+      } else if (isRow(item.digit)) {
+        // Single-select option or free-text, with an optional note.
+        if (text !== undefined && text.trim().length === 0) continue;
+        out.push({
+          digit: item.digit,
+          ...(text !== undefined ? { text } : {}),
+          ...(note ? { note } : {}),
+        });
+      } else if (note) {
+        out.push({ note });
+      } else {
+        continue;
+      }
+      if (out.length >= ANSWER_MAX_QUESTIONS) break;
+    }
+    return out;
+  }
+
+  /**
+   * Answer the session's open AskUserQuestion modal by driving the TUI
+   * with tmux keystrokes (see answer-choreography.ts for the protocol).
+   * Fire-and-forget from the caller's view; failures surface as audit
+   * events so the web watcher sees why an answer didn't land.
+   */
+  async function handleAnswer(
+    session: SessionState,
+    answers: MirrorAnswerItem[],
+    _watcher: string,
+  ): Promise<void> {
+    const pane = session.tmuxPane;
+    if (!pane) {
+      emitAuditEvent(
+        session,
+        "answer rejected: session is not running inside tmux (no pane recorded)",
+      );
+      return;
+    }
+    const result = await runAnswerChoreography(injector, pane, answers, {
+      sleep,
+      stepDelayMs: ANSWER_STEP_DELAY_MS,
+    });
+    if (!result.ok) {
+      emitAuditEvent(session, `answer failed: ${result.error}`);
+    }
+  }
+
   async function postInjectRejectionCheck(
     session: SessionState,
   ): Promise<void> {
@@ -1424,6 +1584,52 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       ts: Date.now(),
       payload: { kind: "notification", text: augmented },
     };
+    queueEvent(session, frame);
+  }
+
+  /**
+   * On AskUserQuestion the assistant's preamble text is rendered in the
+   * tmux pane but not yet written to the JSONL transcript (Claude Code
+   * flushes the turn's text/tool_use records only after the blocking tool
+   * resolves). Scrape it off the pane and emit it as an assistant_message
+   * carrying `before_tool_use_id` so the dashboard places it ABOVE the
+   * already-rendered question card. Record the tool_use_id so the later
+   * JSONL copy of the same text is suppressed (see `startTailIfNeeded`).
+   * Conservative: emits nothing when no preamble is confidently found.
+   */
+  async function captureAskPreamble(
+    session: SessionState,
+    payload: unknown,
+  ): Promise<void> {
+    if (!session.tmuxPane) return;
+    const toolUseId =
+      payload && typeof payload === "object" && "tool_use_id" in payload
+        ? String((payload as { tool_use_id?: unknown }).tool_use_id ?? "")
+        : "";
+    if (!toolUseId) return;
+    // Let the TUI finish drawing the preamble + modal before capturing.
+    await sleep(700);
+    const cap = await injector.capturePane(session.tmuxPane, 80);
+    if (!cap.ok) return;
+    const text = extractAskPreamble(cap.output);
+    if (!text) return;
+    const clamped = clampAssistantText(text);
+    const frame: MirrorEventFrame = {
+      action: "mirror_event",
+      sid: session.sid,
+      uuid: crypto.randomUUID(),
+      kind: "assistant_message",
+      ts: Date.now(),
+      payload: {
+        kind: "assistant_message",
+        text: clamped.value,
+        stop_reason: "",
+        before_tool_use_id: toolUseId,
+        ...(clamped.truncated ? { truncated: true } : {}),
+      },
+    };
+    redactor.redactFrame(frame);
+    session.scrapedPreambleToolIds.add(toolUseId);
     queueEvent(session, frame);
   }
 
@@ -2065,7 +2271,25 @@ function removeSentinelFile(stateDir: string): void {
   }
 }
 
+// Consecutive identical messages are collapsed into a single "repeated N
+// more times" line when the message changes. A daemon stuck in a retry
+// loop (e.g. hub unreachable) otherwise fills the log with one line
+// repeated thousands of times, burying everything else.
+let lastLogMsg: string | null = null;
+let lastLogRepeats = 0;
+
 function log(msg: string): void {
+  if (msg === lastLogMsg) {
+    lastLogRepeats++;
+    return;
+  }
+  if (lastLogRepeats > 0) {
+    process.stderr.write(
+      `[claude-net/mirror] (last message repeated ${lastLogRepeats} more time${lastLogRepeats === 1 ? "" : "s"})\n`,
+    );
+  }
+  lastLogMsg = msg;
+  lastLogRepeats = 0;
   process.stderr.write(`[claude-net/mirror] ${msg}\n`);
 }
 

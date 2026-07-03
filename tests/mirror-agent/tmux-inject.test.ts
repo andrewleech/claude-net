@@ -210,4 +210,39 @@ describe("TmuxInjector", () => {
       expect(readLog(logFile)).toHaveLength(1);
     });
   });
+
+  test("sendKey sends a single named key with no Enter follow-up", async () => {
+    const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+    const r = await inj.sendKey("%7", "2");
+    expect(r.ok).toBe(true);
+    const calls = readLog(logFile);
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toEqual(["send-keys", "-t", "%7", "2"]);
+  });
+
+  test("sendKey is not subject to the inject rate limit", async () => {
+    const inj = new TmuxInjector({ tmuxBin: fakeTmux, rateLimitMs: 5000 });
+    // Several discrete keystrokes in quick succession (the answer
+    // choreography) must all succeed — the rate limit only guards inject().
+    expect((await inj.sendKey("%0", "1")).ok).toBe(true);
+    expect((await inj.sendKey("%0", "Enter")).ok).toBe(true);
+    expect((await inj.sendKey("%0", "1")).ok).toBe(true);
+  });
+
+  test("sendText types literal text with no trailing Enter", async () => {
+    const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+    const r = await inj.sendText("%3", "Berlin");
+    expect(r.ok).toBe(true);
+    const calls = readLog(logFile);
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toEqual(["send-keys", "-t", "%3", "-l", "--", "Berlin"]);
+  });
+
+  test("sendText rejects oversized text", async () => {
+    const inj = new TmuxInjector({ tmuxBin: fakeTmux });
+    const r = await inj.sendText("%0", "x".repeat(1024 * 1024));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("too_long");
+  });
 });

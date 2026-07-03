@@ -1,0 +1,38 @@
+
+╭─── Claude Code v2.1.181 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                        │
+│                 Welcome back Algy!                 │ Ask Claude to create a new app or clone a repository                                            │
+│                                                    │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                                                      │
+│                      ▝▜█████▛▘                     │ Added `/config key=value` syntax to set any setting from the prompt (e.g. `/config thinking=fa… │
+│                        ▘▘ ▝▝                       │ Added `sandbox.allowAppleEvents` opt-in setting that lets sandboxed commands send Apple Events… │
+│ Opus 4.8 (1M context) with hi… · Claude Enterprise │ Added `CLAUDE_CLIENT_PRESENCE_FILE` environment variable: point it at a marker file to suppres… │
+│ · Planet Innovation                                │ /release-notes for more                                                                         │
+│                   /tmp/auq-probe                   │                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Write exactly one short sentence of plain text, then in the SAME turn call AskUserQuestion with header T, question "Pick one", options X (desc
+  "option ex") and Y (desc "option why"). Do not write anything after the tool call.
+
+● I'll do that now.
+
+  Here are two options for you to pick from.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ T
+
+Pick one
+
+❯ 1. X
+     option ex
+  2. Y
+     option why
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+

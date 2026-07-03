@@ -1,0 +1,38 @@
+│                        ▘▘ ▝▝                       │ Added `sandbox.allowAppleEvents` opt-in setting that lets sandboxed commands send Apple Events… │
+│ Opus 4.8 (1M context) with hi… · Claude Enterprise │ Added `CLAUDE_CLIENT_PRESENCE_FILE` environment variable: point it at a marker file to suppres… │
+│ · Planet Innovation                                │ /release-notes for more                                                                         │
+│                     /tmp/auq3                      │                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Call AskUserQuestion, single question, header Pick, question "Choose one", options One (desc "first", preview "PREVIEW-ONE line1"), Two (desc
+  "second", preview "PREVIEW-TWO line1"). No preamble.
+
+● User answered Claude's questions:
+  ⎿  · Choose one → (notes only)
+
+● The user provided a note instead of selecting an option: MYNOTE2.
+
+  How would you like me to proceed?
+
+✻ Brewed for 6s
+
+❯ Call AskUserQuestion, single question multiSelect TRUE, header Pick, question "Choose any", options One (desc "first"), Two (desc "second"), Three
+  (desc "third"). No preamble.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Pick  ✔ Submit  →
+
+Review your answers
+
+ ● Choose any
+   → One, Three
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+
+
+
+

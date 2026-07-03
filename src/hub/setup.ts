@@ -156,7 +156,10 @@ cur_cmd = cur.get("command", "")
 if cur_cmd == command:
     print(f"  Statusline already points at {script!s} — no change.")
 elif cur_cmd and "statusline.py" not in cur_cmd:
-    # User already has a custom statusLine — don't stomp on it.
+    # User already has a custom statusLine — don't stomp on it. They
+    # miss out on the dashboard's live context/5h indicator; the
+    # mirror-agent accepts POSTs from any process so a motivated user
+    # can wire forward_to_mirror_agent() into their own script.
     print(
         "  WARN: a custom statusLine.command is already set; "
         "leaving it in place. Remove it from settings.json and re-run "

@@ -10,6 +10,7 @@ import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
 import { Registry } from "./registry";
 import { Router } from "./router";
+import { Scheduler } from "./scheduler";
 import { setupPlugin } from "./setup";
 import { Teams } from "./teams";
 import { UploadsRegistry, uploadsPlugin } from "./uploads";
@@ -71,6 +72,28 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   const hostRegistry = new HostRegistry();
   const uploadsRegistry = new UploadsRegistry();
   const eventLog = new EventLog(options.eventLogCapacity);
+
+  // Delayed-inject scheduler. Fires queued prompts through the same relay
+  // as /inject; reports each transition to the owning session's watchers
+  // (live strip) and the event log (feed / post-mortem).
+  const scheduler = new Scheduler({
+    fireInject: (sid, text, watcher, host) => {
+      const r = mirrorRegistry.relayInject(sid, text, watcher, host);
+      return r.ok ? { ok: true } : { ok: false, error: r.error };
+    },
+  });
+  scheduler.setNotify((action, item) => {
+    mirrorRegistry.broadcastSchedule(item.sid, action, item);
+    if (action !== "added") {
+      eventLog.push(`mirror.schedule.${action}`, {
+        id: item.id,
+        sid: item.sid,
+        fireAt: item.fireAt,
+        attempts: item.attempts,
+        ...(item.lastError ? { error: item.lastError } : {}),
+      });
+    }
+  });
   mirrorRegistry.onSessionClosed((sid) => {
     uploadsRegistry.purgeSession(sid).catch(() => {});
   });
@@ -243,7 +266,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
         mirrorRegistry,
       }),
     )
-    .use(mirrorPlugin({ mirrorRegistry }))
+    .use(mirrorPlugin({ mirrorRegistry, scheduler }))
     .use(
       uploadsPlugin({
         mirrorRegistry,
@@ -319,6 +342,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     if (stopped) return;
     stopped = true;
     clearInterval(pingTick);
+    scheduler.stop();
     try {
       app.stop();
     } catch {

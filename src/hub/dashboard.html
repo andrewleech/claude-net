@@ -1267,6 +1267,126 @@
   .mirror-compose-err.is-notice { color: var(--green); }
   .mirror-compose-err:empty { display: none; }
 
+  /* ── Delayed-send: schedule popover ────────────────────────────
+     Long-pressing Transmit opens this over the composer. Absolutely
+     positioned against .mirror-compose (which is position:relative). */
+  .mirror-compose { position: relative; }
+  .mirror-schedule-pop {
+    position: absolute;
+    right: 16px;
+    bottom: calc(100% + 6px);
+    z-index: 40;
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 10px 12px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    font-family: var(--font-mono);
+    min-width: 200px;
+  }
+  .mirror-schedule-pop .msp-title {
+    font-size: 9px;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .mirror-schedule-pop .msp-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .mirror-schedule-pop .msp-row input {
+    width: 46px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 3px 4px;
+    border-radius: 4px;
+  }
+  .mirror-schedule-pop .msp-row span { margin-right: 6px; color: var(--text-muted); }
+  .mirror-schedule-pop .msp-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .mirror-schedule-pop .msp-actions button {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .mirror-schedule-pop #msp-confirm {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .mirror-schedule-pop #msp-confirm:hover { background: var(--accent); color: var(--on-accent); }
+  .mirror-schedule-pop .msp-hint {
+    font-size: 9px;
+    color: var(--text-muted);
+    margin-top: 7px;
+    opacity: 0.75;
+  }
+  /* Suppress the OS text-selection callout during a long-press hold. */
+  #mirror-compose-send {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* ── Delayed-send: queued strip ────────────────────────────────
+     Pending (and briefly, terminal) queued injects, above the composer. */
+  .mirror-queued {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-dim);
+    padding: 6px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .mirror-queued[hidden] { display: none; }
+  .mirror-queued .mq-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text);
+  }
+  .mirror-queued .mq-clock { color: var(--gold); flex-shrink: 0; min-width: 74px; }
+  .mirror-queued .mq-text {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .mirror-queued .mq-row.is-failed .mq-clock { color: var(--text-accent); }
+  .mirror-queued .mq-row.is-sent .mq-clock { color: var(--green); }
+  .mirror-queued .mq-cancel {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 7px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .mirror-queued .mq-cancel:hover { border-color: var(--accent); color: var(--accent); }
+
   /* ── Attach button inside the compose frame ────────────────────
      Narrow column between the textarea and the Transmit actions.
      Stretches to the full frame height so when the textarea grows
@@ -2534,8 +2654,21 @@
           <div class="cn-prompt-text" id="mirror-prompt-text"></div>
           <div class="cn-prompt-actions" id="mirror-prompt-actions"></div>
         </div>
+        <div class="mirror-queued" id="mirror-queued" hidden></div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
+          <div class="mirror-schedule-pop" id="mirror-schedule-pop" hidden>
+            <div class="msp-title">Send after</div>
+            <div class="msp-row">
+              <input type="number" id="msp-h" min="0" max="24" step="1" value="0" inputmode="numeric" aria-label="hours"><span>h</span>
+              <input type="number" id="msp-m" min="0" max="59" step="1" value="10" inputmode="numeric" aria-label="minutes"><span>m</span>
+            </div>
+            <div class="msp-actions">
+              <button type="button" id="msp-cancel">Cancel</button>
+              <button type="button" id="msp-confirm">Queue</button>
+            </div>
+            <div class="msp-hint">held in hub memory — lost if the hub restarts</div>
+          </div>
           <div class="mirror-compose-frame">
             <textarea id="mirror-compose-text" placeholder="Transmit a prompt to the local claude…" rows="2"></textarea>
             <button class="mirror-attach-btn" id="mirror-attach-btn" type="button" title="Attach file (paste or drop also works)" aria-label="Attach file">
@@ -6260,6 +6393,9 @@
           agentAttached = !!msg.attached;
           refreshConnState();
         }
+        else if (msg.event === 'mirror:schedule') {
+          handleScheduleEvent(msg);
+        }
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
@@ -6286,6 +6422,14 @@
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
+      // Delayed-send: stop the countdown ticker and wipe the per-session
+      // queued strip / popover so the next session starts clean.
+      if (scheduledTicker) { clearInterval(scheduledTicker); scheduledTicker = null; }
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      suppressNextClick = false;
+      scheduledItems = Object.create(null);
+      if (queuedEl) { queuedEl.hidden = true; queuedEl.innerHTML = ''; }
+      if (schedulePop) schedulePop.hidden = true;
       try { if (mws) mws.close(); } catch (e) { /* ignore */ }
       mws = null;
       if (thinkingEl) { thinkingEl.classList.remove('is-active'); thinkingEl.textContent = ''; }
@@ -6596,6 +6740,12 @@
     }
 
     function doInject() {
+      // A long-press opened the schedule popover; the pointerup still
+      // synthesises a click on the button. At the target element, click
+      // listeners fire in registration order regardless of capture flag,
+      // so this guard (not a capture-phase interceptor) is the reliable
+      // way to swallow that click. Reset per press in pointerdown.
+      if (suppressNextClick) { suppressNextClick = false; return; }
       var text = composeText.value;
       if (!text || !text.trim()) return;
       var size = utf8Bytes(text);
@@ -6644,6 +6794,231 @@
     }
 
     if (composeSend) composeSend.addEventListener('click', doInject, { signal: attachSig });
+
+    // ── Delayed send (long-press Transmit → "send after" popover) ──
+    // Hold Transmit ~2s to open a popover offering a h/m delay. A short
+    // press still sends immediately (the click handler above). The queue
+    // lives in hub memory: it survives a closed tab or a slept laptop but
+    // NOT a hub restart — the strip label says so.
+    var schedulePop = document.getElementById('mirror-schedule-pop');
+    var mspH = document.getElementById('msp-h');
+    var mspM = document.getElementById('msp-m');
+    var mspCancel = document.getElementById('msp-cancel');
+    var mspConfirm = document.getElementById('msp-confirm');
+    var queuedEl = document.getElementById('mirror-queued');
+    var LONG_PRESS_MS = 2000;
+    var longPressTimer = null;
+    var suppressNextClick = false;
+    // id → { fireAt, text, status } for the queued strip; a 1s ticker
+    // repaints the countdowns while any item is pending.
+    var scheduledItems = Object.create(null);
+    var scheduledTicker = null;
+
+    function openSchedulePop() {
+      if (!schedulePop) return;
+      schedulePop.hidden = false;
+      if (mspM) { try { mspM.focus(); mspM.select(); } catch (e) { /* ignore */ } }
+    }
+    function closeSchedulePop() {
+      if (schedulePop) schedulePop.hidden = true;
+    }
+    function clearLongPress() {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    }
+    function startLongPress() {
+      // Each fresh press starts un-suppressed; the 2s timer sets the flag
+      // only if the press is held long enough to open the popover. This
+      // reset also clears a stale flag from a prior press that never
+      // produced a click (pointer released off the button).
+      suppressNextClick = false;
+      clearLongPress();
+      longPressTimer = setTimeout(function() {
+        longPressTimer = null;
+        // Held long enough: the following pointerup will synthesise a
+        // click, which doInject swallows via suppressNextClick.
+        suppressNextClick = true;
+        openSchedulePop();
+      }, LONG_PRESS_MS);
+    }
+    if (composeSend) {
+      composeSend.addEventListener('pointerdown', startLongPress, { signal: attachSig });
+      composeSend.addEventListener('pointerup', clearLongPress, { signal: attachSig });
+      composeSend.addEventListener('pointerleave', clearLongPress, { signal: attachSig });
+      composeSend.addEventListener('pointercancel', clearLongPress, { signal: attachSig });
+      // Long-press on touch would otherwise raise the context menu.
+      composeSend.addEventListener('contextmenu', function(e) { e.preventDefault(); }, { signal: attachSig });
+    }
+
+    function submitSchedule() {
+      var text = composeText.value;
+      if (!text || !text.trim()) {
+        composeErr.className = 'mirror-compose-err';
+        composeErr.textContent = 'Nothing to queue — type a prompt first.';
+        return;
+      }
+      var h = parseInt(mspH && mspH.value, 10); if (!isFinite(h) || h < 0) h = 0;
+      var m = parseInt(mspM && mspM.value, 10); if (!isFinite(m) || m < 0) m = 0;
+      var delayMs = (h * 3600 + m * 60) * 1000;
+      if (delayMs <= 0) {
+        composeErr.className = 'mirror-compose-err';
+        composeErr.textContent = 'Pick a non-zero delay.';
+        return;
+      }
+      var size = utf8Bytes(text);
+      if (size > injectMaxBytes) {
+        composeErr.className = 'mirror-compose-err';
+        composeErr.textContent = 'Too large to queue: ' + size + ' bytes (cap ' + injectMaxBytes + '). Large pastes must be sent immediately.';
+        return;
+      }
+      mspConfirm.disabled = true;
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/schedule-inject' + hostQueryFirst, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, delayMs: delayMs, watcher: 'web-schedule' })
+      })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(r) {
+          mspConfirm.disabled = false;
+          if (r.status >= 400) {
+            composeErr.className = 'mirror-compose-err';
+            composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
+            return;
+          }
+          // The mirror:schedule 'added' broadcast will populate the strip;
+          // clear the composer and close the popover.
+          pushComposeHistory(text);
+          composeHistoryIdx = -1;
+          composeText.value = '';
+          autoresizeCompose();
+          composeErr.className = 'mirror-compose-err is-notice';
+          composeErr.textContent = 'Queued — sends in ' + fmtDelay(delayMs) + '.';
+          closeSchedulePop();
+        })
+        .catch(function(err) {
+          mspConfirm.disabled = false;
+          composeErr.className = 'mirror-compose-err';
+          composeErr.textContent = 'Queue failed: ' + (err && err.message ? err.message : err);
+        });
+    }
+    if (mspConfirm) mspConfirm.addEventListener('click', submitSchedule, { signal: attachSig });
+    if (mspCancel) mspCancel.addEventListener('click', closeSchedulePop, { signal: attachSig });
+
+    function fmtDelay(ms) {
+      var totalMin = Math.round(ms / 60000);
+      var h = Math.floor(totalMin / 60);
+      var m = totalMin % 60;
+      if (h > 0) return h + 'h ' + m + 'm';
+      return m + 'm';
+    }
+    function fmtCountdown(ms) {
+      if (ms <= 0) return 'now';
+      var s = Math.round(ms / 1000);
+      var h = Math.floor(s / 3600); s -= h * 3600;
+      var m = Math.floor(s / 60); s -= m * 60;
+      if (h > 0) return h + 'h ' + m + 'm';
+      if (m > 0) return m + 'm ' + s + 's';
+      return s + 's';
+    }
+
+    function cancelScheduled(id) {
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/scheduled/' + encodeURIComponent(id) + hostQueryFirst, {
+        method: 'DELETE'
+      }).catch(function() { /* the broadcast, or a stale row, will reconcile */ });
+    }
+
+    function renderQueued() {
+      if (!queuedEl) return;
+      var ids = Object.keys(scheduledItems);
+      if (ids.length === 0) {
+        queuedEl.hidden = true;
+        queuedEl.innerHTML = '';
+        if (scheduledTicker) { clearInterval(scheduledTicker); scheduledTicker = null; }
+        return;
+      }
+      // Pending first (soonest fireAt), then terminal rows.
+      ids.sort(function(a, b) {
+        var A = scheduledItems[a], B = scheduledItems[b];
+        var ap = A.status === 'pending' ? 0 : 1, bp = B.status === 'pending' ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return A.fireAt - B.fireAt;
+      });
+      var now = Date.now();
+      var frag = document.createDocumentFragment();
+      var anyPending = false;
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i], it = scheduledItems[id];
+        var row = document.createElement('div');
+        row.className = 'mq-row';
+        var clock = document.createElement('span');
+        clock.className = 'mq-clock';
+        if (it.status === 'pending') {
+          anyPending = true;
+          clock.textContent = '⧗ ' + fmtCountdown(it.fireAt - now);
+        } else if (it.status === 'sent') {
+          row.classList.add('is-sent');
+          clock.textContent = '✓ sent';
+        } else if (it.status === 'failed') {
+          row.classList.add('is-failed');
+          clock.textContent = '✗ ' + (it.lastError ? 'failed' : 'failed');
+        } else {
+          clock.textContent = 'cancelled';
+        }
+        var txt = document.createElement('span');
+        txt.className = 'mq-text';
+        var preview = (it.text || '').replace(/\s+/g, ' ').trim();
+        txt.textContent = preview.length > 80 ? preview.slice(0, 77) + '…' : preview;
+        txt.title = it.lastError ? (preview + '\n\nerror: ' + it.lastError) : preview;
+        row.appendChild(clock);
+        row.appendChild(txt);
+        if (it.status === 'pending') {
+          var btn = document.createElement('button');
+          btn.className = 'mq-cancel';
+          btn.type = 'button';
+          btn.textContent = 'cancel';
+          (function(theId) {
+            btn.addEventListener('click', function() { cancelScheduled(theId); }, { signal: attachSig });
+          })(id);
+          row.appendChild(btn);
+        }
+        frag.appendChild(row);
+      }
+      queuedEl.innerHTML = '';
+      queuedEl.appendChild(frag);
+      queuedEl.hidden = false;
+      if (anyPending && !scheduledTicker) {
+        scheduledTicker = setInterval(renderQueued, 1000);
+      } else if (!anyPending && scheduledTicker) {
+        clearInterval(scheduledTicker); scheduledTicker = null;
+      }
+    }
+
+    function handleScheduleEvent(msg) {
+      var it = msg && msg.item;
+      if (!it || !it.id) return;
+      if (msg.action === 'cancelled' || msg.action === 'sent') {
+        // Show the terminal state briefly, then drop the row.
+        scheduledItems[it.id] = it;
+        renderQueued();
+        setTimeout(function() { delete scheduledItems[it.id]; renderQueued(); }, 4000);
+        return;
+      }
+      // 'added' (pending upsert) or 'failed' (keep visible until pruned).
+      scheduledItems[it.id] = it;
+      renderQueued();
+    }
+
+    // Seed the strip from the hub so a reload rebuilds pending items.
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/scheduled' + hostQueryFirst)
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(j) {
+        if (!j || !Array.isArray(j.items)) return;
+        for (var i = 0; i < j.items.length; i++) {
+          var it = j.items[i];
+          if (it && it.id) scheduledItems[it.id] = it;
+        }
+        renderQueued();
+      })
+      .catch(function() { /* strip stays empty; broadcasts still populate it */ });
 
     // ── File uploads (paste / drop / attach-button) ───────────────
     // Dropped and pasted files are POSTed to /api/mirror/:sid/upload;

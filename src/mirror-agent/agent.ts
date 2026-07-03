@@ -438,6 +438,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         status: "ok",
         sessions: sessions.size,
         port: server.port,
+        // hub + pid let the launcher detect a daemon running against a
+        // stale hub URL and kill/respawn it (see _mirror_agent_healthy in
+        // bin/claude-channels). Without this, a daemon spawned with the
+        // localhost fallback stays "healthy" forever while every hub call
+        // fails.
+        hub: hubUrl,
+        pid: process.pid,
       });
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -2264,7 +2271,25 @@ function removeSentinelFile(stateDir: string): void {
   }
 }
 
+// Consecutive identical messages are collapsed into a single "repeated N
+// more times" line when the message changes. A daemon stuck in a retry
+// loop (e.g. hub unreachable) otherwise fills the log with one line
+// repeated thousands of times, burying everything else.
+let lastLogMsg: string | null = null;
+let lastLogRepeats = 0;
+
 function log(msg: string): void {
+  if (msg === lastLogMsg) {
+    lastLogRepeats++;
+    return;
+  }
+  if (lastLogRepeats > 0) {
+    process.stderr.write(
+      `[claude-net/mirror] (last message repeated ${lastLogRepeats} more time${lastLogRepeats === 1 ? "" : "s"})\n`,
+    );
+  }
+  lastLogMsg = msg;
+  lastLogRepeats = 0;
   process.stderr.write(`[claude-net/mirror] ${msg}\n`);
 }
 

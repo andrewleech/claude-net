@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import type { ServerWebSocket } from "bun";
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
-import { binServerPlugin } from "./bin-server";
+import { binServerPlugin, ensureBundleBuilt } from "./bin-server";
 import { EventLog } from "./event-log";
 import { hostPlugin } from "./host";
 import { HostRegistry } from "./host-registry";
@@ -105,8 +105,14 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     });
   });
 
-  // Resolve plugin.ts path relative to hub source directory
-  const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
+  // The plugin is served as a self-contained bundle (built lazily on first
+  // request from src/plugin/plugin.ts against the repo's bun.lock-pinned
+  // node_modules). Serving the bare .ts used to leave dependency resolution
+  // to each client's bun auto-install, where floating versions once paired
+  // SDK 1.29.0 with an incompatible zod and killed the MCP server at startup.
+  const repoRoot = `${import.meta.dir}/../..`;
+  const pluginBundleRel = "bin/plugin.bundle.js";
+  const pluginPath = `${repoRoot}/${pluginBundleRel}`;
   const dashboardPath = `${import.meta.dir}/dashboard.html`;
   const dashboardParsersPath = `${import.meta.dir}/dashboard/parsers.js`;
   const pwaManifestPath = `${import.meta.dir}/pwa/manifest.webmanifest`;
@@ -187,9 +193,17 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     }))
     .get("/plugin.ts", async ({ set }) => {
       if (!pluginCache) {
+        if (
+          !ensureBundleBuilt(repoRoot, "src/plugin/plugin.ts", pluginBundleRel)
+        ) {
+          set.status = 500;
+          return "plugin bundle build failed; see hub logs";
+        }
         const file = Bun.file(pluginPath);
         pluginCache = await file.text();
       }
+      // Kept as text/typescript: clients save this to a .ts temp file and
+      // `bun run` it; bundled JS is valid under the .ts extension.
       set.headers["content-type"] = "text/typescript";
       return pluginCache;
     })
@@ -253,7 +267,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
       }),
     )
     .use(hostPlugin({ hostRegistry }))
-    .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..`, commitHash }))
+    .use(binServerPlugin({ repoRoot, commitHash }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
   app = wsPlugin(

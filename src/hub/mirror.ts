@@ -14,6 +14,8 @@ import type {
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorStopFrame,
+  ScheduledInjectInfo,
+  ScheduledInjectStatus,
 } from "@/shared/types";
 
 interface SlashCommand {
@@ -24,6 +26,7 @@ interface SlashCommand {
 import { Elysia } from "elysia";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
+import type { Scheduler } from "./scheduler";
 
 // ── Defaults ──────────────────────────────────────────────────────────────
 
@@ -1550,6 +1553,26 @@ export class MirrorRegistry {
       }
     }
   }
+
+  /** Fan a scheduled-inject lifecycle change out to the session's
+   *  watchers so the dashboard's queued strip updates live. `action`
+   *  is "added" (upsert, still pending) or a terminal status. */
+  broadcastSchedule(
+    sid: string,
+    action: ScheduledInjectStatus | "added",
+    item: ScheduledInjectInfo,
+  ): void {
+    const entry = this.entryBySid(sid);
+    if (!entry) return;
+    const msg = JSON.stringify({ event: "mirror:schedule", action, item });
+    for (const w of entry.watchers) {
+      try {
+        w.ws.send(msg);
+      } catch {
+        // ignore per-watcher send failures
+      }
+    }
+  }
 }
 
 function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
@@ -1572,10 +1595,12 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
 
 export interface MirrorPluginDeps {
   mirrorRegistry: MirrorRegistry;
+  /** Optional — when absent the schedule-inject routes return 501. */
+  scheduler?: Scheduler;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry } = deps;
+  const { mirrorRegistry, scheduler } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })
@@ -1770,6 +1795,82 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           return { error: result.error };
         }
         return { accepted: true, seq: result.seq };
+      })
+
+      /**
+       * POST /:sid/schedule-inject — queue an inject to fire after a
+       * delay. Body: { text, delayMs, watcher? }. The prompt is held in
+       * hub memory (non-durable across restarts) and fired via the same
+       * relay path as /inject once the delay elapses; if the session is
+       * offline at fire time it retries with backoff then fails. The
+       * delay is validated but not rate-limited here — the actual send is
+       * a single relay, and scheduling is a deliberate user action.
+       */
+      .post("/:sid/schedule-inject", ({ params, body, query, set }) => {
+        if (!scheduler) {
+          set.status = 501;
+          return { error: "Scheduling is not enabled on this hub." };
+        }
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const payload = body as {
+          text?: string;
+          delayMs?: number;
+          watcher?: string;
+        };
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (text.trim().length === 0) {
+          set.status = 400;
+          return { error: "Empty prompt." };
+        }
+        if (Buffer.byteLength(text, "utf8") > MAX_INJECT_BYTES) {
+          set.status = 413;
+          return { error: `Prompt exceeds ${MAX_INJECT_BYTES} bytes.` };
+        }
+        const delayMs =
+          typeof payload.delayMs === "number" ? payload.delayMs : Number.NaN;
+        const watcher = sanitizeWatcher(payload.watcher ?? "web-schedule");
+        const result = scheduler.schedule({
+          sid: found.entry.sid,
+          host,
+          text,
+          watcher,
+          delayMs,
+        });
+        if (!result.ok) {
+          set.status = 400;
+          return { error: result.error };
+        }
+        return {
+          accepted: true,
+          id: result.item.id,
+          fireAt: result.item.fireAt,
+        };
+      })
+
+      /** GET /:sid/scheduled — pending + recently-terminal queued injects
+       *  for this session, so a reloading dashboard can rebuild its strip. */
+      .get("/:sid/scheduled", ({ params }) => {
+        if (!scheduler) return { items: [] };
+        return { items: scheduler.list(params.sid) };
+      })
+
+      /** DELETE /:sid/scheduled/:id — cancel a still-pending queued inject. */
+      .delete("/:sid/scheduled/:id", ({ params, set }) => {
+        if (!scheduler) {
+          set.status = 501;
+          return { error: "Scheduling is not enabled on this hub." };
+        }
+        const result = scheduler.cancel(params.id);
+        if (!result.ok) {
+          set.status = 404;
+          return { error: result.error };
+        }
+        return { ok: true };
       })
 
       /**

@@ -313,6 +313,36 @@ export interface MirrorInjectFrame {
 }
 
 /**
+ * Lifecycle of a delayed inject queued from the dashboard. `pending`
+ * covers both the initial wait and any offline-retry backoff; the item
+ * lands on exactly one terminal status.
+ */
+export type ScheduledInjectStatus = "pending" | "sent" | "failed" | "cancelled";
+
+/**
+ * A dashboard-queued inject waiting to fire. Held in hub memory only —
+ * a hub restart drops the queue (accepted tradeoff; the UI labels these
+ * as non-durable). `text` is retained so a reconnecting dashboard can
+ * preview what is queued.
+ */
+export interface ScheduledInjectInfo {
+  id: string;
+  sid: string;
+  host?: string;
+  text: string;
+  watcher: string;
+  /** Epoch ms at which the inject should fire. */
+  fireAt: number;
+  /** Epoch ms at which it was queued. */
+  createdAt: number;
+  status: ScheduledInjectStatus;
+  /** Delivery attempts made so far (0 while still waiting to first fire). */
+  attempts: number;
+  /** Last delivery error, set while retrying or on terminal failure. */
+  lastError?: string;
+}
+
+/**
  * Hub → agent request to stash a blob too large for a single tmux inject.
  * Agent writes the text to a local temp file and replies with
  * MirrorPasteDoneFrame carrying the path.

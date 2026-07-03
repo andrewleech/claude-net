@@ -5,6 +5,7 @@ import {
   _resetSessionCreateLimiterForTest,
   mirrorPlugin,
 } from "@/hub/mirror";
+import { Scheduler } from "@/hub/scheduler";
 import type { MirrorEventFrame } from "@/shared/types";
 import { Elysia } from "elysia";
 
@@ -1286,6 +1287,135 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(quick.hasSession(sid)).toBe(false);
     } finally {
       quick.stop();
+    }
+  });
+});
+
+describe("schedule-inject routes", () => {
+  function setup() {
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const fired: string[] = [];
+    const scheduler = new Scheduler({
+      fireInject: (_sid, text) => {
+        fired.push(text);
+        return { ok: true };
+      },
+    });
+    const app = new Elysia().use(
+      mirrorPlugin({ mirrorRegistry: reg, scheduler }),
+    );
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    const r = reg.createSession("agent-x:u@h", "/workspace", "sched-sid");
+    if (!r.ok) throw new Error("session create failed");
+    return { reg, scheduler, app, port, fired };
+  }
+
+  test("queues an inject and lists it as pending", async () => {
+    const { app, port, scheduler } = setup();
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/schedule-inject`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "later", delayMs: 60_000 }),
+        },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(typeof body.id).toBe("string");
+      expect(typeof body.fireAt).toBe("number");
+
+      const listRes = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/scheduled`,
+      );
+      const list = (await listRes.json()) as {
+        items: Array<{ status: string }>;
+      };
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0]?.status).toBe("pending");
+    } finally {
+      scheduler.stop();
+      app.stop();
+    }
+  });
+
+  test("rejects an empty prompt and a non-positive delay", async () => {
+    const { app, port, scheduler } = setup();
+    try {
+      const empty = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/schedule-inject`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "   ", delayMs: 1000 }),
+        },
+      );
+      expect(empty.status).toBe(400);
+
+      const badDelay = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/schedule-inject`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "x", delayMs: 0 }),
+        },
+      );
+      expect(badDelay.status).toBe(400);
+    } finally {
+      scheduler.stop();
+      app.stop();
+    }
+  });
+
+  test("404s scheduling against an unknown session", async () => {
+    const { app, port, scheduler } = setup();
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/no-such-sid/schedule-inject`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "x", delayMs: 1000 }),
+        },
+      );
+      expect(res.status).toBe(404);
+    } finally {
+      scheduler.stop();
+      app.stop();
+    }
+  });
+
+  test("cancels a pending queued inject", async () => {
+    const { app, port, scheduler } = setup();
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/schedule-inject`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "x", delayMs: 60_000 }),
+        },
+      );
+      const { id } = (await res.json()) as { id: string };
+      const del = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/scheduled/${id}`,
+        { method: "DELETE" },
+      );
+      expect(del.status).toBe(200);
+      expect(scheduler.list("sched-sid")[0]?.status).toBe("cancelled");
+
+      // Second cancel of the same id now 404s (no longer pending).
+      const again = await fetch(
+        `http://localhost:${port}/api/mirror/sched-sid/scheduled/${id}`,
+        { method: "DELETE" },
+      );
+      expect(again.status).toBe(404);
+    } finally {
+      scheduler.stop();
+      app.stop();
     }
   });
 });

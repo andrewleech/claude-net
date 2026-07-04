@@ -920,6 +920,35 @@
   }
   .m-evt-end::before, .m-evt-end::after { display: none; }
 
+  /* Delayed-send: persistent queued-message marker in the feed.
+     Left-accent card that updates in place through the item's lifecycle.
+     No gutter timestamp (::before disabled) — it carries its own label. */
+  .m-evt-queued {
+    margin: 6px 24px;
+    padding: 7px 12px;
+    border-left: 3px solid var(--gold);
+    background: var(--bg-panel);
+    border-radius: 0 4px 4px 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .m-evt-queued::before, .m-evt-queued::after { display: none; }
+  .m-evt-queued .mqf-label { color: var(--gold); letter-spacing: 0.4px; }
+  .m-evt-queued .mqf-text {
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .m-evt-queued.is-sent { border-left-color: var(--green); }
+  .m-evt-queued.is-sent .mqf-label { color: var(--green); }
+  .m-evt-queued.is-failed { border-left-color: var(--text-accent); }
+  .m-evt-queued.is-failed .mqf-label { color: var(--text-accent); }
+  .m-evt-queued.is-cancelled { border-left-color: var(--border); opacity: 0.7; }
+  .m-evt-queued.is-cancelled .mqf-label { color: var(--text-muted); }
+
   /* History-backfill rows — visually distinct from live transcript so
      the user can see at a glance which content was loaded after the
      fact. Slightly dimmed; smaller `history` tag in the meta line. */
@@ -6428,6 +6457,7 @@
       if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
       suppressNextClick = false;
       scheduledItems = Object.create(null);
+      queuedFeedEls = Object.create(null);
       if (queuedEl) { queuedEl.hidden = true; queuedEl.innerHTML = ''; }
       if (schedulePop) schedulePop.hidden = true;
       try { if (mws) mws.close(); } catch (e) { /* ignore */ }
@@ -6796,19 +6826,23 @@
     if (composeSend) composeSend.addEventListener('click', doInject, { signal: attachSig });
 
     // ── Delayed send (long-press Transmit → "send after" popover) ──
-    // Hold Transmit ~2s to open a popover offering a h/m delay. A short
-    // press still sends immediately (the click handler above). The queue
-    // lives in hub memory: it survives a closed tab or a slept laptop but
-    // NOT a hub restart — the strip label says so.
+    // Hold Transmit briefly to open a popover offering a h/m delay. A
+    // short press still sends immediately (the click handler above). The
+    // queue lives in hub memory: it survives a closed tab or a slept
+    // laptop but NOT a hub restart — the strip label says so.
     var schedulePop = document.getElementById('mirror-schedule-pop');
     var mspH = document.getElementById('msp-h');
     var mspM = document.getElementById('msp-m');
     var mspCancel = document.getElementById('msp-cancel');
     var mspConfirm = document.getElementById('msp-confirm');
     var queuedEl = document.getElementById('mirror-queued');
-    var LONG_PRESS_MS = 2000;
+    var LONG_PRESS_MS = 600;
     var longPressTimer = null;
     var suppressNextClick = false;
+    // id → transcript marker element, so a queued message leaves a
+    // persistent trace in the feed (not just the transient composer
+    // notice) and its row updates in place through sent/failed/cancelled.
+    var queuedFeedEls = Object.create(null);
     // id → { fireAt, text, status } for the queued strip; a 1s ticker
     // repaints the countdowns while any item is pending.
     var scheduledItems = Object.create(null);
@@ -6884,8 +6918,22 @@
             composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
             return;
           }
-          // The mirror:schedule 'added' broadcast will populate the strip;
-          // clear the composer and close the popover.
+          // Optimistically show the queued item in the strip and feed now,
+          // so it appears even if the mirror:schedule broadcast is delayed
+          // or missed; the broadcast later upserts the same id.
+          if (r.body && r.body.id) {
+            var optimistic = {
+              id: r.body.id,
+              sid: sid,
+              text: text,
+              fireAt: typeof r.body.fireAt === 'number' ? r.body.fireAt : (Date.now() + delayMs),
+              status: 'pending',
+              attempts: 0
+            };
+            scheduledItems[optimistic.id] = optimistic;
+            upsertQueuedFeedRow(optimistic);
+            renderQueued();
+          }
           pushComposeHistory(text);
           composeHistoryIdx = -1;
           composeText.value = '';
@@ -6918,6 +6966,50 @@
       if (h > 0) return h + 'h ' + m + 'm';
       if (m > 0) return m + 'm ' + s + 's';
       return s + 's';
+    }
+    function fmtClockTime(ms) {
+      var d = new Date(ms);
+      return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+    }
+
+    // A queued message leaves a persistent marker row in the transcript
+    // feed (keyed by id) so it stays visible after the transient composer
+    // notice clears. The same row updates in place through the item's
+    // lifecycle (pending → sent / failed / cancelled) and is never removed,
+    // so scrolling back shows what happened.
+    function upsertQueuedFeedRow(it) {
+      if (!transcriptEl || !it || !it.id) return;
+      var el = queuedFeedEls[it.id];
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'm-evt m-evt-queued';
+        var lab = document.createElement('span'); lab.className = 'mqf-label';
+        var tx = document.createElement('span'); tx.className = 'mqf-text';
+        el.appendChild(lab); el.appendChild(tx);
+        queuedFeedEls[it.id] = el;
+        transcriptEl.appendChild(el);
+        scrollToBottom();
+      }
+      var labEl = el.querySelector('.mqf-label');
+      var txEl = el.querySelector('.mqf-text');
+      var preview = (it.text || '').replace(/\s+/g, ' ').trim();
+      var status = it.status || 'pending';
+      el.classList.remove('is-pending', 'is-sent', 'is-failed', 'is-cancelled');
+      if (status === 'pending') {
+        el.classList.add('is-pending');
+        labEl.textContent = '⧗ queued — sends ' + fmtClockTime(it.fireAt) + ' · in ' + fmtCountdown(it.fireAt - Date.now());
+      } else if (status === 'sent') {
+        el.classList.add('is-sent');
+        labEl.textContent = '✓ queued message sent';
+      } else if (status === 'failed') {
+        el.classList.add('is-failed');
+        labEl.textContent = '✗ queued message failed' + (it.lastError ? ' — ' + it.lastError : '');
+      } else {
+        el.classList.add('is-cancelled');
+        labEl.textContent = '✕ queued message cancelled';
+      }
+      txEl.textContent = preview.length > 100 ? preview.slice(0, 97) + '…' : preview;
+      el.title = it.lastError ? (preview + '\n\nerror: ' + it.lastError) : preview;
     }
 
     function cancelScheduled(id) {
@@ -6954,6 +7046,8 @@
         if (it.status === 'pending') {
           anyPending = true;
           clock.textContent = '⧗ ' + fmtCountdown(it.fireAt - now);
+          // Keep the feed marker's countdown in step with the strip.
+          upsertQueuedFeedRow(it);
         } else if (it.status === 'sent') {
           row.classList.add('is-sent');
           clock.textContent = '✓ sent';
@@ -6995,8 +7089,11 @@
     function handleScheduleEvent(msg) {
       var it = msg && msg.item;
       if (!it || !it.id) return;
+      // The feed marker tracks every transition and persists (it is never
+      // removed), unlike the strip which drops terminal rows.
+      upsertQueuedFeedRow(it);
       if (msg.action === 'cancelled' || msg.action === 'sent') {
-        // Show the terminal state briefly, then drop the row.
+        // Strip: show the terminal state briefly, then drop the row.
         scheduledItems[it.id] = it;
         renderQueued();
         setTimeout(function() { delete scheduledItems[it.id]; renderQueued(); }, 4000);
@@ -7007,14 +7104,15 @@
       renderQueued();
     }
 
-    // Seed the strip from the hub so a reload rebuilds pending items.
+    // Seed the strip + feed markers from the hub so a reload or a session
+    // switch-and-return rebuilds still-pending items.
     fetch('/api/mirror/' + encodeURIComponent(sid) + '/scheduled' + hostQueryFirst)
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(j) {
         if (!j || !Array.isArray(j.items)) return;
         for (var i = 0; i < j.items.length; i++) {
           var it = j.items[i];
-          if (it && it.id) scheduledItems[it.id] = it;
+          if (it && it.id) { scheduledItems[it.id] = it; upsertQueuedFeedRow(it); }
         }
         renderQueued();
       })

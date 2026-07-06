@@ -1712,6 +1712,11 @@
   .md-body ul, .md-body ol { margin: 6px 0 6px 22px; padding: 0; }
   .md-body li { margin: 3px 0; }
   .md-body li > p { margin: 0; }
+  /* Lists whose markers were inlined as real text (see inlineListMarkers):
+     drop the native ::marker so it isn't drawn twice, and hang the text
+     marker into the indent so wrapped lines still align under the content. */
+  .md-body ul.md-list-inline, .md-body ol.md-list-inline { list-style: none; }
+  .md-body .md-marker { display: inline-block; margin-left: -22px; width: 22px; color: var(--text-dim); }
   .md-body code {
     background: var(--bg-code);
     border: 1px solid var(--border-dim);
@@ -5725,7 +5730,64 @@
         // scripts/iframes/event-handlers.
         html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       }
-      return html;
+      return inlineListMarkers(html);
+    }
+
+    // Browsers never include CSS-generated list markers (::marker, and
+    // likewise ::before content) in a text selection, so copying a range
+    // that spans a bulleted or numbered list drops every bullet/number.
+    // Replace the native markers with real inline text nodes — a leading
+    // "• " or "1. " that lives in the DOM — so the copied text keeps them.
+    // `.md-list-inline` (see CSS) suppresses the now-redundant native
+    // marker. Runs on the sanitized fragment; if the DOM APIs are missing
+    // for any reason we return the input unchanged.
+    var BULLETS = ['•', '◦', '▪'];
+    function inlineListMarkers(html) {
+      if (!html || typeof document === 'undefined') return html;
+      var tpl;
+      try {
+        tpl = document.createElement('div');
+        tpl.innerHTML = html;
+      } catch (e) {
+        return html;
+      }
+      var lists = tpl.querySelectorAll('ol, ul');
+      for (var i = 0; i < lists.length; i++) {
+        var list = lists[i];
+        var ordered = list.tagName === 'OL';
+        var depth = 0;
+        var p = list.parentNode;
+        while (p && p !== tpl) {
+          if (p.tagName === 'OL' || p.tagName === 'UL') depth++;
+          p = p.parentNode;
+        }
+        var startAttr = parseInt(list.getAttribute('start') || '1', 10);
+        var n = isNaN(startAttr) ? 1 : startAttr;
+        list.classList.add('md-list-inline');
+        var items = list.children;
+        for (var j = 0; j < items.length; j++) {
+          var li = items[j];
+          if (li.tagName !== 'LI') continue;
+          // Task-list items render a checkbox marker of their own — leave
+          // those alone rather than prefixing a redundant bullet.
+          var first = li.firstElementChild;
+          var isTask = first && first.tagName === 'INPUT' &&
+            (first.getAttribute('type') || '').toLowerCase() === 'checkbox';
+          var valueAttr = parseInt(li.getAttribute('value') || '', 10);
+          if (ordered && !isNaN(valueAttr)) n = valueAttr;
+          if (isTask) { if (ordered) n++; continue; }
+          var text = ordered ? (n + '. ') : (BULLETS[depth % BULLETS.length] + ' ');
+          if (ordered) n++;
+          var marker = document.createElement('span');
+          marker.className = 'md-marker';
+          marker.textContent = text;
+          // Keep the marker inline with the item's text: in loose lists
+          // marked wraps content in <p>, so insert inside that leading <p>.
+          var host = (first && first.tagName === 'P') ? first : li;
+          host.insertBefore(marker, host.firstChild);
+        }
+      }
+      return tpl.innerHTML;
     }
 
     // ── Main renderEvent ─────────────────────────────────────────────

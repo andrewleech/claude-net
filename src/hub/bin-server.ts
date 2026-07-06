@@ -78,17 +78,29 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
 const BUNDLE_SOURCE_REL = "src/mirror-agent/agent.ts";
 const BUNDLE_DEST_REL = "bin/mirror-agent.bundle.js";
 
-let bundleBuilt = false;
+const bundlesBuilt = new Set<string>();
 
 /**
- * Ensure the mirror-agent bundle exists at bin/mirror-agent.bundle.js. Runs
- * `bun build` once per process. If bun isn't on PATH (should never happen
- * in the hub container), logs and returns false.
+ * Ensure a self-contained JS bundle of `sourceRel` exists at `destRel`.
+ * Runs `bun build` once per process per dest. If bun isn't on PATH (should
+ * never happen in the hub container), logs and returns false.
+ *
+ * Bundling resolves dependencies from the repo's own node_modules (i.e.
+ * bun.lock-pinned, test-covered versions) — the served artifact carries no
+ * floating imports for the client's bun auto-install to re-resolve.
+ *
+ * When `commitHash` is given, the __MIRROR_BUILD_HASH__ placeholder is
+ * substituted (mirror-agent only — the plugin has no placeholder).
  */
-function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
-  if (bundleBuilt) return true;
-  const source = path.join(repoRoot, BUNDLE_SOURCE_REL);
-  const dest = path.join(repoRoot, BUNDLE_DEST_REL);
+export function ensureBundleBuilt(
+  repoRoot: string,
+  sourceRel: string,
+  destRel: string,
+  commitHash?: string,
+): boolean {
+  if (bundlesBuilt.has(destRel)) return true;
+  const source = path.join(repoRoot, sourceRel);
+  const dest = path.join(repoRoot, destRel);
   const result = spawnSync(
     "bun",
     ["build", "--target=bun", source, "--outfile", dest],
@@ -96,7 +108,7 @@ function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
   );
   if (result.status !== 0) {
     process.stderr.write(
-      `[claude-net] mirror-agent bundle build failed: ${result.stderr ?? result.stdout}\n`,
+      `[claude-net] ${destRel} bundle build failed: ${result.stderr ?? result.stdout}\n`,
     );
     return false;
   }
@@ -104,7 +116,7 @@ function ensureBundleBuilt(repoRoot: string, commitHash?: string): boolean {
     const bundle = readFileSync(dest, "utf8");
     writeFileSync(dest, substituteBuildHash(bundle, commitHash));
   }
-  bundleBuilt = true;
+  bundlesBuilt.add(destRel);
   return true;
 }
 
@@ -154,7 +166,14 @@ export function binServerPlugin(deps: BinServerDeps): Elysia {
 
         // Lazy-build the JS bundle on first request.
         if (params.name === "mirror-agent.bundle.js") {
-          if (!ensureBundleBuilt(repoRoot, commitHash)) {
+          if (
+            !ensureBundleBuilt(
+              repoRoot,
+              BUNDLE_SOURCE_REL,
+              BUNDLE_DEST_REL,
+              commitHash,
+            )
+          ) {
             set.status = 500;
             return "bundle build failed; see hub logs";
           }

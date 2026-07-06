@@ -220,6 +220,17 @@
        style recalc across hundreds of sibling rows. */
     contain: layout style paint;
   }
+  /* Native row-level virtualization: skip layout/style/paint for rows
+     scrolled out of view. Gated behind .is-virtualized on the parent
+     so it can be enabled only AFTER initial replay has scrolled to
+     the user's intended position — content-visibility makes
+     scrollHeight an estimate, and "scroll to end" is unreliable when
+     the estimate is wrong (especially on mobile). The transcript JS
+     adds .is-virtualized once the position has settled. */
+  .mirror-transcript.is-virtualized .m-evt {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 80px;
+  }
 
   /* Timestamp lives in the left gutter. Populated by JS via data-ts
      (see renderEvent). Gutter is 98px wide so `HH:MM:SS am` fits on
@@ -299,26 +310,30 @@
      mark "this is the parent steering or hearing back from a child",
      and the body is wrapped in a <details> so the long subagent prompt
      never dominates the feed. ── */
-  .m-evt-subagent {
+  .m-evt-subagent,
+  .m-evt-tasknotif {
     padding-left: 128px;
     padding-right: 24px;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
   }
-  .m-evt-subagent > details {
+  .m-evt-subagent > details,
+  .m-evt-tasknotif > details {
     max-width: min(72ch, 100%);
     background: var(--bg-subtle, rgba(255,255,255,0.02));
     border-left: 3px solid var(--gold);
     padding: 8px 12px;
   }
-  .m-evt-subagent > details > summary {
+  .m-evt-subagent > details > summary,
+  .m-evt-tasknotif > details > summary {
     cursor: pointer;
     color: var(--gold);
     font-family: var(--mono);
     font-size: 0.9em;
   }
-  .m-evt-subagent > details > .m-subagent-body {
+  .m-evt-subagent > details > .m-subagent-body,
+  .m-evt-tasknotif > details > .m-subagent-body {
     margin-top: 6px;
     color: var(--text);
   }
@@ -339,6 +354,27 @@
   .m-evt-subagent-tool .m-tool-headline .m-tool-name {
     font-size: 9px;
     min-width: 50px;
+  }
+
+  /* Task notifications share the subagent disclosure layout above, just
+     tinted with the info accent instead of gold. Only the tint + two
+     caption styles are bespoke — the rest is the single source of truth
+     for collapsible transcript rows. */
+  .m-evt-tasknotif > details { border-left-color: var(--text-accent); }
+  .m-evt-tasknotif > details > summary { color: var(--text-accent); }
+  .m-evt-tasknotif .m-label { color: var(--text-accent); }
+  .m-evt-tasknotif-history { opacity: 0.78; }
+  .m-tn-note {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 11px;
+  }
+  .m-tn-meta {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 10px;
+    word-break: break-all;
   }
 
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
@@ -745,7 +781,8 @@
     color: var(--text-accent);
   }
   .m-q-action.primary:hover { background: var(--accent); color: var(--on-accent); }
-  .m-q-action .m-q-action-desc {
+  .m-q-action .m-q-action-desc,
+  .m-q-opt-text .m-q-action-desc {
     display: block;
     font-size: 10px;
     color: var(--text-muted);
@@ -755,12 +792,103 @@
     text-transform: none;
     font-family: var(--font-sans);
   }
+
+  /* ── AskUserQuestion interactive form ── */
+  .m-q-block { margin-top: 14px; }
+  .m-q-block + .m-q-block {
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+  .m-q-header {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 9px; font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1.2px;
+    margin-right: 8px;
+  }
+  .m-q-opts { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .m-q-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: border-color 0.1s, background 0.1s;
+  }
+  .m-q-opt:hover { border-color: var(--text-accent); }
+  .m-q-opt input[type="radio"] { margin-top: 2px; flex: 0 0 auto; accent-color: var(--gold); }
+  .m-q-opt-text {
+    font-size: 12px; line-height: 1.4; color: var(--text);
+    font-family: var(--font-mono); letter-spacing: 0.3px;
+  }
+  .m-q-text {
+    margin-top: 6px;
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .m-q-text:focus { outline: none; border-color: var(--text-accent); }
+  .m-q-text:disabled { opacity: 0.4; }
+  .m-q-action:disabled { opacity: 0.45; cursor: not-allowed; }
+  .m-q-err {
+    align-self: center;
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--text-accent);
+  }
+  .m-q-err:empty { display: none; }
+  .m-evt-question.answered .m-q-opt { border-color: var(--border); }
   .m-q-answer {
     margin-top: 12px;
     font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.5px;
     color: var(--text-muted);
+  }
+  .m-q-opt input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; accent-color: var(--gold); }
+  .m-q-note {
+    margin-top: 6px;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 48px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .m-q-note:focus { outline: none; border-color: var(--text-accent); }
+  .m-q-note:disabled { opacity: 0.4; }
+  .m-q-note-wrap { margin-top: 10px; }
+  .m-q-note-label {
+    display: block;
+    font-family: var(--font-mono); font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  /* Option previews render inline under their option, with a capped height
+     so a tall preview scrolls rather than dominating the card. */
+  .m-q-preview {
+    margin: 4px 0 2px 26px;
+    background: var(--bg);
+    border-left: 2px solid var(--accent);
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-dim);
+    white-space: pre;
+    overflow: auto;
+    max-height: 320px;
   }
 
   /* ── AskUserQuestion (multi-question) cards ──────────────────────
@@ -2434,7 +2562,7 @@
   }
   #mirror-conn.is-live { color: var(--text-accent); animation: live-pulse 1.4s ease-in-out infinite; }
   #mirror-conn.is-warn { color: var(--gold); }
-  #mirror-conn.is-error { color: var(--text-accent); }
+  #mirror-conn.is-error { color: var(--red); }
 
   /* Live statusline snapshot from the mirror-agent: context bar.
      Sits to the left of the spacer (i.e., left of the Tasks/Stop
@@ -5474,166 +5602,241 @@
       return card;
     }
 
-    /**
-     * Render the AskUserQuestion card.
-     *
-     * Each question becomes a vertical section with radio-style
-     * option buttons plus a "type your own" textarea (Claude Code's
-     * built-in "Type something." modal slot). Per-question state is
-     * tracked locally; nothing is sent to the agent until the user
-     * hits Submit at the bottom.
-     *
-     * On Submit we POST a key sequence to /:sid/keys that walks
-     * Claude Code's terminal modal: for each question we press
-     * Down N times to land on the chosen option then Enter to
-     * advance to the next tab; for free-text we navigate to the
-     * "Type something." slot (always one past the supplied options
-     * in CC's modal), Enter to open the text input, then literal
-     * text + Enter. A final Enter accepts the default "Submit
-     * answers" choice on the review tab.
-     *
-     * Cancel sends Escape to abort the modal.
-     */
-    function renderQuestionAskUserQuestion(evt, payload) {
-      var card = document.createElement('div');
-      card.className = 'm-evt m-evt-question m-evt-aq';
-      card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
-      var qs = (payload.input && payload.input.questions) || [];
-      // answers[i] is { kind: 'option', index: number } or
-      //              { kind: 'text', value: string }
-      var answers = new Array(qs.length).fill(null);
-
-      var bannerEl = document.createElement('span');
-      bannerEl.className = 'm-q-banner';
-      bannerEl.textContent = 'awaiting answer · ' + qs.length + (qs.length === 1 ? ' question' : ' questions');
-      card.appendChild(bannerEl);
-
-      function updateSubmitEnabled() {
-        for (var i = 0; i < answers.length; i++) {
-          if (answers[i] === null) {
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Submit (' + (answers.length - countAnswered()) + ' unanswered)';
-            return;
+    // AskUserQuestion renders as an interactive form, NOT a row of
+    // auto-injecting buttons. The user picks a radio (or types a custom
+    // answer) per question and can freely re-pick; nothing reaches the
+    // remote session until the explicit Submit. On submit we POST the
+    // whole answer set to /answer, which the mirror-agent replays into
+    // the TUI as one keystroke choreography.
+    //
+    // Note: multiSelect questions render as single-select (radio) for
+    // now — the agent's keystroke path only supports one answer per
+    // question. multiSelect is rare for AskUserQuestion.
+    // Build the question blocks HTML shared by the inline card and the
+    // expanded modal. `base` namespaces input ids/names so the two copies
+    // (which can both be in the DOM at once) don't share radio groups.
+    // multiSelect → checkboxes; single-select → radios plus a "Type your
+    // own" free-text row; preview single-select questions also expose a
+    // note row (the TUI's `n to add notes`, mutually exclusive with a
+    // selection). Option previews render as monospace blocks (hidden inline
+    // via CSS, shown in the modal).
+    function buildAuqBlocks(qs, base) {
+      var html = '';
+      for (var i = 0; i < qs.length; i++) {
+        var q = qs[i] || {};
+        var opts = q.options || [];
+        var multi = !!q.multiSelect;
+        var hasPreview = false;
+        for (var p = 0; p < opts.length; p++) {
+          if (opts[p] && opts[p].preview) { hasPreview = true; break; }
+        }
+        // Notes are a single-select preview affordance only.
+        var notesCap = !multi && hasPreview;
+        var grp = base + i;
+        var inputType = multi ? 'checkbox' : 'radio';
+        html += '<div class="m-q-block" data-qi="' + i + '" data-optcount="' + opts.length +
+          '" data-multi="' + (multi ? '1' : '0') + '" data-notes="' + (notesCap ? '1' : '0') + '">';
+        var hdr = q.header ? '<span class="m-q-header">' + escapeHtml(q.header) + '</span>' : '';
+        html += '<div class="m-q-body">' + hdr + '<strong>' + escapeHtml(q.question || '') + '</strong></div>';
+        html += '<div class="m-q-opts">';
+        for (var j = 0; j < opts.length; j++) {
+          var o = opts[j] || {};
+          var rid = grp + '-' + j;
+          html += '<label class="m-q-opt" for="' + rid + '">' +
+            '<input type="' + inputType + '" id="' + rid + '" name="' + grp + '" value="' + j + '" data-kind="option">' +
+            '<span class="m-q-opt-text">' + escapeHtml(o.label || '') +
+            (o.description ? '<span class="m-q-action-desc">' + escapeHtml(o.description) + '</span>' : '') +
+            '</span></label>';
+          if (o.preview) {
+            html += '<pre class="m-q-preview">' + escapeHtml(o.preview) + '</pre>';
           }
         }
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Submit answers';
+        if (!multi) {
+          var oid = grp + '-other';
+          html += '<label class="m-q-opt m-q-opt-other" for="' + oid + '">' +
+            '<input type="radio" id="' + oid + '" name="' + grp + '" value="other" data-kind="text">' +
+            '<span class="m-q-opt-text">Type your own answer…</span></label>';
+          html += '<input type="text" class="m-q-text" data-qi="' + i + '" placeholder="Your answer" disabled>';
+        }
+        if (notesCap) {
+          // Standalone optional note — additive, not an option. Submits as
+          // option+note when an option is also picked, or notes-only alone.
+          html += '<div class="m-q-note-wrap"><span class="m-q-note-label">Note (optional)</span>' +
+            '<textarea class="m-q-note" data-qi="' + i + '" placeholder="Add a note for your answer…"></textarea></div>';
+        }
+        html += '</div></div>';
       }
-      function countAnswered() {
-        var n = 0;
-        for (var i = 0; i < answers.length; i++) if (answers[i] !== null) n++;
-        return n;
-      }
+      return html;
+    }
 
-      for (var qi = 0; qi < qs.length; qi++) {
-        (function (i, q) {
-          var section = document.createElement('div');
-          section.className = 'm-aq-q';
-          var header = document.createElement('div');
-          header.className = 'm-aq-q-head';
-          header.textContent = (qs.length > 1 ? 'Question ' + (i + 1) + '. ' : '') + (q.question || '');
-          section.appendChild(header);
-
-          var optsList = document.createElement('div');
-          optsList.className = 'm-aq-opts';
-          var opts = q.options || [];
-          var optionButtons = [];
-          for (var j = 0; j < opts.length; j++) {
-            (function (jj, o) {
-              var btn = document.createElement('button');
-              btn.type = 'button';
-              btn.className = 'm-aq-opt';
-              var label = document.createElement('div');
-              label.className = 'm-aq-opt-label';
-              label.textContent = o.label || '';
-              btn.appendChild(label);
-              if (o.description) {
-                var desc = document.createElement('div');
-                desc.className = 'm-aq-opt-desc';
-                desc.textContent = o.description;
-                btn.appendChild(desc);
-              }
-              btn.addEventListener('click', function () {
-                answers[i] = { kind: 'option', index: jj };
-                for (var k = 0; k < optionButtons.length; k++) {
-                  optionButtons[k].classList.toggle('selected', k === jj);
-                }
-                textWrap.classList.remove('selected');
-                textArea.value = '';
-                updateSubmitEnabled();
-              });
-              optionButtons.push(btn);
-              optsList.appendChild(btn);
-            })(j, opts[j]);
-          }
-          section.appendChild(optsList);
-
-          // "Type your own" — mirrors Claude Code's "Type something." modal
-          // slot. Selecting it deselects the option buttons; typing updates
-          // the answer in place.
-          var textWrap = document.createElement('div');
-          textWrap.className = 'm-aq-text';
-          var textHeader = document.createElement('div');
-          textHeader.className = 'm-aq-text-head';
-          textHeader.textContent = 'Or type your own answer:';
-          textWrap.appendChild(textHeader);
-          var textArea = document.createElement('textarea');
-          textArea.className = 'm-aq-text-area';
-          textArea.rows = 2;
-          textArea.placeholder = 'Type something…';
-          textArea.addEventListener('input', function () {
-            var v = textArea.value;
-            if (v.length === 0) {
-              if (answers[i] && answers[i].kind === 'text') {
-                answers[i] = null;
-                textWrap.classList.remove('selected');
-              }
-            } else {
-              answers[i] = { kind: 'text', value: v };
-              for (var k = 0; k < optionButtons.length; k++) {
-                optionButtons[k].classList.remove('selected');
-              }
-              textWrap.classList.add('selected');
-            }
-            updateSubmitEnabled();
-          });
-          textWrap.appendChild(textArea);
-          section.appendChild(textWrap);
-
-          card.appendChild(section);
-        })(qi, qs[qi]);
-      }
-
-      var actions = document.createElement('div');
-      actions.className = 'm-aq-actions';
-      var submitBtn = document.createElement('button');
-      submitBtn.type = 'button';
-      submitBtn.className = 'm-q-action primary';
-      var cancelBtn = document.createElement('button');
-      cancelBtn.type = 'button';
-      cancelBtn.className = 'm-q-action';
-      cancelBtn.textContent = 'Cancel (Esc)';
-      submitBtn.addEventListener('click', function () {
-        submitBtn.disabled = true;
-        submitAskUserQuestion(qs, answers).catch(function () {
-          // Re-enable for a retry; submitAskUserQuestion shows the
-          // error inline via the existing compose-error surface.
-          submitBtn.disabled = false;
-          updateSubmitEnabled();
-        });
-      });
-      cancelBtn.addEventListener('click', function () {
-        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop' + hostQueryFirst, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ watcher: 'web-aq-cancel' }),
-        }).catch(function () {});
-      });
-      actions.appendChild(submitBtn);
-      actions.appendChild(cancelBtn);
-      card.appendChild(actions);
-      updateSubmitEnabled();
+    function renderQuestionAskUserQuestion(evt, payload) {
+      var card = document.createElement('div');
+      card.className = 'm-evt m-evt-question m-evt-auq';
+      card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+      var qs = (payload.input && payload.input.questions) || [];
+      var base = 'auq-' + (payload.tool_use_id || Math.random().toString(36).slice(2)) + '-';
+      var banner = document.createElement('span');
+      banner.className = 'm-q-banner';
+      banner.textContent = 'awaiting answer';
+      card.appendChild(banner);
+      var wrap = document.createElement('div');
+      wrap.className = 'm-q-body-wrap';
+      var actions = '<div class="m-q-actions">' +
+        '<button type="button" class="m-q-action primary m-q-submit" disabled>Submit answers</button>' +
+        '<span class="m-q-err"></span></div>';
+      wrap.innerHTML = buildAuqBlocks(qs, base) + actions;
+      card.appendChild(wrap);
+      wireAuqForm(card);
       return card;
+    }
+
+    // Resolve a form root (inline card or modal) into one answer item per
+    // question, in order, or null if any question is incomplete. Shapes:
+    //   multiSelect → {multi:true, digits:[rows]}
+    //   free-text   → {digit: optcount+1, text}
+    //   note        → {note}
+    //   option      → {digit: row}
+    // (digit is 1-based; the free-text "Type something" row is optcount+1.)
+    function auqCollect(root) {
+      var blocks = root.querySelectorAll('.m-q-block');
+      if (!blocks.length) return null;
+      var answers = [];
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i];
+        var optcount = parseInt(b.getAttribute('data-optcount'), 10) || 0;
+        if (b.getAttribute('data-multi') === '1') {
+          var checked = b.querySelectorAll('input[type="checkbox"][data-kind="option"]:checked');
+          if (!checked.length) return null;
+          var digits = [];
+          for (var c = 0; c < checked.length; c++) {
+            var jj = parseInt(checked[c].value, 10);
+            if (!isNaN(jj)) digits.push(jj + 1);
+          }
+          if (!digits.length) return null;
+          answers.push({ multi: true, digits: digits });
+          continue;
+        }
+        // Standalone optional note (preview questions only).
+        var ntEl = b.querySelector('.m-q-note');
+        var note = ntEl ? ntEl.value.trim() : '';
+        var sel = b.querySelector('input[type="radio"]:checked');
+        if (!sel) {
+          // No option chosen — a note alone is a valid (notes-only) answer.
+          if (note) { answers.push({ note: note }); continue; }
+          return null;
+        }
+        var kind = sel.getAttribute('data-kind');
+        var item;
+        if (kind === 'text') {
+          var t = b.querySelector('.m-q-text');
+          var val = t ? t.value.trim() : '';
+          if (!val) return null;
+          item = { digit: optcount + 1, text: val };
+        } else {
+          var j = parseInt(sel.value, 10);
+          if (isNaN(j)) return null;
+          item = { digit: j + 1 };
+        }
+        if (note) item.note = note;
+        answers.push(item);
+      }
+      return answers;
+    }
+
+    function auqIsComplete(root) { return auqCollect(root) !== null; }
+
+    function auqSetDisabled(root, disabled) {
+      var inputs = root.querySelectorAll('input[type="radio"],input[type="checkbox"]');
+      for (var i = 0; i < inputs.length; i++) inputs[i].disabled = disabled;
+      // The note textarea is always editable; the free-text input is gated
+      // by its radio. While submitting (disabled=true) lock everything.
+      var notes = root.querySelectorAll('.m-q-note');
+      for (var n = 0; n < notes.length; n++) notes[n].disabled = disabled;
+      var texts = root.querySelectorAll('.m-q-text');
+      for (var k = 0; k < texts.length; k++) {
+        if (disabled) { texts[k].disabled = true; continue; }
+        var b = texts[k].closest('.m-q-block');
+        var sel = b ? b.querySelector('input[type="radio"]:checked') : null;
+        texts[k].disabled = !(sel && sel.getAttribute('data-kind') === 'text');
+      }
+    }
+
+    function wireAuqForm(root, opts) {
+      opts = opts || {};
+      var submit = root.querySelector('.m-q-submit');
+      var errEl = root.querySelector('.m-q-err');
+      function recompute() { if (submit) submit.disabled = !auqIsComplete(root); }
+      // Radios drive their block's free-text input enabled state.
+      var radios = root.querySelectorAll('input[type="radio"]');
+      for (var i = 0; i < radios.length; i++) {
+        radios[i].addEventListener('change', function(e) {
+          var r = e.currentTarget;
+          var block = r.closest('.m-q-block');
+          var tx = block ? block.querySelector('.m-q-text') : null;
+          if (tx) {
+            tx.disabled = r.getAttribute('data-kind') !== 'text';
+            if (!tx.disabled) tx.focus();
+          }
+          recompute();
+        });
+      }
+      var checks = root.querySelectorAll('input[type="checkbox"]');
+      for (var c = 0; c < checks.length; c++) checks[c].addEventListener('change', recompute);
+      var fields = root.querySelectorAll('.m-q-text,.m-q-note');
+      for (var k = 0; k < fields.length; k++) {
+        fields[k].addEventListener('input', recompute);
+        fields[k].addEventListener('keydown', function(e) {
+          // Enter submits from the single-line free-text input; the note
+          // textarea keeps Enter for newlines.
+          if (e.key === 'Enter' && !e.shiftKey &&
+              e.currentTarget.classList.contains('m-q-text')) {
+            e.preventDefault();
+            if (submit && !submit.disabled) submit.click();
+          }
+        });
+      }
+      if (submit) {
+        submit.addEventListener('click', function() {
+          var answers = auqCollect(root);
+          if (!answers) {
+            if (errEl) errEl.textContent = 'Answer every question first.';
+            return;
+          }
+          sendAnswer(root, answers, submit, errEl, opts.onSuccess);
+        });
+      }
+    }
+
+    function sendAnswer(root, answers, submit, errEl, onSuccess) {
+      if (submit) submit.disabled = true;
+      if (errEl) errEl.textContent = '';
+      var banner = root.querySelector('.m-q-banner');
+      if (banner) banner.textContent = 'submitting…';
+      auqSetDisabled(root, true);
+      function revert(msg) {
+        if (banner) banner.textContent = 'awaiting answer';
+        auqSetDisabled(root, false);
+        if (submit) submit.disabled = !auqIsComplete(root);
+        if (errEl) errEl.textContent = msg;
+      }
+      fetch('/api/mirror/' + encodeURIComponent(sid) + '/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: answers, watcher: 'web-question' })
+      })
+        .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+        .then(function(r) {
+          if (r.status >= 400) {
+            revert((r.body && r.body.error) || ('HTTP ' + r.status));
+            return;
+          }
+          // On success, leave the form disabled — the AskUserQuestion
+          // tool_result will arrive and flip the inline card to "answered".
+          if (typeof onSuccess === 'function') onSuccess();
+        })
+        .catch(function(err) {
+          revert('Send failed: ' + (err && err.message ? err.message : err));
+        });
     }
 
     // Bridge to the extracted helper so the key-sequence logic is
@@ -5679,6 +5882,10 @@
       if (banner) banner.textContent = 'answered';
       var actions = cardEl.querySelector('.m-q-actions');
       if (actions) actions.remove();
+      // Lock any remaining form inputs (AskUserQuestion); harmless for
+      // plan cards, which have none.
+      var inputs = cardEl.querySelectorAll('input');
+      for (var ii = 0; ii < inputs.length; ii++) inputs[ii].disabled = true;
       var resp = typeof payload.response === 'string' ? payload.response : tryJson(payload.response);
       if (resp) {
         var a = document.createElement('div');
@@ -5790,12 +5997,93 @@
       return tpl.innerHTML;
     }
 
+    // ── Task-notification cards ──────────────────────────────────────
+    // The Claude Code harness injects <task-notification> blocks as
+    // user-turn content when a background task comes to rest. They arrive
+    // through the user paths (live user_prompt + history_text role=user)
+    // and would otherwise render as a raw <pre> that looks like the human
+    // typed it. Detect them and render a collapsed disclosure box instead:
+    // a header from the XML metadata, with the markdown <result> tucked
+    // inside.
+
+    // Pull the inner text of the first <tag>…</tag> from src. Non-greedy,
+    // dot-all (via [\s\S]) so multi-line bodies like <result> are captured.
+    function taskNotifTag(src, tag) {
+      var m = src.match(new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>'));
+      return m ? m[1].trim() : '';
+    }
+
+    // Returns a parsed struct when text contains a <task-notification>
+    // block, else null. Robust to missing tags — only <result> carries
+    // markdown; everything else is metadata.
+    function parseTaskNotification(text) {
+      if (!text || text.indexOf('<task-notification>') === -1) return null;
+      return {
+        status: taskNotifTag(text, 'status'),
+        summary: taskNotifTag(text, 'summary'),
+        note: taskNotifTag(text, 'note'),
+        result: taskNotifTag(text, 'result'),
+        taskId: taskNotifTag(text, 'task-id'),
+        toolUseId: taskNotifTag(text, 'tool-use-id'),
+        outputFile: taskNotifTag(text, 'output-file'),
+        raw: text
+      };
+    }
+
+    function taskNotifGlyph(status) {
+      var s = (status || '').toLowerCase();
+      if (s === 'completed') return '✅';
+      if (s.indexOf('error') !== -1 || s.indexOf('fail') !== -1) return '⚠️';
+      if (s === 'running' || s === 'in_progress') return '⏳';
+      return '🔔';
+    }
+
+    // Reuses the subagent card layout (.m-evt row + meta line + <details>
+    // + .m-subagent-body) so the disclosure styling lives in one place.
+    // Timestamp comes free from the gutter via data-ts on the row.
+    function buildTaskNotifEl(fields, opts) {
+      opts = opts || {};
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-tasknotif' + (opts.history ? ' m-evt-tasknotif-history' : '');
+      var summary = taskNotifGlyph(fields.status) + ' ' +
+        (fields.summary || 'task notification') +
+        (fields.status ? ' (' + fields.status + ')' : '');
+      var body = fields.result
+        ? '<div class="m-subagent-body md-body">' + renderMarkdown(fields.result) + '</div>'
+        : '<pre class="m-subagent-body">' + escapeHtml(fields.raw || '') + '</pre>';
+      if (fields.note) {
+        body += '<div class="m-tn-note">' + escapeHtml(fields.note) + '</div>';
+      }
+      var meta = [];
+      if (fields.taskId) meta.push('task ' + fields.taskId);
+      if (fields.outputFile) meta.push(fields.outputFile);
+      if (meta.length) {
+        body += '<div class="m-tn-meta">' + escapeHtml(meta.join(' · ')) + '</div>';
+      }
+      el.innerHTML =
+        '<div class="m-evt-meta"><span class="m-label">task</span></div>' +
+        '<details><summary>' + escapeHtml(summary) + '</summary>' + body + '</details>';
+      return el;
+    }
+
     // ── Main renderEvent ─────────────────────────────────────────────
 
     function buildHistoryEl(evt) {
       var payload = evt.payload || {};
       var ts = formatTime(new Date(evt.ts).toISOString());
       var role = payload.role || 'system';
+      // History-backfilled task notifications get the same disclosure
+      // treatment as their live counterparts (just dimmed via the
+      // -history modifier), rather than a raw user <pre>.
+      if (role === 'user') {
+        var tn = parseTaskNotification(payload.text || '');
+        if (tn) {
+          var tnEl = buildTaskNotifEl(tn, { history: true });
+          tnEl.setAttribute('data-uuid', evt.uuid);
+          tnEl.setAttribute('data-ts', ts);
+          return tnEl;
+        }
+      }
       var el = document.createElement('div');
       el.className = 'm-evt m-evt-history m-evt-history-' + role;
       el.setAttribute('data-uuid', evt.uuid);
@@ -5821,6 +6109,18 @@
       var ts = formatTime(new Date(evt.ts).toISOString());
 
       if (kind === 'user_prompt') {
+        // Harness-injected task notifications come in on the user turn but
+        // aren't the human typing — render them as a collapsed disclosure
+        // box instead of a "user" message.
+        var tnLive = parseTaskNotification(payload.prompt || '');
+        if (tnLive) {
+          el = buildTaskNotifEl(tnLive, {});
+          el.setAttribute('data-ts', ts);
+          el.setAttribute('data-uuid', evt.uuid);
+          transcriptEl.appendChild(el);
+          scrollToBottom();
+          return;
+        }
         el = document.createElement('div');
         var isSubagentPrompt = inSubagent() || postSubagentCover;
         postSubagentCover = false; // consume on every user_prompt regardless of branch
@@ -6045,6 +6345,21 @@
         el.setAttribute('data-ts', ts);
       }
       if (el) el.setAttribute('data-uuid', evt.uuid);
+
+      // A scraped AskUserQuestion preamble carries before_tool_use_id: it
+      // arrives after its question card (the transcript text only flushes
+      // once the modal resolves) but should read ABOVE it. Insert directly
+      // before the matching card when present; otherwise fall through to a
+      // normal append.
+      if (payload.before_tool_use_id) {
+        var anchorCard = transcriptEl.querySelector(
+          '[data-tool-use-id="' + cssEscape(payload.before_tool_use_id) + '"]');
+        if (anchorCard) {
+          transcriptEl.insertBefore(el, anchorCard);
+          scrollToBottom();
+          return;
+        }
+      }
 
       transcriptEl.appendChild(el);
       scrollToBottom();
@@ -6314,12 +6629,11 @@
         return;
       }
       if (!text || !PROMPT_RE.test(text)) return;
-      // An AskUserQuestion card is already on screen — that's the
-      // authoritative interaction surface. Skip the banner; the
-      // augmented "1. Foo / 4. Type something / 5. Chat about this"
-      // text from the tmux scrape doesn't add information and
-      // double-renders the same modal.
-      if (transcriptEl.querySelector('.m-evt-aq:not(.answered)')) return;
+      // AskUserQuestion fires its own "waiting for input" Notification,
+      // but it already has a dedicated answer-form card. Don't also raise
+      // the generic permission banner for it — that's the bug where a
+      // selection prompt showed up as "Claude needs your permission".
+      if (document.querySelector('.m-evt-auq:not(.answered)')) return;
       showPromptBanner(text);
     }
     function onAssistantReply() {
@@ -6378,6 +6692,11 @@
       firstRenderedTs = null;
       historyDivider = null;
       updateHistoryBtn();
+      // Turn virtualization OFF during initial replay so scrollHeight
+      // is accurate (content-visibility's estimated heights make
+      // "scroll to end" land on the wrong place — especially on
+      // mobile). Re-enabled below once the viewport has settled.
+      transcriptEl.classList.remove('is-virtualized');
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       activeSubagents = Object.create(null);
@@ -6435,6 +6754,13 @@
         scrollToBottom();
         startTailObserver();
       }
+      // Re-enable virtualization once the initial scroll has stuck.
+      // 800ms is generous enough for the rAF snap loop above (≤4
+      // frames) plus mobile paint settling, well under typical
+      // session-switch reaction time.
+      setTimeout(function() {
+        transcriptEl.classList.add('is-virtualized');
+      }, 800);
     }
 
     var mws = null;

@@ -3,9 +3,11 @@ dist
 .env
 *.log
 bin/__pycache__/
-# Build artifact — the hub builds this lazily on first /bin/mirror-agent.bundle.js
-# request, and the Dockerfile pre-builds it at image time.
+# Build artifacts — the hub builds these lazily on first request
+# (/bin/mirror-agent.bundle.js, /plugin.ts), and the Dockerfile pre-builds
+# them at image time.
 bin/mirror-agent.bundle.js
+bin/plugin.bundle.js
 .claude/screens/
 .claude/scheduled_tasks.lock
 .playwright-mcp/

@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import type {
   DashboardEvent,
   MirrorActivityState,
+  MirrorAnswerFrame,
+  MirrorAnswerItem,
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
   MirrorEventPayload,
@@ -145,8 +147,15 @@ export function nextActivityState(
     case "compact":
       return "busy";
     case "assistant_message":
-      // SubagentStop preserves prev state — parent is still working.
-      if (payload.kind === "assistant_message" && payload.subagent === true) {
+      // SubagentStop preserves prev state — parent is still working. A
+      // scraped AskUserQuestion preamble (before_tool_use_id) is mid-turn
+      // text, not a turn end, so it likewise leaves the state untouched —
+      // the open modal keeps the session busy until its tool_result.
+      if (
+        payload.kind === "assistant_message" &&
+        (payload.subagent === true ||
+          typeof payload.before_tool_use_id === "string")
+      ) {
         return prev;
       }
       return "awaiting_input";
@@ -1160,6 +1169,44 @@ export class MirrorRegistry {
     return { ok: true };
   }
 
+  /** Relay an AskUserQuestion answer set to the session's agent, which
+   *  drives the modal via tmux keystrokes. Fire and forget — the
+   *  eventual tool_result confirms the answer landed. */
+  relayAnswer(
+    sid: string,
+    answers: MirrorAnswerItem[],
+    watcher: string,
+    host?: string,
+  ): { ok: true } | { ok: false; error: string; status: number } {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const frame: MirrorAnswerFrame = {
+      event: "mirror_answer",
+      sid,
+      answers,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true };
+  }
+
   /**
    * Stash a blob too large for tmux inject as a file on the agent's host.
    * Sends a MirrorPasteFrame and awaits the agent's MirrorPasteDoneFrame
@@ -1488,9 +1535,9 @@ export class MirrorRegistry {
     });
   }
 
-  /** Forward a live statusline snapshot (context usage) to the
-   *  session's watchers. Purely ephemeral — not stored in the
-   *  transcript or fanned out to every dashboard, just the
+  /** Forward a live statusline snapshot (context usage + 5h rate
+   *  limit) to the session's watchers. Purely ephemeral — not stored
+   *  in the transcript or fanned out to every dashboard, just the
    *  dashboards currently watching this session. */
   broadcastStatusline(
     sid: string,
@@ -1498,6 +1545,8 @@ export class MirrorRegistry {
       ctx_pct: number;
       ctx_tokens: number;
       ctx_window: number;
+      rl_pct?: number | null;
+      rl_resets_at?: number | null;
       ts: number;
     },
   ): void {
@@ -1517,6 +1566,10 @@ export class MirrorRegistry {
       ctx_pct: payload.ctx_pct,
       ctx_tokens: payload.ctx_tokens,
       ctx_window: payload.ctx_window,
+      ...(payload.rl_pct !== undefined ? { rl_pct: payload.rl_pct } : {}),
+      ...(payload.rl_resets_at !== undefined
+        ? { rl_resets_at: payload.rl_resets_at }
+        : {}),
       ts: payload.ts,
     });
     for (const w of entry.watchers) {
@@ -2092,6 +2145,59 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
       })
 
       /**
+       * POST /:sid/answer — answer the session's open AskUserQuestion
+       * modal. Body: { answers: [item, …], watcher? }, one entry per
+       * question in order, where item is one of { digit, text? } |
+       * { multi: true, digits } | { note } (see MirrorAnswerItem). The
+       * agent drives the TUI by tmux keystrokes. Fire-and-forget; the
+       * eventual tool_result confirms.
+       */
+      .post("/:sid/answer", ({ params, body, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const payload = body as { answers?: unknown; watcher?: string };
+        const answers = normalizeAnswerItems(payload.answers);
+        if (answers.length === 0) {
+          set.status = 400;
+          return {
+            error:
+              "No valid answers — each needs a digit 1-9, a non-empty note, or multiSelect digits.",
+          };
+        }
+        if (!injectBurstLimiter.allow(params.sid)) {
+          set.status = 429;
+          set.headers["retry-after"] = "1";
+          return { error: "Rate limit: bursts under 250ms rejected." };
+        }
+        if (!injectMinuteLimiter.allow(params.sid)) {
+          const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return { error: `Rate limit: ${INJECT_RPM} injects per minute.` };
+        }
+        const watcher = sanitizeWatcher(
+          payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayAnswer(
+          params.sid,
+          answers,
+          watcher,
+          host,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true };
+      })
+
+      /**
        * GET /:sid/commands — list slash commands available to this
        * session's Claude Code (built-ins + user/project/plugin commands
        * on the agent's host). The response is agent-scoped and can leak
@@ -2204,6 +2310,59 @@ const sessionCreateLimiter = new RateLimiter({
  *  tests don't pollute each other's budget. Not part of the public API. */
 export function _resetSessionCreateLimiterForTest(): void {
   sessionCreateLimiter.reset();
+}
+
+/**
+ * Validate an AskUserQuestion answer body into MirrorAnswerItem[] — one
+ * item per question. Accepts three shapes (see MirrorAnswerItem):
+ *   - note-only: `{ note }` (non-empty)
+ *   - multiSelect: `{ multi: true, digits }` — digits filtered to 1-9
+ *   - single-select: `{ digit }` or `{ digit, text }` (free text)
+ * TUI rows are selected by single keypress, so rows beyond 9 are dropped.
+ * Invalid items are dropped. Capped at 20 questions. Mirrors
+ * `parseAnswerItems` in the mirror-agent (both validate independently).
+ */
+function normalizeAnswerItems(raw: unknown): MirrorAnswerItem[] {
+  if (!Array.isArray(raw)) return [];
+  const isRow = (d: unknown): d is number =>
+    typeof d === "number" && Number.isInteger(d) && d >= 1 && d <= 9;
+  const out: MirrorAnswerItem[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const item = r as {
+      digit?: unknown;
+      digits?: unknown;
+      text?: unknown;
+      multi?: unknown;
+      note?: unknown;
+    };
+    const text = typeof item.text === "string" ? item.text : undefined;
+    const note =
+      typeof item.note === "string" && item.note.trim().length > 0
+        ? item.note
+        : undefined;
+
+    if (item.multi === true || Array.isArray(item.digits)) {
+      const digits = Array.isArray(item.digits)
+        ? item.digits.filter(isRow)
+        : [];
+      if (digits.length === 0 && !text?.trim()) continue;
+      out.push({ multi: true, digits, ...(text?.trim() ? { text } : {}) });
+    } else if (isRow(item.digit)) {
+      if (text !== undefined && text.trim().length === 0) continue;
+      out.push({
+        digit: item.digit,
+        ...(text !== undefined ? { text } : {}),
+        ...(note ? { note } : {}),
+      });
+    } else if (note) {
+      out.push({ note });
+    } else {
+      continue;
+    }
+    if (out.length >= 20) break;
+  }
+  return out;
 }
 
 function sanitizeWatcher(s: string): string {
@@ -2469,6 +2628,9 @@ export function wsMirrorPlugin(
             typeof frame.ctx_tokens === "number" ? frame.ctx_tokens : 0,
           ctx_window:
             typeof frame.ctx_window === "number" ? frame.ctx_window : 0,
+          rl_pct: typeof frame.rl_pct === "number" ? frame.rl_pct : null,
+          rl_resets_at:
+            typeof frame.rl_resets_at === "number" ? frame.rl_resets_at : null,
           ts: typeof frame.ts === "number" ? frame.ts : Date.now(),
         });
       }

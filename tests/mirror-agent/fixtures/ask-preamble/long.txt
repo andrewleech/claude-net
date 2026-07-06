@@ -1,0 +1,38 @@
+
+
+● I'll do that now.
+
+  Here are two options for you to pick from.
+
+● User declined to answer questions
+  ⎿  · Pick one (X / Y)
+
+❯ Write THREE paragraphs of plain prose (each at least 2 long sentences, ~60 words total) explaining what you are about to ask. Then in the SAME turn
+  call AskUserQuestion: header Mode, question "Which approach?", options Fast (desc "quick and dirty") and Safe (desc "slow and careful"). Nothing
+  after the tool call.
+
+● When you're weighing how to tackle a piece of work, the trade-off almost always comes down to how much time you're willing to spend up front versus
+  how much risk you're comfortable carrying forward. I want to surface that choice explicitly rather than guess at it, because the right answer depends
+  entirely on your appetite for speed against your appetite for caution.
+
+  The first path prioritizes getting something working as quickly as possible, accepting that there may be rough edges, shortcuts, or things we'll need
+  to revisit later once the immediate goal is met. This tends to suit throwaway experiments, time-pressured situations, or cases where learning fast
+  matters more than getting every detail polished and correct on the first attempt.
+
+  The second path moves more deliberately, taking the time to handle edge cases, verify assumptions, and build something that holds up under scrutiny
+  and continued use. It costs more up front in effort and patience, but it pays back in fewer surprises down the line, which is why I'd rather hear your
+  preference than assume it.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Mode
+
+Which approach?
+
+❯ 1. Fast
+     quick and dirty
+  2. Safe
+     slow and careful
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

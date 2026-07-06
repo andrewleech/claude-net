@@ -1,0 +1,38 @@
+  The first path prioritizes getting something working as quickly as possible, accepting that there may be rough edges, shortcuts, or things we'll need
+  to revisit later once the immediate goal is met. This tends to suit throwaway experiments, time-pressured situations, or cases where learning fast
+  matters more than getting every detail polished and correct on the first attempt.
+
+  The second path moves more deliberately, taking the time to handle edge cases, verify assumptions, and build something that holds up under scrutiny
+  and continued use. It costs more up front in effort and patience, but it pays back in fewer surprises down the line, which is why I'd rather hear your
+  preference than assume it.
+
+● User declined to answer questions
+  ⎿  · Which approach? (Fast / Safe)
+
+❯ Without writing ANY text at all before or after, immediately call AskUserQuestion: header Go, question "Ready?", options Yes (desc "go now") and No
+  (desc "wait"). The tool call must be the very first and only thing in your turn.
+
+● User declined to answer questions
+  ⎿  · Ready? (Yes / No)
+
+❯ Write a short preamble that USES markdown: one **bold** phrase, then a bulleted list of two items (using - ), then call AskUserQuestion in the same
+  turn: header Fmt, question "Which?", options A (desc "first") and B (desc "second"). Nothing after the call.
+
+● Here's what I'm deciding:
+
+  - A — the first option
+  - B — the second option
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Fmt
+
+Which?
+
+❯ 1. A
+     first
+  2. B
+     second
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

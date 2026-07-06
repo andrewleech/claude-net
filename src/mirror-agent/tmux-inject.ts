@@ -243,6 +243,45 @@ export class TmuxInjector {
     return { ok: true };
   }
 
+  /** Send a single named key (e.g. a digit "1", "Enter", "Down") to the
+   *  pane. Used to drive interactive modals like AskUserQuestion where
+   *  each keypress is a discrete navigation/selection step. Unlike
+   *  inject() there is no literal text, no Enter follow-up, and no
+   *  per-session rate limit — the answer choreography sends several keys
+   *  in quick succession as one user action. */
+  async sendKey(pane: string, key: string): Promise<InjectResult> {
+    const result = await runTmux(this.tmuxBin, ["send-keys", "-t", pane, key]);
+    if (!result.ok) {
+      return { ok: false, code: "tmux_failed", error: result.error };
+    }
+    return { ok: true };
+  }
+
+  /** Type literal text into the pane without a trailing Enter. Used for
+   *  the AskUserQuestion free-text ("Type something") row, where Enter
+   *  is sent separately to commit. */
+  async sendText(pane: string, text: string): Promise<InjectResult> {
+    if (Buffer.byteLength(text, "utf8") > MAX_PROMPT_BYTES) {
+      return {
+        ok: false,
+        code: "too_long",
+        error: `Text exceeds ${MAX_PROMPT_BYTES} bytes.`,
+      };
+    }
+    const result = await runTmux(this.tmuxBin, [
+      "send-keys",
+      "-t",
+      pane,
+      "-l",
+      "--",
+      text,
+    ]);
+    if (!result.ok) {
+      return { ok: false, code: "tmux_failed", error: result.error };
+    }
+    return { ok: true };
+  }
+
   /** Capture the visible pane content (most recent `lines` lines). Used
    *  post-inject to surface TUI-level rejections like "Unknown command:"
    *  that don't emit a hook event. */

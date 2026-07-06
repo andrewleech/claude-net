@@ -224,14 +224,88 @@ except Exception:
 " 2>/dev/null
 }
 
+resolve_hub_url() {
+    # Hub URL resolution:
+    #   1. CLAUDE_NET_HUB env var (explicit override)
+    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
+    #      (this is where the plugin already gets its URL, so the mirror-agent
+    #      ends up pointing at the same hub without extra configuration)
+    #   3. http://localhost:4815 as a last-ditch default — warned loudly,
+    #      because a daemon spawned against the wrong hub mirrors nothing
+    #      while still answering /health (this went unnoticed for two days).
+    # Echoes the URL with trailing slashes stripped so it compares exactly
+    # against the daemon's normalized value from /health.
+    local hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
+        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
+import json, os
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    for scope in [d.get('mcpServers', {}),
+                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
+        cfg = scope.get('claude-net')
+        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
+            print(cfg['env']['CLAUDE_NET_HUB'])
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+    if [ -z "$hub_url" ]; then
+        echo "[claude-net/mirror] WARNING: hub URL not found in CLAUDE_NET_HUB or ~/.claude.json — falling back to http://localhost:4815" >&2
+        hub_url="http://localhost:4815"
+    fi
+    while [ "${hub_url%/}" != "$hub_url" ]; do hub_url="${hub_url%/}"; done
+    echo "$hub_url"
+}
+
 _mirror_agent_healthy() {
-    # Echoes the live port number on stdout when /health responds 200; returns
+    # Echoes the live port number on stdout when /health responds 200 AND the
+    # daemon's configured hub matches the currently-resolved hub URL; returns
     # non-zero otherwise. Caller uses this to decide whether to skip spawn.
-    local port_file="$1" port
+    #
+    # The hub comparison matters: a daemon pointed at a stale hub (e.g. the
+    # localhost fallback, or a hub URL that changed in ~/.claude.json since
+    # spawn) still answers /health, so a liveness-only check keeps it alive
+    # forever while every hub call fails. On mismatch the stale daemon is
+    # killed here and we return non-zero so the caller's spawn path replaces
+    # it with one that re-resolves the config. A /health body without a
+    # `hub` field (pre-upgrade daemon) is treated as a mismatch, so old
+    # daemons self-heal on the first launch after an upgrade.
+    local port_file="$1" port body expected running
     [ -f "$port_file" ] || return 1
     port=$(cat "$port_file" 2>/dev/null || true)
     [ -n "$port" ] || return 1
-    curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1 || return 1
+    body=$(curl -fsS -m 1 "http://127.0.0.1:${port}/health" 2>/dev/null) || return 1
+
+    expected=$(resolve_hub_url)
+    # running = "<hub> <pid>" ("-" when the field is absent, pid 0 fallback).
+    running=$(HEALTH_BODY="$body" python3 -c "
+import json, os
+try:
+    d = json.loads(os.environ['HEALTH_BODY'])
+    hub = str(d.get('hub') or '-').rstrip('/') or '-'
+    print(hub, int(d.get('pid') or 0))
+except Exception:
+    print('- 0')
+" 2>/dev/null || echo "- 0")
+    local running_hub="${running% *}" daemon_pid="${running#* }"
+
+    if [ "$running_hub" != "$expected" ]; then
+        echo "[claude-net/mirror] daemon hub mismatch (running=${running_hub}, config=${expected}) — restarting" >&2
+        if [ "$daemon_pid" -gt 0 ] 2>/dev/null; then
+            kill "$daemon_pid" 2>/dev/null || true
+            # Give it a moment to die so the replacement doesn't race it.
+            local i=0
+            while [ $i -lt 10 ] && kill -0 "$daemon_pid" 2>/dev/null; do
+                sleep 0.1
+                i=$((i + 1))
+            done
+        fi
+        rm -f "$port_file" 2>/dev/null || true
+        return 1
+    fi
     echo "$port"
 }
 
@@ -255,30 +329,9 @@ _mirror_agent_spawn() {
         return 1
     fi
 
-    # Hub URL resolution:
-    #   1. CLAUDE_NET_HUB env var (explicit override)
-    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
-    #      (this is where the plugin already gets its URL, so the mirror-agent
-    #      ends up pointing at the same hub without extra configuration)
-    #   3. http://localhost:4815 as a last-ditch default
-    hub_url="${CLAUDE_NET_HUB:-}"
-    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
-        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
-import json, os
-try:
-    with open(os.environ['CLAUDE_JSON']) as f:
-        d = json.load(f)
-    for scope in [d.get('mcpServers', {}),
-                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
-        cfg = scope.get('claude-net')
-        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
-            print(cfg['env']['CLAUDE_NET_HUB'])
-            break
-except Exception:
-    pass
-" 2>/dev/null)
-    fi
-    hub_url="${hub_url:-http://localhost:4815}"
+    # See resolve_hub_url for the resolution order (env → ~/.claude.json →
+    # localhost fallback with a loud warning).
+    hub_url=$(resolve_hub_url)
     mkdir -p /tmp/claude-net 2>/dev/null || true
     CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 9>&- &
     disown $! 2>/dev/null || true

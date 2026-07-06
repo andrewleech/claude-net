@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  CHANNEL_REACK_HINT,
   INSTRUCTIONS,
   PLUGIN_VERSION,
   Plugin,
@@ -422,11 +423,25 @@ describe("plugin helpers", () => {
   });
 
   describe("buildChannelSelfTestText", () => {
-    test("includes registered name and instructs single _ack_channel call", () => {
+    test("includes registered name and demands a fresh _ack_channel call", () => {
       const text = buildChannelSelfTestText("git-autosquash:corona@carbon");
       expect(text).toContain("git-autosquash:corona@carbon");
       expect(text).toContain("_ack_channel");
-      expect(text.toLowerCase()).toContain("once");
+      // The probe must defeat the "I already ack'd earlier so I can ignore
+      // this" rationalisation — agents left themselves unreachable by
+      // dismissing re-probes after an MCP reconnect. Every probe means the
+      // hub currently has the agent channel-incapable and needs a fresh ack.
+      expect(text.toLowerCase()).toContain("even if you already");
+      expect(text.toLowerCase()).toContain("idempotent");
+      expect(text).not.toContain("call _ack_channel() once");
+    });
+
+    test("re-ack hint spells out reset semantics and recovery", () => {
+      const hint = CHANNEL_REACK_HINT.toLowerCase();
+      expect(hint).toContain("_ack_channel");
+      expect(hint).toContain("no-channel");
+      expect(hint).toContain("does not carry over");
+      expect(hint).toContain("idempotent");
     });
 
     test("avoids prompt-injection-shaped phrasing", () => {

@@ -24,6 +24,7 @@ import { HubClient } from "./hub-client";
 import { readHistoryBefore } from "./jsonl-history";
 import { type TailHandle, tailJsonl } from "./jsonl-tail";
 import { jsonlRecordToHistoryFrame } from "./jsonl-to-frame";
+import { PathObserver } from "./path-observer";
 import { ProbeAttemptTracker } from "./probe-tracker";
 import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
@@ -78,6 +79,9 @@ interface SessionState {
    *  single agent run; on restart the timestamp filter in
    *  `maybeReportApiError` keeps us from re-reporting old records. */
   apiErrorUuidsPosted: Set<string>;
+  /** Per-session file-path allowlist backing the dashboard's on-demand
+   *  file fetch. Populated from every outgoing frame; gates fetch requests. */
+  observer: PathObserver;
 }
 
 export interface AgentHandle {
@@ -143,10 +147,53 @@ const RECOVERY_SLOW_DELAY_MS = 5 * 60 * 1000;
  *  half-life where a sender would still care. */
 const API_ERROR_RECENCY_MS = 5 * 60 * 1000;
 
+/** Hard ceiling on a single on-demand file fetch. Base64 expands ~4/3, so
+ *  8 MB of file becomes ~10.7 MB on the WS — under Bun's 16 MB default
+ *  frame budget. Larger files are refused with a size-bearing error so the
+ *  dashboard can say "too large to preview" rather than truncating. */
+const MAX_FETCH_BYTES = 8 * 1024 * 1024;
+
 /** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
 const PASTE_DIR = "/tmp/claude-net/pastes";
 /** Delete paste files older than this on agent startup. */
 const PASTE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/** Best-effort media type from a file extension, for the fetch reply's
+ *  Content-Type. Falls back to application/octet-stream so the dashboard
+ *  offers a download rather than mis-rendering unknown bytes. */
+const MEDIA_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".log": "text/plain",
+  ".json": "application/json",
+  ".jsonl": "application/json",
+  ".yaml": "text/plain",
+  ".yml": "text/plain",
+  ".toml": "text/plain",
+  ".csv": "text/csv",
+  ".html": "text/html",
+  ".css": "text/css",
+  ".js": "text/javascript",
+  ".ts": "text/plain",
+  ".tsx": "text/plain",
+  ".py": "text/plain",
+  ".sh": "text/plain",
+  ".xml": "text/xml",
+};
+function mediaTypeForPath(p: string): string {
+  return (
+    MEDIA_TYPES[path.extname(p).toLowerCase()] ?? "application/octet-stream"
+  );
+}
 
 function cleanupOldPastes(): void {
   try {
@@ -715,6 +762,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       lastUsage: null,
       pendingPidUpdate: false,
       apiErrorUuidsPosted: new Set(),
+      observer: new PathObserver(cwd ?? null),
     };
     sessions.set(sid, session);
 
@@ -1029,6 +1077,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     session.seenUuids.add(frame.uuid);
 
     const json = JSON.stringify(frame);
+    // Record any file paths this frame surfaces (structured tool fields or
+    // prose) into the session's fetch allowlist. Scanning the serialized
+    // frame catches both without walking the payload shape by hand.
+    session.observer.observeText(json);
     if (session.ws?.isOpen()) {
       session.ws.send(json);
     } else {
@@ -1083,6 +1135,22 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         typeof data.requestId === "string" ? data.requestId : "";
       if (!requestId) return;
       handleListCommands(session, requestId);
+    } else if (data.event === "mirror_fetch_file") {
+      const requestId =
+        typeof data.requestId === "string" ? data.requestId : "";
+      if (!requestId) return;
+      const ff = data as unknown as { path?: unknown; maxBytes?: unknown };
+      const reqPath = typeof ff.path === "string" ? ff.path : "";
+      const maxBytes =
+        typeof ff.maxBytes === "number" && Number.isFinite(ff.maxBytes)
+          ? Math.max(1, Math.min(MAX_FETCH_BYTES, Math.floor(ff.maxBytes)))
+          : MAX_FETCH_BYTES;
+      void handleFetchFile(session, requestId, reqPath, maxBytes).catch(
+        (err: unknown) => {
+          log(`[${session.sid}] fetch-file handler threw: ${String(err)}`);
+          sendFileResponse(session, requestId, { error: String(err) });
+        },
+      );
     } else if (data.event === "mirror_history_request") {
       const requestId =
         typeof data.requestId === "string" ? data.requestId : "";
@@ -1224,6 +1292,82 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     };
     if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
       log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
+    }
+  }
+
+  /**
+   * Handle a hub-initiated file fetch: gate `reqPath` through the session's
+   * observed-path allowlist, enforce the size cap, read the bytes, and
+   * reply with a base64 payload + detected media type. Refusals and misses
+   * come back as errors so the dashboard shows a reason rather than hanging.
+   */
+  async function handleFetchFile(
+    session: SessionState,
+    requestId: string,
+    reqPath: string,
+    maxBytes: number,
+  ): Promise<void> {
+    if (!reqPath) {
+      sendFileResponse(session, requestId, { error: "no path" });
+      return;
+    }
+    const real = session.observer.resolveAllowed(reqPath);
+    if (!real) {
+      // Not observed, not in-tree, missing, or not a regular file — one
+      // message so a probe can't distinguish "refused" from "absent".
+      sendFileResponse(session, requestId, {
+        error: "File is not available for this session.",
+      });
+      return;
+    }
+    let size: number;
+    try {
+      size = fs.statSync(real).size;
+    } catch (err) {
+      sendFileResponse(session, requestId, { error: String(err) });
+      return;
+    }
+    if (size > maxBytes) {
+      sendFileResponse(session, requestId, {
+        error: `File is too large to preview (${size} bytes; limit ${maxBytes}).`,
+        bytes: size,
+      });
+      return;
+    }
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(real);
+    } catch (err) {
+      sendFileResponse(session, requestId, { error: String(err) });
+      return;
+    }
+    sendFileResponse(session, requestId, {
+      data: buf.toString("base64"),
+      media_type: mediaTypeForPath(real),
+      bytes: buf.byteLength,
+      name: path.basename(real),
+    });
+  }
+
+  function sendFileResponse(
+    session: SessionState,
+    requestId: string,
+    result: {
+      data?: string;
+      media_type?: string;
+      bytes?: number;
+      name?: string;
+      error?: string;
+    },
+  ): void {
+    const frame = {
+      action: "mirror_file_done" as const,
+      sid: session.sid,
+      requestId,
+      ...result,
+    };
+    if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
+      log(`[${session.sid}] failed to send file reply (hub disconnected)`);
     }
   }
 

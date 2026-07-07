@@ -630,6 +630,92 @@ describe("MirrorRegistry", () => {
     expect(result.status).toBe(503);
   });
 
+  test("relayFetchFile sends frame and resolves with the file bytes", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const sent: string[] = [];
+    reg.setAgentConnection(sid, {
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    });
+    const pending = reg.relayFetchFile(
+      sid,
+      "/a/assets/x.png",
+      8 * 1024 * 1024,
+      "web",
+      5000,
+    );
+    expect(sent).toHaveLength(1);
+    // biome-ignore lint/style/noNonNullAssertion: length asserted above
+    const frame = JSON.parse(sent[0]!) as Record<string, unknown>;
+    expect(frame.event).toBe("mirror_fetch_file");
+    expect(frame.path).toBe("/a/assets/x.png");
+    expect(typeof frame.requestId).toBe("string");
+    reg.resolveFetchFile(sid, frame.requestId as string, {
+      data: Buffer.from("png-bytes").toString("base64"),
+      media_type: "image/png",
+      bytes: 9,
+      name: "x.png",
+    });
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.file.media_type).toBe("image/png");
+    expect(result.file.name).toBe("x.png");
+    expect(Buffer.from(result.file.data, "base64").toString()).toBe(
+      "png-bytes",
+    );
+  });
+
+  test("relayFetchFile rejects 403 when the agent refuses the path", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const sent: string[] = [];
+    reg.setAgentConnection(sid, {
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    });
+    const pending = reg.relayFetchFile(sid, "/etc/shadow", 1024, "web", 5000);
+    // biome-ignore lint/style/noNonNullAssertion: send collected above
+    const requestId = (JSON.parse(sent[0]!) as { requestId: string }).requestId;
+    reg.resolveFetchFile(sid, requestId, {
+      error: "File is not available for this session.",
+    });
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(403);
+    expect(result.error).toContain("not available");
+  });
+
+  test("relayFetchFile times out when the agent never replies", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.setAgentConnection(sid, { ws: { send: () => {} }, wsIdentity: {} });
+    const result = await reg.relayFetchFile(sid, "/a/x", 1024, "web", 30);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(504);
+  });
+
+  test("relayFetchFile rejects 503 with no connected agent", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const result = await reg.relayFetchFile(
+      r.entry.sid,
+      "/a/x",
+      1024,
+      "web",
+      500,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(503);
+  });
+
   test("dashboard broadcast fires on session lifecycle", () => {
     const events: { event: string }[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as { event: string }));
@@ -1415,6 +1501,117 @@ describe("schedule-inject routes", () => {
       expect(again.status).toBe(404);
     } finally {
       scheduler.stop();
+      app.stop();
+    }
+  });
+});
+
+describe("file fetch route", () => {
+  // A fake agent WS that, on receiving a mirror_fetch_file frame, replies
+  // via resolveFetchFile — either with bytes or a refusal — driving the
+  // full HTTP route → relay → Response path.
+  function setup(reply: {
+    data?: string;
+    media_type?: string;
+    bytes?: number;
+    name?: string;
+    error?: string;
+  }) {
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    const r = reg.createSession("agent-x:u@h", "/workspace", "file-sid");
+    if (!r.ok) throw new Error("session create failed");
+    reg.setAgentConnection("file-sid", {
+      ws: {
+        send: (s: string) => {
+          const frame = JSON.parse(s) as { requestId: string };
+          reg.resolveFetchFile("file-sid", frame.requestId, reply);
+        },
+      },
+      wsIdentity: {},
+    });
+    return { reg, app, port };
+  }
+
+  test("streams the file bytes with the agent-detected content-type", async () => {
+    const raw = "PNG-BYTES-HERE";
+    const { app, port } = setup({
+      data: Buffer.from(raw).toString("base64"),
+      media_type: "image/png",
+      bytes: raw.length,
+      name: "concept.png",
+    });
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/file-sid/file?path=${encodeURIComponent("/workspace/concept.png")}`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/png");
+      expect(res.headers.get("content-disposition")).toContain("inline");
+      expect(res.headers.get("content-disposition")).toContain("concept.png");
+      expect(await res.text()).toBe(raw);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("download=1 flips content-disposition to attachment", async () => {
+    const { app, port } = setup({
+      data: Buffer.from("x").toString("base64"),
+      media_type: "text/plain",
+      bytes: 1,
+      name: "notes.txt",
+    });
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/file-sid/file?path=${encodeURIComponent("/workspace/notes.txt")}&download=1`,
+      );
+      expect(res.headers.get("content-disposition")).toContain("attachment");
+      await res.text();
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("returns 403 when the agent refuses the path", async () => {
+    const { app, port } = setup({
+      error: "File is not available for this session.",
+    });
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/file-sid/file?path=${encodeURIComponent("/etc/shadow")}`,
+      );
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("not available");
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("returns 400 when path is missing", async () => {
+    const { app, port } = setup({ error: "unused" });
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/file-sid/file`,
+      );
+      expect(res.status).toBe(400);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("returns 404 for an unknown session", async () => {
+    const { app, port } = setup({ error: "unused" });
+    try {
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/nope-sid/file?path=${encodeURIComponent("/x/y")}`,
+      );
+      expect(res.status).toBe(404);
+    } finally {
       app.stop();
     }
   });

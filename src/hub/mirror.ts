@@ -6,6 +6,7 @@ import type {
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
   MirrorEventPayload,
+  MirrorFetchFileFrame,
   MirrorHistoryRequestFrame,
   MirrorInjectFrame,
   MirrorKeyPart,
@@ -182,6 +183,19 @@ interface PendingPaste {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export interface FetchedFile {
+  data: string;
+  media_type: string;
+  bytes: number;
+  name: string;
+}
+
+interface PendingFetch {
+  resolve: (file: FetchedFile) => void;
+  reject: (error: { status: number; message: string }) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface PendingCommandsList {
   resolve: (commands: SlashCommand[]) => void;
   reject: (error: { status: number; message: string }) => void;
@@ -234,6 +248,8 @@ export class MirrorRegistry {
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
+  /** Key: `${sid}:${requestId}` — awaiting MirrorFileDoneFrame from agent. */
+  private pendingFetches = new Map<string, PendingFetch>();
   /** Key: `${sid}:${requestId}` — awaiting MirrorCommandsDoneFrame. */
   private pendingCommandsLists = new Map<string, PendingCommandsList>();
   /** Key: `${sid}:${requestId}` — awaiting MirrorHistoryChunkFrame. */
@@ -1275,6 +1291,127 @@ export class MirrorRegistry {
   }
 
   /**
+   * Ask the session's mirror-agent to read a file it has surfaced and
+   * return its bytes for the dashboard to preview. Same request/response
+   * WS pattern as relayPaste; the agent enforces the read gate. The hub
+   * cannot see the agent's filesystem, so it forwards the path verbatim
+   * and trusts the agent's allow/refuse decision.
+   */
+  relayFetchFile(
+    sid: string,
+    reqPath: string,
+    maxBytes: number,
+    watcher: string,
+    timeoutMs: number,
+    host?: string,
+  ): Promise<
+    | { ok: true; file: FetchedFile }
+    | { ok: false; error: string; status: number }
+  > {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry)
+      return Promise.resolve({
+        ok: false,
+        error: `Session '${sid}' not found.`,
+        status: 404,
+      });
+    if (!entry.agent)
+      return Promise.resolve({
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      });
+
+    const requestId = crypto.randomUUID();
+    const key = `${sid}:${requestId}`;
+    const frame: MirrorFetchFileFrame = {
+      event: "mirror_fetch_file",
+      sid,
+      requestId,
+      path: reqPath,
+      maxBytes,
+      origin: { watcher, ts: Date.now() },
+    };
+
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        this.pendingFetches.delete(key);
+        resolvePromise({
+          ok: false,
+          error: `Mirror-agent did not respond within ${timeoutMs}ms.`,
+          status: 504,
+        });
+      }, timeoutMs);
+      if (typeof timer === "object" && "unref" in timer) timer.unref();
+
+      this.pendingFetches.set(key, {
+        resolve: (file) => {
+          clearTimeout(timer);
+          this.pendingFetches.delete(key);
+          resolvePromise({ ok: true, file });
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.pendingFetches.delete(key);
+          resolvePromise({ ok: false, error: err.message, status: err.status });
+        },
+        timer,
+      });
+
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: null-checked above
+        entry.agent!.ws.send(JSON.stringify(frame));
+      } catch (err) {
+        const pending = this.pendingFetches.get(key);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingFetches.delete(key);
+        }
+        resolvePromise({
+          ok: false,
+          error: `Failed to relay to mirror-agent: ${String(err)}`,
+          status: 502,
+        });
+      }
+    });
+  }
+
+  /**
+   * Called from the mirror WS dispatch when the agent sends back a
+   * MirrorFileDoneFrame. Settles the pending promise from relayFetchFile.
+   * A refusal or read error arrives as `error` (403 — the agent gates on
+   * the session's allowlist, so a miss is "forbidden", not "not found").
+   */
+  resolveFetchFile(
+    sid: string,
+    requestId: string,
+    result: {
+      data?: string;
+      media_type?: string;
+      bytes?: number;
+      name?: string;
+      error?: string;
+    },
+  ): void {
+    const key = `${sid}:${requestId}`;
+    const pending = this.pendingFetches.get(key);
+    if (!pending) return;
+    if (typeof result.data === "string") {
+      pending.resolve({
+        data: result.data,
+        media_type: result.media_type ?? "application/octet-stream",
+        bytes: typeof result.bytes === "number" ? result.bytes : 0,
+        name: result.name ?? "file",
+      });
+    } else {
+      pending.reject({
+        status: 403,
+        message: result.error ?? "mirror-agent refused the file.",
+      });
+    }
+  }
+
+  /**
    * Ask the session's mirror-agent for the slash commands available to
    * its Claude Code. Same request/response WS pattern as relayPaste.
    */
@@ -2115,6 +2252,59 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         }
         return { commands: result.commands };
       })
+
+      /**
+       * GET /:sid/file?path=<abs>[&host=][&download=1] — stream a file the
+       * session has referenced, for the dashboard to preview or download.
+       * The mirror-agent enforces the read gate (observed paths + same-tree
+       * fallback); the hub only relays. A refused/missing path comes back
+       * 403 (indistinguishable from "not found" by design). Returns the raw
+       * bytes with the agent-detected Content-Type — inline by default so
+       * <img> works, attachment when download=1.
+       */
+      .get("/:sid/file", async ({ params, query, set, request }) => {
+        const q = query as Record<string, string | undefined>;
+        const host = q.host;
+        const reqPath = typeof q.path === "string" ? q.path : "";
+        if (!reqPath) {
+          set.status = 400;
+          return { error: "Missing path." };
+        }
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const watcher = sanitizeWatcher(
+          request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = await mirrorRegistry.relayFetchFile(
+          params.sid,
+          reqPath,
+          FETCH_MAX_BYTES,
+          watcher,
+          FETCH_TIMEOUT_MS,
+          host,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        const bytes = Buffer.from(result.file.data, "base64");
+        const disposition = q.download
+          ? `attachment; filename="${sanitizeFilename(result.file.name)}"`
+          : `inline; filename="${sanitizeFilename(result.file.name)}"`;
+        return new Response(bytes, {
+          headers: {
+            "content-type": result.file.media_type,
+            "content-length": String(bytes.byteLength),
+            "content-disposition": disposition,
+            // These bytes are session-scoped and transient; never let a
+            // shared cache hold them.
+            "cache-control": "no-store",
+          },
+        });
+      })
   );
 }
 
@@ -2143,6 +2333,14 @@ const PASTE_TIMEOUT_MS = 10_000;
 
 /** Timeout for the agent to return its slash-command catalog. */
 const COMMANDS_TIMEOUT_MS = 5_000;
+
+/** Timeout for the agent to read + return a fetched file. Larger than the
+ *  command catalog: a multi-MB read + base64 encode + WS transfer is
+ *  slower than a directory walk. */
+const FETCH_TIMEOUT_MS = 20_000;
+/** Ceiling the hub asks the agent to honour for a single fetch. The agent
+ *  clamps to its own MAX_FETCH_BYTES; this just avoids requesting more. */
+const FETCH_MAX_BYTES = 8 * 1024 * 1024;
 
 // One inject per 250ms (burst control) AND at most INJECT_RPM per minute.
 const injectBurstLimiter = new RateLimiter({ max: 1, windowMs: 250 });
@@ -2217,6 +2415,21 @@ function sanitizeWatcher(s: string): string {
     if (out.length >= 120) break;
   }
   return out;
+}
+
+/** Reduce a basename to a safe Content-Disposition filename: drop path
+ *  separators, quotes, and control chars so it can't break out of the
+ *  header or imply a directory. */
+function sanitizeFilename(name: string): string {
+  let out = "";
+  for (const ch of name) {
+    const code = ch.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) continue;
+    if (ch === '"' || ch === "\\" || ch === "/") continue;
+    out += ch;
+    if (out.length >= 200) break;
+  }
+  return out || "file";
 }
 
 function remoteKeyFor(request: Request): string {
@@ -2426,6 +2639,19 @@ export function wsMirrorPlugin(
       ) {
         mirrorRegistry.resolvePaste(meta.sid, frame.requestId, {
           path: typeof frame.path === "string" ? frame.path : undefined,
+          error: typeof frame.error === "string" ? frame.error : undefined,
+        });
+      } else if (
+        frame.action === "mirror_file_done" &&
+        frame.sid === meta.sid &&
+        typeof frame.requestId === "string"
+      ) {
+        mirrorRegistry.resolveFetchFile(meta.sid, frame.requestId, {
+          data: typeof frame.data === "string" ? frame.data : undefined,
+          media_type:
+            typeof frame.media_type === "string" ? frame.media_type : undefined,
+          bytes: typeof frame.bytes === "number" ? frame.bytes : undefined,
+          name: typeof frame.name === "string" ? frame.name : undefined,
           error: typeof frame.error === "string" ? frame.error : undefined,
         });
       } else if (

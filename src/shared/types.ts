@@ -150,6 +150,23 @@ export interface MirrorPasteDoneFrame {
 }
 
 /**
+ * Agent → hub reply to a MirrorFetchFileFrame. On success carries the
+ * file bytes base64-encoded in `data` with its detected `media_type` and
+ * decoded `bytes`; on refusal/failure carries `error`. `name` is the
+ * basename, for the dashboard's download filename. Keyed on `requestId`.
+ */
+export interface MirrorFileDoneFrame {
+  action: "mirror_file_done";
+  sid: string;
+  requestId: string;
+  data?: string;
+  media_type?: string;
+  bytes?: number;
+  name?: string;
+  error?: string;
+}
+
+/**
  * Agent → hub reply to a MirrorListCommandsFrame request. Carries the
  * slash-command catalog for the session's Claude Code environment.
  */
@@ -229,6 +246,7 @@ export type PluginFrame =
   | QueryEventsFrame
   | MirrorEventFrame
   | MirrorPasteDoneFrame
+  | MirrorFileDoneFrame
   | MirrorCommandsDoneFrame
   | MirrorHistoryChunkFrame
   | MirrorThinkingFrame
@@ -367,6 +385,24 @@ export interface MirrorListCommandsFrame {
 }
 
 /**
+ * Hub → agent request to read a file the session has referenced and
+ * stream its bytes back for the dashboard to preview. The agent gates
+ * `path` against what the session has actually surfaced (see the
+ * observed-path allowlist + same-tree fallback in the mirror-agent) —
+ * the hub does not (and cannot) enforce that gate, so a request for an
+ * un-referenced path is refused agent-side. `maxBytes` caps the read so
+ * a huge file can't blow the WS frame budget. Reply is MirrorFileDoneFrame.
+ */
+export interface MirrorFetchFileFrame {
+  event: "mirror_fetch_file";
+  sid: string;
+  requestId: string;
+  path: string;
+  maxBytes: number;
+  origin: { watcher: string; ts: number };
+}
+
+/**
  * Hub → agent request for backfilled history older than what the hub's
  * in-memory ring still has. Agent reads its on-disk JSONL, walking
  * backward from `before_ts` (or from EOF if null) to gather up to
@@ -439,6 +475,7 @@ export type HubFrame =
   | MirrorInjectFrame
   | MirrorPasteFrame
   | MirrorListCommandsFrame
+  | MirrorFetchFileFrame
   | MirrorHistoryRequestFrame
   | MirrorStopFrame
   | MirrorKeysFrame

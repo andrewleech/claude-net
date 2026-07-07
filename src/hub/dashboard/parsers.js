@@ -175,6 +175,93 @@ function walkForImages(node, out, depth) {
     walkForImages(node.attachments, out, depth + 1);
 }
 
+// Extract file references (path + metadata) from a tool_result response.
+// Targets the SendUserFile attachment shape —
+//   { attachments: [{ path, size, isImage, media_type, file_uuid }, …] }
+// — but also matches any nested object that carries a string `path`
+// alongside at least one file-ish sibling key, so a tool that reports
+// delivered files under a different envelope still surfaces them. Unlike
+// extractImageBlocks these entries have NO bytes; the dashboard fetches
+// the content on demand from the mirror-agent via /api/mirror/:sid/file.
+// Deduplicated by path, capped so a pathological response can't produce an
+// unbounded card list.
+const FILE_REF_SIBLINGS = ["media_type", "isImage", "size", "file_uuid"];
+export function extractFileRefs(resp) {
+  const out = [];
+  const seen = new Set();
+  walkForFileRefs(resp, out, seen, 0);
+  return out;
+}
+
+function walkForFileRefs(node, out, seen, depth) {
+  if (!node || depth > 6 || out.length >= 64) return;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++)
+      walkForFileRefs(node[i], out, seen, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+  if (typeof node.path === "string" && node.path) {
+    let fileish = false;
+    for (let i = 0; i < FILE_REF_SIBLINGS.length; i++) {
+      if (FILE_REF_SIBLINGS[i] in node) {
+        fileish = true;
+        break;
+      }
+    }
+    if (fileish && !seen.has(node.path)) {
+      seen.add(node.path);
+      const mt = typeof node.media_type === "string" ? node.media_type : "";
+      out.push({
+        path: node.path,
+        media_type: mt,
+        size: typeof node.size === "number" ? node.size : null,
+        isImage:
+          node.isImage === true || (mt !== "" && mt.indexOf("image/") === 0),
+        name: node.path.split("/").pop() || node.path,
+      });
+      // Don't recurse into an entry we've already captured.
+      return;
+    }
+  }
+  for (const k in node) {
+    if (Object.prototype.hasOwnProperty.call(node, k))
+      walkForFileRefs(node[k], out, seen, depth + 1);
+  }
+}
+
+// Split a string into ordered segments, tagging each absolute-path run so
+// the dashboard can linkify paths mentioned in prose without disturbing the
+// surrounding text. Returns [{ text, path }] where `path` is the matched
+// absolute path for path segments and null otherwise. `~`-rooted paths are
+// left as-is here (the browser can't know the agent's home dir) — the fetch
+// endpoint resolves them agent-side. Trailing prose punctuation is excluded
+// from the path but preserved in the following text segment.
+// The (?<![\w~]) lookbehind keeps "/4" in "3/4" and "b" in "a/b" from
+// matching — a path must start at a boundary, not mid-token.
+const TEXT_PATH_RE = /(?<![\w~])(?:~|(?=\/))(?:\/[\w.+@\-]+)+/g;
+export function splitTextPaths(text) {
+  const segs = [];
+  if (!text) return segs;
+  let last = 0;
+  let m;
+  TEXT_PATH_RE.lastIndex = 0;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex loop
+  while ((m = TEXT_PATH_RE.exec(text)) !== null) {
+    const start = m.index;
+    // Trim trailing punctuation that abuts a path in prose; the trimmed
+    // characters fall into the following text segment.
+    const matched = m[0].replace(/[.,;:)\]}'"]+$/, "");
+    // A bare "/" or a single-segment root isn't a useful link.
+    if (matched.length < 2) continue;
+    if (start > last) segs.push({ text: text.slice(last, start), path: null });
+    segs.push({ text: matched, path: matched });
+    last = start + matched.length;
+  }
+  if (last < text.length) segs.push({ text: text.slice(last), path: null });
+  return segs;
+}
+
 // If `resp` looks like an MCP text-content envelope, join the text
 // blocks and return the concatenated string. Returns null if this
 // wasn't an envelope. Callers JSON.parse if they expect JSON —

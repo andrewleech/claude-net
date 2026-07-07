@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildAskUserQuestionKeys,
   extractCnList,
+  extractFileRefs,
   extractImageBlocks,
   extractToolSearchNames,
   extractWebSearchResults,
@@ -18,6 +19,7 @@ import {
   hostFromUrl,
   parsePromptMenu,
   parseReadContent,
+  splitTextPaths,
   toWebSearchText,
   unwrapMcpText,
 } from "@/hub/dashboard/parsers.js";
@@ -423,5 +425,111 @@ describe("buildAskUserQuestionKeys", () => {
       { type: "key", name: "Enter" },
       { type: "key", name: "Enter" },
     ]);
+  });
+});
+
+describe("extractFileRefs", () => {
+  test("pulls SendUserFile attachments with metadata", () => {
+    const resp = {
+      caption: "4 concepts",
+      attachments: [
+        {
+          path: "/home/a/assets/c1.png",
+          size: 1300333,
+          isImage: true,
+          media_type: "image/png",
+          file_uuid: "u1",
+        },
+        {
+          path: "/home/a/assets/c2.png",
+          size: 809278,
+          isImage: true,
+          media_type: "image/png",
+          file_uuid: "u2",
+        },
+      ],
+    };
+    const refs = extractFileRefs(resp);
+    expect(refs).toHaveLength(2);
+    expect(refs[0]).toMatchObject({
+      path: "/home/a/assets/c1.png",
+      media_type: "image/png",
+      isImage: true,
+      name: "c1.png",
+      size: 1300333,
+    });
+  });
+
+  test("infers isImage from media_type when the flag is absent", () => {
+    const refs = extractFileRefs({
+      attachments: [{ path: "/x/y.webp", media_type: "image/webp" }],
+    });
+    expect(refs[0].isImage).toBe(true);
+  });
+
+  test("marks non-image files", () => {
+    const refs = extractFileRefs({
+      attachments: [{ path: "/x/report.pdf", media_type: "application/pdf" }],
+    });
+    expect(refs[0].isImage).toBe(false);
+    expect(refs[0].name).toBe("report.pdf");
+  });
+
+  test("ignores objects with a path but no file-ish sibling key", () => {
+    // Avoids false positives from unrelated shapes that carry `path`.
+    expect(extractFileRefs({ path: "/some/route", handler: "x" })).toEqual([]);
+  });
+
+  test("dedupes by path", () => {
+    const refs = extractFileRefs({
+      attachments: [
+        { path: "/x/a.png", media_type: "image/png" },
+        { path: "/x/a.png", media_type: "image/png" },
+      ],
+    });
+    expect(refs).toHaveLength(1);
+  });
+
+  test("returns empty for responses with no file references", () => {
+    expect(extractFileRefs("just text")).toEqual([]);
+    expect(extractFileRefs(null)).toEqual([]);
+  });
+});
+
+type PathSeg = { text: string; path: string | null };
+
+describe("splitTextPaths", () => {
+  test("segments a path out of prose", () => {
+    const segs = splitTextPaths("saved to /home/a/x.png for review");
+    expect(segs).toEqual([
+      { text: "saved to ", path: null },
+      { text: "/home/a/x.png", path: "/home/a/x.png" },
+      { text: " for review", path: null },
+    ]);
+  });
+
+  test("excludes trailing punctuation from the path", () => {
+    const segs = splitTextPaths("see /a/b/c.txt.") as PathSeg[];
+    const pathSeg = segs.find((s) => s.path);
+    expect(pathSeg?.path).toBe("/a/b/c.txt");
+    expect(segs[segs.length - 1]?.text).toBe(".");
+  });
+
+  test("handles multiple paths", () => {
+    const segs = splitTextPaths("/a/one.png and /b/two.png") as PathSeg[];
+    const paths = segs.filter((s) => s.path).map((s) => s.path);
+    expect(paths).toEqual(["/a/one.png", "/b/two.png"]);
+  });
+
+  test("returns a single text segment when there is no path", () => {
+    expect(splitTextPaths("no paths here 3/4 ratio")).toEqual([
+      { text: "no paths here 3/4 ratio", path: null },
+    ]);
+  });
+
+  test("reassembling segments reproduces the original text", () => {
+    const src = "a /x/y.z b (/p/q.r) c";
+    const segs = splitTextPaths(src) as PathSeg[];
+    expect(segs.map((s) => s.text).join("")).toBe(src);
   });
 });

@@ -558,6 +558,98 @@
     border-radius: 3px;
   }
 
+  /* ── Delivered-files card (SendUserFile) + on-demand file fetch. ── */
+  .m-evt-files { border-left: 3px solid var(--gold); }
+  .m-evt-files .m-label { color: var(--gold); }
+  .m-files-count { color: var(--text-muted); font-size: 11px; }
+  .m-files-caption { margin: 4px 0 6px; }
+  .m-file-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 0; }
+  .m-file-cell {
+    display: flex; flex-direction: column; gap: 4px;
+    max-width: 200px;
+  }
+  .m-file-thumb {
+    max-width: 200px; max-height: 160px;
+    object-fit: contain;
+    cursor: zoom-in;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+  .m-file-thumb.broken {
+    min-width: 120px; min-height: 60px;
+    display: flex; align-items: center; justify-content: center;
+    font-style: italic; color: var(--text-muted);
+  }
+  .m-file-icon {
+    width: 200px; height: 90px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 34px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+  .m-file-meta {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .m-file-name {
+    color: var(--text); text-decoration: none;
+    overflow-wrap: anywhere; font-weight: 600;
+  }
+  .m-file-name:hover { color: var(--text-accent); text-decoration: underline; }
+  .m-file-size { color: var(--text-muted); }
+  .m-file-dl { color: var(--text-muted); text-decoration: none; }
+  .m-file-dl:hover { color: var(--text-accent); text-decoration: underline; }
+
+  /* Clickable file paths linkified out of prose (linkifyPaths). */
+  .m-filelink {
+    color: var(--text-accent);
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .m-filelink:hover { text-decoration-style: solid; }
+
+  /* Image lightbox overlay (appended to <body>; shown while .open). */
+  .mirror-lightbox {
+    display: none;
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0, 0, 0, 0.82);
+    align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .mirror-lightbox.open { display: flex; }
+  .mirror-lightbox .mlb-inner {
+    display: flex; flex-direction: column; gap: 8px;
+    max-width: 96vw; max-height: 94vh;
+  }
+  .mirror-lightbox .mlb-bar {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--font-mono); font-size: 12px; color: #ddd;
+  }
+  .mirror-lightbox .mlb-name { overflow-wrap: anywhere; flex: 1; }
+  .mirror-lightbox .mlb-dl { color: #9cf; text-decoration: none; }
+  .mirror-lightbox .mlb-dl:hover { text-decoration: underline; }
+  .mirror-lightbox .mlb-close {
+    background: transparent; border: none; color: #ddd;
+    font-size: 16px; cursor: pointer; line-height: 1;
+  }
+  .mirror-lightbox .mlb-stage {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 0; overflow: auto;
+  }
+  .mirror-lightbox img {
+    max-width: 96vw; max-height: 84vh; object-fit: contain;
+    background: var(--bg-panel); border-radius: 3px;
+  }
+  .mirror-lightbox .mlb-err {
+    font-family: var(--font-mono); font-size: 13px; color: #f88;
+    max-width: 60ch; text-align: center;
+  }
+
   /* ── CLAUDE-NET MCP lists (list_agents / list_teams / ToolSearch). ── */
   .m-cn-list {
     list-style: none; margin: 4px 0 0; padding: 0;
@@ -3936,6 +4028,29 @@
     var attachAc = new AbortController();
     var attachSig = attachAc.signal;
 
+    // Delegated handler for path links produced by linkifyPaths and file
+    // names in delivery cards. Image paths open the lightbox; anything
+    // else opens the fetch URL in a new tab (the browser previews or
+    // downloads by Content-Type). Bound with attachSig so it's dropped on
+    // teardown along with every other per-session listener.
+    if (transcriptEl) {
+      transcriptEl.addEventListener('click', function(e) {
+        var link = e.target && e.target.closest ? e.target.closest('a.m-filelink') : null;
+        if (!link) return;
+        e.preventDefault();
+        var p = link.getAttribute('data-path');
+        if (!p) return;
+        if (looksLikeImage(p, '')) {
+          openImageLightbox(p, p.split('/').pop() || p);
+        } else {
+          window.open(fileUrl(p, false), '_blank', 'noopener');
+        }
+      }, { signal: attachSig });
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeImageLightbox();
+    }, { signal: attachSig });
+
     var rendered = Object.create(null); // uuid → true
     // tool_use_id → true for every in-flight Task/Agent dispatch. Updated
     // in renderEvent when a subagent tool_call arrives and when its
@@ -5365,6 +5480,182 @@
     function toWebSearchText(resp)        { return window.Parsers.toWebSearchText(resp); }
     function extractWebSearchSummary(resp){ return window.Parsers.extractWebSearchSummary(resp); }
     function extractImageBlocks(resp)     { return window.Parsers.extractImageBlocks(resp); }
+    function extractFileRefs(resp)        { return window.Parsers.extractFileRefs(resp); }
+    function splitTextPaths(text)         { return window.Parsers.splitTextPaths(text); }
+
+    // ── On-demand file fetch (mirror-agent reads, hub relays) ─────────
+    // Build the URL the dashboard hits to stream a session-referenced
+    // file. The mirror-agent gates the path against what this session has
+    // surfaced; a refused/missing path comes back 403. `download` flips
+    // Content-Disposition to attachment.
+    function fileUrl(p, download) {
+      return '/api/mirror/' + encodeURIComponent(sid) + '/file?path=' +
+        encodeURIComponent(p) + hostQuery + (download ? '&download=1' : '');
+    }
+
+    // A file is image-previewable if its media type says so, or (when the
+    // type is unknown, e.g. a bare path in prose) its extension looks like
+    // one of the browser-safe raster formats.
+    var IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
+    function looksLikeImage(p, mediaType) {
+      if (mediaType && mediaType.indexOf('image/') === 0) return true;
+      return IMAGE_EXT_RE.test(p || '');
+    }
+
+    // Full-screen preview for an image path. The <img> src is the fetch
+    // endpoint, so the bytes are pulled only when this opens. onerror
+    // surfaces the reason (refused / too large / agent offline) rather
+    // than a broken-image icon.
+    function openImageLightbox(p, name) {
+      var lb = document.getElementById('mirror-lightbox');
+      if (!lb) {
+        lb = document.createElement('div');
+        lb.id = 'mirror-lightbox';
+        lb.className = 'mirror-lightbox';
+        lb.addEventListener('click', function() { closeImageLightbox(); });
+        document.body.appendChild(lb);
+      }
+      lb.innerHTML =
+        '<div class="mlb-inner">' +
+          '<div class="mlb-bar"><span class="mlb-name"></span>' +
+          '<a class="mlb-dl" target="_blank" rel="noopener">download</a>' +
+          '<button class="mlb-close" type="button" aria-label="close">✕</button></div>' +
+          '<div class="mlb-stage"><img alt=""><div class="mlb-err" hidden></div></div>' +
+        '</div>';
+      lb.querySelector('.mlb-name').textContent = name || p;
+      lb.querySelector('.mlb-dl').href = fileUrl(p, true);
+      var img = lb.querySelector('img');
+      var err = lb.querySelector('.mlb-err');
+      img.addEventListener('error', function() {
+        img.hidden = true;
+        err.hidden = false;
+        err.textContent = 'Could not load ' + p +
+          ' — the mirror-agent refused it, it was too large, or it is offline.';
+      });
+      // Clicks inside the image/bar shouldn't dismiss (only the backdrop).
+      lb.querySelector('.mlb-inner').addEventListener('click', function(e) {
+        if (e.target.classList.contains('mlb-close')) { closeImageLightbox(); return; }
+        e.stopPropagation();
+      });
+      img.src = fileUrl(p, false);
+      lb.classList.add('open');
+    }
+    function closeImageLightbox() {
+      var lb = document.getElementById('mirror-lightbox');
+      if (lb) { lb.classList.remove('open'); lb.innerHTML = ''; }
+    }
+
+    // Render a delivered-files card body into `container` from a list of
+    // {path, media_type, size, isImage, name} refs. Image refs get a
+    // lazy thumbnail (bytes fetched only when the row scrolls into view)
+    // that opens the lightbox on click; other files get open/download
+    // links. The whole card lives outside the hide-tool-calls class so
+    // file deliveries stay visible even with tool rows collapsed.
+    function renderFileRefsInto(container, refs) {
+      var grid = document.createElement('div');
+      grid.className = 'm-file-grid';
+      for (var i = 0; i < refs.length; i++) {
+        var ref = refs[i];
+        var cell = document.createElement('div');
+        cell.className = 'm-file-cell';
+        var isImg = looksLikeImage(ref.path, ref.media_type);
+        if (isImg) {
+          var img = document.createElement('img');
+          img.className = 'm-file-thumb';
+          img.loading = 'lazy';
+          img.alt = ref.name || '';
+          img.src = fileUrl(ref.path, false);
+          img.title = ref.path;
+          (function(pth, nm) {
+            img.addEventListener('click', function() { openImageLightbox(pth, nm); });
+            img.addEventListener('error', function() {
+              this.classList.add('broken');
+              this.alt = 'unavailable';
+            });
+          })(ref.path, ref.name);
+          cell.appendChild(img);
+        } else {
+          var ic = document.createElement('div');
+          ic.className = 'm-file-icon';
+          ic.textContent = '📄';
+          cell.appendChild(ic);
+        }
+        var meta = document.createElement('div');
+        meta.className = 'm-file-meta';
+        var nameEl = document.createElement('a');
+        nameEl.className = 'm-file-name';
+        nameEl.textContent = ref.name || ref.path;
+        nameEl.title = ref.path;
+        nameEl.href = fileUrl(ref.path, false);
+        nameEl.target = '_blank';
+        nameEl.rel = 'noopener';
+        if (isImg) {
+          (function(pth, nm) {
+            nameEl.addEventListener('click', function(e) {
+              e.preventDefault();
+              openImageLightbox(pth, nm);
+            });
+          })(ref.path, ref.name);
+        }
+        meta.appendChild(nameEl);
+        if (typeof ref.size === 'number' && ref.size > 0) {
+          var sz = document.createElement('span');
+          sz.className = 'm-file-size';
+          sz.textContent = (ref.size >= 1048576)
+            ? (ref.size / 1048576).toFixed(1) + ' MB'
+            : Math.max(1, Math.round(ref.size / 1024)) + ' KB';
+          meta.appendChild(sz);
+        }
+        var dl = document.createElement('a');
+        dl.className = 'm-file-dl';
+        dl.textContent = 'download';
+        dl.href = fileUrl(ref.path, true);
+        meta.appendChild(dl);
+        cell.appendChild(meta);
+        grid.appendChild(cell);
+      }
+      container.appendChild(grid);
+    }
+
+    // Build the SendUserFile delivery card. Prefers the structured
+    // attachments off the result, falling back to the tool_call's
+    // `input.files` (bare paths) so the card renders from either event.
+    function renderFileDelivery(payload, ts) {
+      var refs = extractFileRefs(payload.response) || [];
+      if (refs.length === 0) {
+        var input = payload.input || {};
+        var files = Array.isArray(input.files) ? input.files : [];
+        for (var i = 0; i < files.length; i++) {
+          if (typeof files[i] !== 'string') continue;
+          refs.push({
+            path: files[i],
+            media_type: '',
+            size: null,
+            isImage: looksLikeImage(files[i], ''),
+            name: files[i].split('/').pop() || files[i],
+          });
+        }
+      }
+      var caption = '';
+      if (payload.input && typeof payload.input.caption === 'string') caption = payload.input.caption;
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-files';
+      el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+      var head = document.createElement('div');
+      head.className = 'm-evt-meta';
+      head.innerHTML = '<span class="m-label">files</span> ' + ts +
+        ' <span class="m-files-count">' + refs.length +
+        (refs.length === 1 ? ' file' : ' files') + '</span>';
+      el.appendChild(head);
+      if (caption) {
+        var cap = document.createElement('div');
+        cap.className = 'm-files-caption md-body';
+        cap.innerHTML = renderMarkdown(caption);
+        el.appendChild(cap);
+      }
+      if (refs.length > 0) renderFileRefsInto(el, refs);
+      return el;
+    }
 
     // Append a collapsed image-card details to a tool-result card. Each
     // image is rendered as a thumbnail-sized <img src=data:...> that
@@ -5730,7 +6021,61 @@
         // scripts/iframes/event-handlers.
         html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       }
-      return inlineListMarkers(html);
+      return linkifyPaths(inlineListMarkers(html));
+    }
+
+    // Turn absolute file paths mentioned in prose into clickable links so
+    // a path in an assistant reply can be previewed on demand — the
+    // dashboard fetches it through the mirror-agent (see fileUrl / the
+    // delegated .m-filelink handler). Walks the rendered fragment's text
+    // nodes and splits each on path runs (splitTextPaths); links are NOT
+    // added inside existing anchors (no nested links) or inside code/pre
+    // (paths there are usually literal snippets, not references). If the
+    // DOM APIs are unavailable the input is returned untouched.
+    function linkifyPaths(html) {
+      if (!html || typeof document === 'undefined') return html;
+      var root;
+      try {
+        root = document.createElement('div');
+        root.innerHTML = html;
+      } catch (e) {
+        return html;
+      }
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      var targets = [];
+      var n;
+      while ((n = walker.nextNode())) {
+        if (!n.nodeValue || n.nodeValue.indexOf('/') === -1) continue;
+        var skip = false;
+        var p = n.parentNode;
+        while (p && p !== root) {
+          var tag = p.tagName;
+          if (tag === 'A' || tag === 'CODE' || tag === 'PRE') { skip = true; break; }
+          p = p.parentNode;
+        }
+        if (!skip) targets.push(n);
+      }
+      for (var i = 0; i < targets.length; i++) {
+        var node = targets[i];
+        var segs = splitTextPaths(node.nodeValue);
+        if (segs.length < 2 && (segs.length === 0 || !segs[0].path)) continue;
+        var frag = document.createDocumentFragment();
+        for (var j = 0; j < segs.length; j++) {
+          var seg = segs[j];
+          if (seg.path) {
+            var a = document.createElement('a');
+            a.className = 'm-filelink';
+            a.setAttribute('data-path', seg.path);
+            a.setAttribute('href', '#');
+            a.textContent = seg.text;
+            frag.appendChild(a);
+          } else {
+            frag.appendChild(document.createTextNode(seg.text));
+          }
+        }
+        node.parentNode.replaceChild(frag, node);
+      }
+      return root.innerHTML;
     }
 
     // Browsers never include CSS-generated list markers (::marker, and
@@ -5879,6 +6224,10 @@
           el = renderQuestionExitPlanMode(evt, payload);
         } else if (payload.tool_name === 'AskUserQuestion') {
           el = renderQuestionAskUserQuestion(evt, payload);
+        } else if (payload.tool_name === 'SendUserFile') {
+          // User-facing file delivery: always shown as a file card (never
+          // hidden with tool rows), with on-demand thumbnails.
+          el = renderFileDelivery(payload, ts);
         } else if (inSubagent() && !isSubagentToolCall(payload)) {
           // Tool call from within a subagent context. Render as a compact
           // one-liner instead of a full card — the result handler only
@@ -5934,6 +6283,18 @@
         // up with.
         var images = extractImageBlocks(payload.response);
         if (existing) {
+          if (existing.classList.contains('m-evt-files')) {
+            // The result carries richer attachment metadata (sizes) than
+            // the call's bare paths — re-render the grid from it.
+            var fRefs = extractFileRefs(payload.response) || [];
+            if (fRefs.length > 0) {
+              var oldGrid = existing.querySelector('.m-file-grid');
+              if (oldGrid) oldGrid.remove();
+              renderFileRefsInto(existing, fRefs);
+            }
+            scrollToBottom();
+            return;
+          }
           if (existing.classList.contains('m-evt-question')) {
             markQuestionAnswered(existing, payload);
           } else if (existing.classList.contains('m-evt-subagent-tool')) {
@@ -5953,6 +6314,12 @@
           return;
         }
         // No matching call — render stand-alone result.
+        if (payload.tool_name === 'SendUserFile') {
+          el = renderFileDelivery(payload, ts);
+          transcriptEl.appendChild(el);
+          scrollToBottom();
+          return;
+        }
         el = document.createElement('div');
         el.className = 'm-evt m-evt-tool' + (payload.is_error ? ' is-error' : '');
         el.innerHTML = makeHeadline(payload.tool_name || 'tool', '(orphan result)');
@@ -6511,6 +6878,7 @@
       teardownCalled = true;
       disconnectTailObserver();
       try { attachAc.abort(); } catch (e) { /* ignore */ }
+      closeImageLightbox();
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       // Delayed-send: stop the countdown ticker and wipe the per-session

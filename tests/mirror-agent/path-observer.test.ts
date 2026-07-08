@@ -108,6 +108,39 @@ describe("PathObserver gate", () => {
     expect(obs.resolveAllowed("assets/concept-1.png")).toBeNull();
   });
 
+  test("observing a single-segment path does NOT open the whole filesystem", () => {
+    // Regression: dirname("/tmp") === "/", which as a root matched every
+    // absolute path via isWithin("/", …). A shallow observation must not
+    // grant reads outside the session's own tree.
+    const obs = new PathObserver(cwdDir);
+    obs.observeText("touched /tmp and /etc and /usr today");
+    expect(obs.resolveAllowed(outsideFile)).toBeNull();
+  });
+
+  test("observing a file in the home dir does not expose sibling home files", () => {
+    // dirname of a home-level file is the home dir itself — a shallow,
+    // sensitive root. Only the exact observed file may be fetched, not
+    // its neighbours (e.g. an SSH key).
+    const home = os.homedir();
+    const mentioned = path.join(home, "some-mentioned-file");
+    const neighbour = path.join(home, ".bashrc");
+    const obs = new PathObserver(cwdDir);
+    obs.observeText(`see ${mentioned}`);
+    // Even if the neighbour exists on the test machine, it must be refused
+    // because the home dir is not a safe same-tree root.
+    expect(obs.resolveAllowed(neighbour)).toBeNull();
+  });
+
+  test("an exactly-observed shallow file is still fetchable", () => {
+    // The safety floor applies to the same-tree fallback, not to exact
+    // matches: a file explicitly referenced in the session may be read
+    // even if it lives in a shallow/sensitive directory.
+    const shallow = path.join(root, "secret.key"); // 2-segment dir (root)
+    const obs = new PathObserver(cwdDir);
+    obs.observeText(`the key is at ${shallow}`);
+    expect(obs.resolveAllowed(shallow)).toBe(fs.realpathSync(shallow));
+  });
+
   test("a symlink escaping the allowed tree cannot reach an outside file", () => {
     // Place a symlink inside the observed dir pointing at the outside
     // secret. Requesting the symlink resolves to the outside real path,

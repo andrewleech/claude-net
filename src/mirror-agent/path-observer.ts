@@ -93,8 +93,16 @@ export class PathObserver {
 
   private add(p: string): void {
     if (this.paths.size < MAX_OBSERVED_PATHS) this.paths.add(p);
+    // Only a path's directory that passes the safe-root test becomes a
+    // same-tree root. Without this, observing a single-segment path like
+    // "/tmp" or "/etc" (ubiquitous in tool output) would record dirname
+    // "/" as a root, and isWithin("/", …) matches every absolute path —
+    // turning the fallback into a whole-filesystem read. The safe-root
+    // floor also keeps shallow shared dirs (/etc, the home dir itself)
+    // from exposing their entire contents just because one file in them
+    // was mentioned. Such a file stays fetchable via the exact-path check.
     const dir = path.dirname(p);
-    if (dir && dir !== p && this.dirs.size < MAX_OBSERVED_DIRS) {
+    if (isSafeRoot(dir) && this.dirs.size < MAX_OBSERVED_DIRS) {
       this.dirs.add(dir);
     }
   }
@@ -130,13 +138,17 @@ export class PathObserver {
       if (realpathOrNull(p) === real) return real;
     }
 
-    // Same-tree fallback: under the cwd or any observed directory.
+    // Same-tree fallback: under the cwd or an observed directory. Every
+    // root is re-checked with isSafeRoot here (not just at record time) so
+    // the cwd is held to the same floor — a shallow cwd like "/" or the
+    // home dir never enables a whole-tree read.
     const roots: string[] = [];
-    if (this.cwd) roots.push(this.cwd);
+    if (this.cwd && isSafeRoot(this.cwd)) roots.push(this.cwd);
     for (const d of this.dirs) roots.push(d);
     for (const root of roots) {
       const realRoot = realpathOrNull(root);
-      if (realRoot && isWithin(realRoot, real)) return real;
+      if (realRoot && isSafeRoot(realRoot) && isWithin(realRoot, real))
+        return real;
     }
     return null;
   }
@@ -153,6 +165,25 @@ function realpathOrNull(p: string): string | null {
   } catch {
     return null;
   }
+}
+
+// A directory is usable as a same-tree root only if it is specific enough
+// that granting read of its whole subtree is not a blanket filesystem
+// grant. Rejects "/", the home directory and its ancestors, and any path
+// with fewer than three segments (so "/etc", "/home/user", "/usr/lib" are
+// out while "/home/user/project" and deeper are in). This is the safety
+// floor for the same-tree fallback; exact observed paths bypass it, so a
+// specifically-referenced file in a shallow directory is still fetchable.
+const MIN_ROOT_SEGMENTS = 3;
+function isSafeRoot(dir: string): boolean {
+  if (!dir || !path.isAbsolute(dir)) return false;
+  const norm = path.normalize(dir);
+  if (norm === "/") return false;
+  const home = os.homedir();
+  if (norm === home) return false;
+  const segs = norm.split(path.sep).filter((s) => s.length > 0);
+  if (segs.length < MIN_ROOT_SEGMENTS) return false;
+  return true;
 }
 
 /** True if `child` is `root` itself or lives beneath it. Both must already

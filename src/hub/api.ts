@@ -198,27 +198,6 @@ export function apiPlugin(deps: ApiDeps): Elysia {
         };
       })
 
-      .post("/broadcast", ({ body, set }) => {
-        const { content } = body as Record<string, string | undefined>;
-        if (!content) {
-          set.status = 400;
-          return { error: "Missing required field: content" };
-        }
-
-        const result = router.routeBroadcast("dashboard@hub", content);
-        eventLog.push("message.broadcast", {
-          from: "dashboard@hub",
-          messageId: result.message_id,
-          deliveredTo: result.delivered_to,
-          skippedNoChannel: result.skipped_no_channel,
-        });
-        return {
-          message_id: result.message_id,
-          delivered_to: result.delivered_to,
-          skipped_no_channel: result.skipped_no_channel,
-        };
-      })
-
       .post("/send_team", ({ body, set }) => {
         const { team, content, reply_to } = body as Record<
           string,

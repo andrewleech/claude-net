@@ -287,30 +287,6 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     expect(event.content).toBe("hello dashboard");
   });
 
-  test("dashboard receives message:routed on broadcast", async () => {
-    const wsA = await agent();
-    const wsB = await agent();
-    await registerAgent(wsA, "bc-sender:tester@host");
-    await registerAgent(wsB, "bc-listener:tester@host");
-
-    const d = await dash();
-    await drainMessages(d, 150);
-
-    const eventP = waitForEvent(d, "message:routed");
-    wsA.send(
-      JSON.stringify({
-        action: "broadcast",
-        content: "broadcast msg",
-        requestId: "bc-1",
-      }),
-    );
-
-    const event = await eventP;
-    expect(event.from).toBe("bc-sender:tester@host");
-    expect(event.to).toBe("broadcast");
-    expect(event.content).toBe("broadcast msg");
-  });
-
   test("dashboard receives team:changed on join and leave", async () => {
     const agentWs = await agent();
     await registerAgent(agentWs, "proj:tj@host");

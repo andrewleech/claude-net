@@ -222,30 +222,6 @@ describe("REST API endpoints", () => {
     expect(body.error).toContain("Missing required fields");
   });
 
-  test("POST /api/broadcast delivers to all connected agents", async () => {
-    const wsA = await connect();
-    const wsB = await connect();
-    await registerAgent(wsA, "api-bc1:tester@host");
-    await registerAgent(wsB, "api-bc2:tester@host");
-
-    const msgA = waitForMessage(wsA);
-    const msgB = waitForMessage(wsB);
-
-    const resp = await fetch(`${baseUrl}/api/broadcast`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "broadcast from api" }),
-    });
-    expect(resp.status).toBe(200);
-    const body = (await resp.json()) as Msg;
-    expect(body.message_id).toBeTruthy();
-    expect(typeof body.delivered_to).toBe("number");
-
-    const [a, b] = await Promise.all([msgA, msgB]);
-    expect(a.from).toBe("dashboard@hub");
-    expect(b.from).toBe("dashboard@hub");
-  });
-
   test("POST /api/send_team delivers to team members", async () => {
     const wsA = await connect();
     const wsB = await connect();
@@ -300,17 +276,6 @@ describe("REST API endpoints", () => {
     expect(resp.status).toBe(400);
     const body = (await resp.json()) as Msg;
     expect(body.error).toBeTruthy();
-  });
-
-  test("POST /api/broadcast with missing content returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/broadcast`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    expect(resp.status).toBe(400);
-    const body = (await resp.json()) as Msg;
-    expect(body.error).toContain("Missing required field");
   });
 
   test("POST /api/send_team with missing fields returns 400", async () => {

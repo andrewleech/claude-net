@@ -208,13 +208,6 @@ describe("plugin helpers", () => {
       });
     });
 
-    test("broadcast: maps to broadcast action", () => {
-      const frame = plugin.mapToolToFrame("broadcast", {
-        content: "announcement",
-      });
-      expect(frame).toEqual({ action: "broadcast", content: "announcement" });
-    });
-
     test("send_team: maps to send_team action with type message", () => {
       const frame = plugin.mapToolToFrame("send_team", {
         team: "backend",
@@ -537,7 +530,6 @@ describe("plugin helpers", () => {
         "send_message",
         "register",
         "whoami",
-        "broadcast",
         "send_team",
         "join_team",
         "leave_team",
@@ -564,9 +556,9 @@ describe("plugin helpers", () => {
       }
     });
 
-    test("TOOL_DEFINITIONS has 12 well-formed entries", () => {
+    test("TOOL_DEFINITIONS has 11 well-formed entries", () => {
       expect(Array.isArray(TOOL_DEFINITIONS)).toBe(true);
-      expect(TOOL_DEFINITIONS.length).toBe(12);
+      expect(TOOL_DEFINITIONS.length).toBe(11);
       const names = new Set<string>();
       for (const tool of TOOL_DEFINITIONS as Array<{
         name: string;
@@ -586,7 +578,6 @@ describe("plugin helpers", () => {
       expect([...names].sort()).toEqual(
         [
           "_ack_channel",
-          "broadcast",
           "hub_events",
           "join_team",
           "leave_team",

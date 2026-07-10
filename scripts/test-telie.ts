@@ -503,25 +503,7 @@ async function testChannelCapabilityFlag() {
     "channelCapable=false recorded when agent registers without channels",
   );
 
-  // Broadcast should skip no-channel agents
-  const wsB = await connectWs();
-  const nameB = `smoke-bc-${Date.now()}:anl@telie-test`;
-  await registerAgent(wsB, nameB);
-
-  const bcResp = await wsRequest(wsB, {
-    action: "broadcast",
-    content: "test bc",
-  });
-  assert(bcResp.ok === true, "broadcast succeeds");
-  const bcData = bcResp.data as Record<string, unknown>;
-  // The no-channel agent should be counted in skipped
-  assert(
-    typeof bcData?.skipped_no_channel === "number",
-    "broadcast response has skipped_no_channel",
-  );
-
   ws.close();
-  wsB.close();
 }
 
 async function testDashboardSystemEvent() {

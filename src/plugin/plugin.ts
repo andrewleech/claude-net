@@ -96,7 +96,7 @@ const RENAME_WATCH_INTERVAL_MS = 5_000;
 // with the hub's `PLUGIN_VERSION_CURRENT` — which is sourced from
 // package.json — since the /plugin.ts bundle is served by the hub.
 // When bumping the version: change package.json AND this constant.
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.2.0";
 
 export const INSTRUCTIONS = `claude-net agent messaging plugin.
 
@@ -124,7 +124,6 @@ Available tools:
     - session:user: "claude-net:andrew" (matches across hosts)
     - user@host: "andrew@laptop" (matches across sessions)
     - Plain string: tries session name, then user, then host
-- broadcast(content) — send to all online agents
 - send_team(team, content, reply_to?) — send to all online members of a team
 - join_team(team) — join a team (creates it if new)
 - leave_team(team) — leave a team
@@ -202,8 +201,8 @@ store-and-forward, NO retry, and NO offline delivery of any kind.
 
 - If a recipient is offline, send_message returns an error and the
   message is dropped. It will NOT be delivered when they come back.
-- Broadcasts and team sends only reach agents online AT THE MOMENT of
-  send. Agents that join later do not get replayed messages.
+- Team sends only reach agents online AT THE MOMENT of send. Agents
+  that join later do not get replayed messages.
 - Do NOT tell the user "I'll send it and they'll get it when they come
   back online" or "the message is queued". That is not how this works.
 - When a send fails because the recipient is offline, report that
@@ -610,18 +609,6 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
-    name: "broadcast",
-    description:
-      "Send a message to every agent currently online. Agents that come online later do not receive it.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        content: { type: "string", description: "Message content" },
-      },
-      required: ["content"],
-    },
-  },
-  {
     name: "send_team",
     description:
       "Send a message to currently-online members of a team. Offline members are skipped — the message is NOT delivered when they reconnect.",
@@ -709,7 +696,7 @@ export const TOOL_DEFINITIONS = [
         filter: {
           type: "string",
           description:
-            "Prefix-filter by event name. 'agent' matches agent.registered, agent.disconnected, etc. 'message' matches message.sent, message.broadcast, etc.",
+            "Prefix-filter by event name. 'agent' matches agent.registered, agent.disconnected, etc. 'message' matches message.sent, message.team, etc.",
         },
         since_minutes: {
           type: "number",
@@ -911,8 +898,6 @@ export class Plugin {
           type: args.reply_to ? "reply" : "message",
           ...(args.reply_to ? { reply_to: args.reply_to } : {}),
         };
-      case "broadcast":
-        return { action: "broadcast", content: args.content };
       case "send_team":
         return {
           action: "send_team",

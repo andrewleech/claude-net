@@ -203,7 +203,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     })
     .get("/health", () => ({
       status: "ok",
-      version: "0.1.0",
+      version: "0.2.0",
       uptime: (Date.now() - startedAt.getTime()) / 1000,
       agents: registry.agents.size,
       teams: teams.teams.size,

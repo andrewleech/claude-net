@@ -26,7 +26,7 @@ workspace "claude-net" "C4 architecture model for claude-net: a lightweight LAN 
                 teams = component "Teams" "Team lifecycle management: implicit creation/deletion, join/leave, membership timeout on disconnect (2h window)." "TypeScript module (teams.ts)" {
                     tags "HubComponent"
                 }
-                router = component "Router" "Message routing: direct (by name), broadcast (all except sender), team (all online members except sender). Generates message_id, stamps from and timestamp." "TypeScript module (router.ts)" {
+                router = component "Router" "Message routing: direct (by name), team (all online members except sender). Generates message_id, stamps from and timestamp." "TypeScript module (router.ts)" {
                     tags "HubComponent"
                 }
                 pluginWsHandler = component "Plugin WS Handler" "WebSocket endpoint at /ws. Accepts plugin connections, dispatches incoming frames to registry/teams/router, pushes outbound messages to connected plugins." "TypeScript module (ws-plugin.ts)" {
@@ -35,7 +35,7 @@ workspace "claude-net" "C4 architecture model for claude-net: a lightweight LAN 
                 dashboardWsHandler = component "Dashboard WS Handler" "WebSocket endpoint at /ws/dashboard. Pushes agent:connected, agent:disconnected, message:routed, and team:changed events to dashboard clients." "TypeScript module (ws-dashboard.ts)" {
                     tags "HubComponent"
                 }
-                restApi = component "REST API" "HTTP endpoints under /api/*. GET /api/agents, GET /api/teams, POST /api/send, POST /api/broadcast, POST /api/send_team, GET /api/status." "TypeScript module (api.ts)" {
+                restApi = component "REST API" "HTTP endpoints under /api/*. GET /api/agents, GET /api/teams, POST /api/send, POST /api/send_team, GET /api/status." "TypeScript module (api.ts)" {
                     tags "HubComponent"
                 }
                 setup = component "Setup" "GET /setup endpoint. Returns a shell script that registers the claude-net MCP server in the client's Claude Code configuration. Resolves hub address from CLAUDE_NET_HOST env var or request Host header." "TypeScript module (setup.ts)" {
@@ -50,7 +50,7 @@ workspace "claude-net" "C4 architecture model for claude-net: a lightweight LAN 
                 tags "Plugin"
 
                 // Plugin components
-                mcpServer = component "MCP Server" "Declares claude/channel capability and tools capability. Registers 8 MCP tools (register, send_message, broadcast, send_team, join_team, leave_team, list_agents, list_teams). Provides instructions string for Claude's system prompt." "MCP SDK" {
+                mcpServer = component "MCP Server" "Declares claude/channel capability and tools capability. Registers MCP tools (register, send_message, send_team, join_team, leave_team, list_agents, list_teams). Provides instructions string for Claude's system prompt." "MCP SDK" {
                     tags "PluginComponent"
                 }
                 hubConnection = component "Hub Connection" "WebSocket client connecting to hub at /ws. Handles connection lifecycle, exponential backoff reconnect (1s to 30s max), and request/response correlation via requestId with 10s timeout." "WebSocket client" {
@@ -107,7 +107,7 @@ workspace "claude-net" "C4 architecture model for claude-net: a lightweight LAN 
         pluginWsHandler -> teams "Dispatches join_team, leave_team, list_teams actions" "" {
             tags "InternalRelationship"
         }
-        pluginWsHandler -> router "Dispatches send, broadcast, send_team actions" "" {
+        pluginWsHandler -> router "Dispatches send, send_team actions" "" {
             tags "InternalRelationship"
         }
         router -> registry "Resolves recipient names, checks online status" "" {

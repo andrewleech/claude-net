@@ -416,58 +416,6 @@ describe("e2e integration", () => {
     });
   });
 
-  // ── Broadcast ───────────────────────────────────────────────────────────
-
-  describe("broadcast", () => {
-    test("delivered to all except sender", async () => {
-      const alice = trackConnection(
-        await connectAgent(hub.port, "proj:alice@test"),
-      );
-      const bob = trackConnection(
-        await connectAgent(hub.port, "proj:bob@test"),
-      );
-      const charlie = trackConnection(
-        await connectAgent(hub.port, "proj:charlie@test"),
-      );
-
-      // Clear any prior messages
-      bob.messages.length = 0;
-      charlie.messages.length = 0;
-      alice.messages.length = 0;
-
-      send(alice.ws, {
-        action: "broadcast",
-        content: "hello everyone",
-        requestId: "bc1",
-      });
-
-      const bobMsg = await bob.waitForMessage(
-        (m) => m.event === "message" && m.content === "hello everyone",
-      );
-      expect(bobMsg.from).toBe("proj:alice@test");
-
-      const charlieMsg = await charlie.waitForMessage(
-        (m) => m.event === "message" && m.content === "hello everyone",
-      );
-      expect(charlieMsg.from).toBe("proj:alice@test");
-
-      // Sender gets response with delivered_to count
-      const resp = await alice.waitForMessage(
-        (m) => m.event === "response" && m.requestId === "bc1",
-      );
-      expect(resp.ok).toBe(true);
-      const data = resp.data as Msg;
-      expect(data.delivered_to).toBe(2);
-
-      // Alice should NOT have received the broadcast message
-      await tick();
-      const aliceBroadcast = alice.messages.find(
-        (m) => m.event === "message" && m.content === "hello everyone",
-      );
-      expect(aliceBroadcast).toBeUndefined();
-    });
-  });
-
   // ── Team operations ─────────────────────────────────────────────────────
 
   describe("team operations", () => {
@@ -821,33 +769,6 @@ describe("e2e integration", () => {
         (m) => m.event === "message" && m.content === "hello from dashboard",
       );
       expect(msg.from).toBe("dashboard@hub");
-    });
-
-    test("POST /api/broadcast delivers to all agents", async () => {
-      const alice = trackConnection(
-        await connectAgent(hub.port, "proj:alice@test"),
-      );
-      const bob = trackConnection(
-        await connectAgent(hub.port, "proj:bob@test"),
-      );
-      alice.messages.length = 0;
-      bob.messages.length = 0;
-
-      const resp = await fetch(`http://localhost:${hub.port}/api/broadcast`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content: "broadcast from api" }),
-      });
-      expect(resp.status).toBe(200);
-      const body = (await resp.json()) as Msg;
-      expect(body.delivered_to).toBe(2);
-
-      await alice.waitForMessage(
-        (m) => m.event === "message" && m.content === "broadcast from api",
-      );
-      await bob.waitForMessage(
-        (m) => m.event === "message" && m.content === "broadcast from api",
-      );
     });
 
     test("GET /api/agents returns correct list", async () => {

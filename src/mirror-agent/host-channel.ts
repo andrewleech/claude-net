@@ -392,8 +392,30 @@ async function handleHostLaunch(
     "-p",
     "#{pane_current_command}",
   ]);
+  // --resume <sid> targets a specific dead session and takes precedence
+  // over --continue. Neither applies to a freshly-created dir (nothing to
+  // resume/continue). resume_sid is re-validated here (defense in depth —
+  // the same posture as cwd's local resolveAndValidate) before it is
+  // interpolated into the send-keys shell string; a bad value is dropped
+  // rather than trusted from the frame. The leading char must be
+  // alphanumeric so it can't be read as a CLI flag.
+  const SID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+  if (req.resume_sid !== undefined && !SID_RE.test(req.resume_sid)) {
+    return {
+      action: "host_launch_done",
+      request_id: req.request_id,
+      error: "invalid resume_sid",
+    };
+  }
+  const resumeSid =
+    req.resume_sid && !dirWasCreated ? req.resume_sid : undefined;
+  const sessionArg = resumeSid
+    ? ` --resume ${resumeSid}`
+    : req.continue_session && !dirWasCreated
+      ? " --continue"
+      : "";
   if (IDLE_SHELLS.has(paneCmd)) {
-    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${req.continue_session && !dirWasCreated ? " --continue" : ""}`;
+    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${sessionArg}`;
     await tmuxCapture(["send-keys", "-t", tmuxSession, relaunch, "Enter"]);
     return {
       action: "host_launch_done",
@@ -415,7 +437,11 @@ async function handleHostLaunch(
     "claude-channels",
   ];
   if (req.skip_permissions) args.push("--dangerously-skip-permissions");
-  if (req.continue_session && !dirWasCreated) args.push("--continue");
+  if (resumeSid) {
+    args.push("--resume", resumeSid);
+  } else if (req.continue_session && !dirWasCreated) {
+    args.push("--continue");
+  }
   try {
     const proc = spawn("tmux", args, {
       detached: true,

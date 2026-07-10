@@ -54,6 +54,26 @@ describe("GET /api/mirror/sessions/all", () => {
       expect(typeof s.owner_agent).toBe("string");
       expect(typeof s.watcher_count).toBe("number");
       expect(typeof s.transcript_len).toBe("number");
+      // Unbound (no mirror-agent WS) sessions report attached=false so the
+      // dashboard can dim them as reconnect candidates.
+      expect(s.attached).toBe(false);
     }
+  });
+
+  test("attached flips true when a mirror-agent WS is bound", async () => {
+    const c = hub.reg.createSession("a:u@h", "/a");
+    expect(c.ok).toBe(true);
+    if (!c.ok) return;
+    hub.reg.setAgentConnection(c.entry.sid, {
+      ws: { send: () => {} },
+      wsIdentity: {},
+    } as never);
+
+    const r = await fetch(
+      `http://localhost:${hub.port}/api/mirror/sessions/all`,
+    );
+    const list = (await r.json()) as Array<Record<string, unknown>>;
+    const s = list.find((x) => x.sid === c.entry.sid);
+    expect(s?.attached).toBe(true);
   });
 });

@@ -266,7 +266,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
         mirrorRegistry,
       }),
     )
-    .use(mirrorPlugin({ mirrorRegistry, scheduler }))
+    .use(mirrorPlugin({ mirrorRegistry, scheduler, hostRegistry }))
     .use(
       uploadsPlugin({
         mirrorRegistry,

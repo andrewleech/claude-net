@@ -25,6 +25,8 @@ interface SlashCommand {
   source: string;
 }
 import { Elysia } from "elysia";
+import { launchOnHost } from "./host";
+import type { HostRegistry } from "./host-registry";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 import type { Scheduler } from "./scheduler";
@@ -37,14 +39,14 @@ const INIT_TRANSCRIPT_WINDOW = 200;
  * How long a closed session stays in the registry's in-memory map before
  * being dropped. Default 1 hour — long enough for the user to revisit a
  * transcript after close, short enough that orphan-swept gravestones
- * don't accumulate in the dashboard sidebar. Was 24h originally; that
- * was overkill for orphan-closed entries which have no user value.
- * Overridable via `CLAUDE_NET_MIRROR_RETENTION_MS` env var.
+ * don't accumulate in the dashboard sidebar. Closed sessions stay listed
+ * (dimmed, offline) for this long so they remain reconnectable from the
+ * dashboard, then age out. Overridable via `CLAUDE_NET_MIRROR_RETENTION_MS`.
  */
 const DEFAULT_RETENTION_MS = (() => {
   const raw = Number(process.env.CLAUDE_NET_MIRROR_RETENTION_MS);
   if (Number.isFinite(raw) && raw >= 0) return raw;
-  return 60 * 60 * 1000;
+  return 6 * 60 * 60 * 1000;
 })();
 
 /**
@@ -287,9 +289,10 @@ export class MirrorRegistry {
    * session up. Sweeping bound sessions would prematurely kill
    * legitimate idle CC sessions whose user has stopped typing.
    *
-   * Uses closeAndDrop so the gravestone doesn't linger for the
-   * retention window — orphan-swept entries are user-invisible and
-   * the dashboard sidebar should clear them immediately.
+   * Uses closeSession (not closeAndDrop) so the session lingers as a
+   * closed gravestone for the retention window — it stays listed in the
+   * dashboard sidebar (dimmed, offline) and remains reconnectable until
+   * it ages out.
    */
   private sweepOrphans(): void {
     const cutoff = Date.now() - this.orphanCloseMs;
@@ -301,7 +304,7 @@ export class MirrorRegistry {
       victims.push(entry.sid);
     }
     for (const sid of victims) {
-      this.closeAndDrop(sid, "agent_timeout");
+      this.closeSession(sid, "agent_timeout");
     }
   }
 
@@ -878,6 +881,14 @@ export class MirrorRegistry {
         // per-watcher send failure — ignore.
       }
     }
+    // Also tell the dashboard so the sidebar can flip the session to
+    // dimmed/offline (a reconnect candidate) the instant the source dies,
+    // instead of waiting for the orphan sweep.
+    this.dashboardBroadcast({
+      event: "mirror:agent_state",
+      sid: entry.sid,
+      attached,
+    });
   }
 
   /**
@@ -1722,6 +1733,7 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     created_at: entry.createdAt.toISOString(),
     last_event_at: entry.lastEventAt.toISOString(),
     closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
+    attached: entry.agent !== null && entry.closedAt === null,
     watcher_count: entry.watchers.size,
     transcript_len: entry.transcript.length,
     activity_state: entry.activityState,
@@ -1734,10 +1746,13 @@ export interface MirrorPluginDeps {
   mirrorRegistry: MirrorRegistry;
   /** Optional — when absent the schedule-inject routes return 501. */
   scheduler?: Scheduler;
+  /** Optional — when absent the reconnect route can't relaunch dead
+   *  sessions and returns 501. */
+  hostRegistry?: HostRegistry;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry, scheduler } = deps;
+  const { mirrorRegistry, scheduler, hostRegistry } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })
@@ -2226,6 +2241,56 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           return { error: result.error };
         }
         return { accepted: true };
+      })
+
+      /**
+       * POST /:sid/reconnect — bring a dead session back. If the session's
+       * mirror-agent is still bound (source alive), there is nothing to
+       * relaunch and we report `already_attached` — the auto-reattach path
+       * handles the "alive but unregistered" case. Otherwise we relaunch the
+       * owning host's daemon with `claude --resume <sid>` to restore the
+       * conversation. Requires the owning host's daemon to be connected;
+       * when it isn't, returns 503 (the host is offline / rebooted).
+       */
+      .post("/:sid/reconnect", async ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const entry = found.entry;
+        // Source still bound → nothing to relaunch.
+        if (entry.agent && !entry.closedAt) {
+          return { ok: true, status: "already_attached" };
+        }
+        if (!hostRegistry) {
+          set.status = 501;
+          return { error: "reconnect unavailable: host registry not wired" };
+        }
+        // owner_agent is `session:user@host`; the host_id is the `user@host`
+        // suffix. The session name may itself contain ':' (a /rename title
+        // like "feat: x"), so split on the LAST ':' — neither user nor host
+        // can contain one. Require an '@' to reject malformed owners.
+        const colon = entry.ownerAgent.lastIndexOf(":");
+        const hostId = colon >= 0 ? entry.ownerAgent.slice(colon + 1) : "";
+        if (!hostId.includes("@")) {
+          set.status = 400;
+          return { error: "cannot derive host_id from session owner" };
+        }
+        const r = await launchOnHost(hostRegistry, hostId, {
+          cwd: entry.cwd,
+          resume_sid: entry.sid,
+        });
+        // A missing host means the daemon isn't connected — surface it as
+        // 503 (offline) rather than the generic 404 launchOnHost uses.
+        if (r.status === 404) {
+          set.status = 503;
+          return { error: `host '${hostId}' is offline — cannot reconnect` };
+        }
+        set.status = r.status;
+        if (r.retryAfter) set.headers["retry-after"] = r.retryAfter;
+        return r.body;
       })
 
       /**

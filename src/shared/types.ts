@@ -563,6 +563,20 @@ export interface MirrorActivityEvent {
 }
 
 /**
+ * Broadcast to the dashboard socket when a session's mirror-agent binding
+ * changes (source went away / came back). Lets the sidebar flip a session
+ * to dimmed/offline (reconnect candidate) the moment the source dies,
+ * rather than waiting for the orphan sweep. Distinct from the per-watcher
+ * `mirror:agent_state` frame, which carries the same fields to the detail
+ * view's LIVE indicator.
+ */
+export interface MirrorAgentStateEvent {
+  event: "mirror:agent_state";
+  sid: string;
+  attached: boolean;
+}
+
+/**
  * Broadcast when an MCP agent renames itself via register(). Every mirror
  * session whose ownerAgent matched the old name has been rewritten to the
  * new name; dashboards update their sidebar labels in place.
@@ -611,6 +625,10 @@ export interface HostLaunchRequest {
   create_if_missing?: boolean;
   skip_permissions?: boolean;
   continue_session?: boolean;
+  /** Resume a specific Claude Code session by id (`claude --resume <sid>`).
+   *  Takes precedence over `continue_session`. Ignored when the cwd was
+   *  freshly created (nothing to resume). */
+  resume_sid?: string;
 }
 
 export interface HostLsDoneFrame {
@@ -695,6 +713,7 @@ export type DashboardEvent =
   | MirrorWatcherJoinedEvent
   | MirrorWatcherLeftEvent
   | MirrorActivityEvent
+  | MirrorAgentStateEvent
   | MirrorOwnerRenamedEvent
   | HostConnectedEvent
   | HostDisconnectedEvent
@@ -837,6 +856,10 @@ export interface MirrorSessionSummary {
   last_event_at: string;
   /** ISO string if the session has been closed, null otherwise. */
   closed_at: string | null;
+  /** True when a mirror-agent WS is currently bound to this session (the
+   *  source is live). False means the source has gone away — the session
+   *  is shown offline/dead in the dashboard and is a reconnect candidate. */
+  attached: boolean;
   watcher_count: number;
   transcript_len: number;
   /** Coarse derived state used to color the dashboard session-row dot. */

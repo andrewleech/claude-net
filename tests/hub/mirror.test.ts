@@ -1233,10 +1233,11 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("orphan sweep closes + drops stale sessions (no agent)", async () => {
+  test("orphan sweep closes but retains stale sessions (no agent)", async () => {
     // orphanCloseMs: 20 → sessions whose last event is >20ms ago get
-    // close+dropped on the next sweep. The session must vanish from the
-    // map immediately (no retention wait), since closeAndDrop is used.
+    // closed on the next sweep. The session stays in the map as a closed
+    // gravestone (reconnectable, dimmed in the sidebar) for the retention
+    // window rather than vanishing — closeSession, not closeAndDrop.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -1250,8 +1251,9 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       const sid = r.entry.sid;
       r.entry.lastEventAt = new Date(Date.now() - 60_000);
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
-      // closeAndDrop is used so the entry is gone, not just closed.
-      expect(quick.hasSession(sid)).toBe(false);
+      // Retained as a closed gravestone, not dropped.
+      expect(quick.hasSession(sid)).toBe(true);
+      expect(r.entry.closedAt).not.toBeNull();
     } finally {
       quick.stop();
     }

@@ -208,35 +208,6 @@ describe("Hub observability REST endpoints", () => {
     expect(hit?.data.messageId).toBe(null);
   });
 
-  test("broadcast emits message.broadcast", async () => {
-    const ws = await connect();
-    await registerAndWait(ws, "evt-bc:tester@host");
-
-    const resp = waitForFrame(
-      ws,
-      (f) => f.event === "response" && f.requestId === "bc-1",
-    );
-    ws.send(
-      JSON.stringify({
-        action: "broadcast",
-        content: "hello all",
-        requestId: "bc-1",
-      }),
-    );
-    await resp;
-
-    const body = await fetchEvents(baseUrl, {
-      event: "message.broadcast",
-      agent: "evt-bc:tester@host",
-    });
-    expect(body.count).toBeGreaterThanOrEqual(1);
-    const entry = body.events[body.events.length - 1];
-    expect(entry?.data.from).toBe("evt-bc:tester@host");
-    expect(typeof entry?.data.messageId).toBe("string");
-    expect(typeof entry?.data.deliveredTo).toBe("number");
-    expect(typeof entry?.data.skippedNoChannel).toBe("number");
-  });
-
   test("send_team emits message.team with team name", async () => {
     const wsA = await connect();
     const wsB = await connect();

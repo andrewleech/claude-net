@@ -2269,7 +2269,6 @@
   .cn-log-route { color: var(--text-dim); }
   .cn-log-time { color: var(--text-muted); }
   .cn-log-content { color: var(--text); white-space: pre-wrap; word-break: break-word; }
-  .cn-log-broadcast { border-left-color: var(--gold); }
   .cn-log-team { border-left-color: var(--cyan); }
 
   /* Sidebar rows — unified list-group style. */
@@ -2753,7 +2752,7 @@
       <section id="message-log-view" class="cn-view">
         <div class="cn-message-log" id="message-log">
           <div class="cn-log-empty">
-            No agent messages yet. When agents talk to each other via send_message / send_team / broadcast, it'll show up here.
+            No agent messages yet. When agents talk to each other via send_message / send_team, it'll show up here.
           </div>
         </div>
       </section>
@@ -3446,10 +3445,7 @@
   function addLogMessage(event) {
     var routeType = 'direct';
     var toLabel = event.to;
-    if (event.to === 'broadcast') {
-      routeType = 'broadcast';
-      toLabel = 'broadcast';
-    } else if (event.team) {
+    if (event.team) {
       routeType = 'team';
       toLabel = 'team:' + event.team;
     }
@@ -5295,17 +5291,6 @@
           var verb = (p.input && p.input.reply_to) ? '↩ reply to' : '→ to';
           el.innerHTML = makeHeadline('claude-net',
             verb + ' <code>' + escapeHtml(to) + '</code>',
-            escapeHtml(content.length > 160 ? content.slice(0, 157) + '…' : content));
-        },
-        result: function(p, el) {
-          if (p.is_error) setStatusError(el); else setStatusOk(el, 'sent');
-        },
-      },
-      'mcp__claude-net__broadcast': {
-        call: function(p, el) {
-          var content = (p.input && p.input.content) || '';
-          el.innerHTML = makeHeadline('claude-net',
-            '📢 broadcast',
             escapeHtml(content.length > 160 ? content.slice(0, 157) + '…' : content));
         },
         result: function(p, el) {

@@ -177,35 +177,6 @@ describe("WebSocket Plugin (integration)", () => {
     expect(inbound.message_id).toBeTruthy();
   });
 
-  test("broadcast from one agent to others", async () => {
-    const wsA = await connect();
-    const wsB = await connect();
-    const wsC = await connect();
-    await registerAgent(wsA, "proj:broadcaster@host");
-    await registerAgent(wsB, "proj:listener1@host");
-    await registerAgent(wsC, "proj:listener2@host");
-
-    const msgB = waitForMessage(wsB);
-    const msgC = waitForMessage(wsC);
-    const responseA = waitForMessage(wsA);
-
-    wsA.send(
-      JSON.stringify({
-        action: "broadcast",
-        content: "hey everyone",
-        requestId: "bc-1",
-      }),
-    );
-
-    const [bMsg, cMsg, aResp] = await Promise.all([msgB, msgC, responseA]);
-
-    expect(aResp.ok).toBe(true);
-    expect((aResp.data as Msg)?.delivered_to).toBe(2);
-    expect(bMsg.from).toBe("proj:broadcaster@host");
-    expect(cMsg.from).toBe("proj:broadcaster@host");
-    expect(bMsg.to).toBe("broadcast");
-  });
-
   test("join team, send team message, verify delivery", async () => {
     const wsA = await connect();
     const wsB = await connect();

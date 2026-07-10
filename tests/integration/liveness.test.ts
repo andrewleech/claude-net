@@ -363,46 +363,6 @@ describe("channel liveness — hub WS ping/pong", () => {
     expect(inbound).toBeUndefined();
   });
 
-  test("L5 — broadcast with mixed capability reports skipped_no_channel", async () => {
-    const a = await connectAgent(port, "l5a:alice@test", true);
-    const b = await connectAgent(port, "l5b:bob@test", true);
-    const c = await connectAgent(port, "l5c:carol@test", false);
-    conns.push(a, b, c);
-
-    await waitMs(30);
-    a.messages.length = 0;
-    b.messages.length = 0;
-    c.messages.length = 0;
-
-    a.ws.send(
-      JSON.stringify({
-        action: "broadcast",
-        content: "hello team",
-        requestId: "l5-bcast",
-      }),
-    );
-
-    await waitMs(50);
-
-    const resp = a.messages.find(
-      (m) => m.event === "response" && m.requestId === "l5-bcast",
-    );
-    expect(resp).toBeDefined();
-    expect(resp?.ok).toBe(true);
-    const data = resp?.data as Record<string, unknown> | undefined;
-    // Sender excluded (existing behavior). Bob capable → 1 delivered.
-    // Carol incapable → 1 skipped.
-    expect(data?.delivered_to).toBe(1);
-    expect(data?.skipped_no_channel).toBe(1);
-
-    expect(
-      b.messages.find((m) => m.event === "message" && m.to === "broadcast"),
-    ).toBeDefined();
-    expect(
-      c.messages.find((m) => m.event === "message" && m.to === "broadcast"),
-    ).toBeUndefined();
-  });
-
   test("L6 — dashboard agent:connected event carries channel_capable", async () => {
     const dashboard = await connectDashboard(port);
     conns.push(dashboard);

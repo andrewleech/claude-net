@@ -26,13 +26,6 @@ export type RouteDirectResult =
       error: string;
     };
 
-export type RouteBroadcastResult = {
-  ok: true;
-  message_id: string;
-  delivered_to: number;
-  skipped_no_channel: number;
-};
-
 export type RouteTeamResult =
   | {
       ok: true;
@@ -137,41 +130,6 @@ export class Router {
       };
     }
     return { ok: true, message_id, outcome: "delivered" };
-  }
-
-  routeBroadcast(from: string, content: string): RouteBroadcastResult {
-    const message_id = crypto.randomUUID();
-    const timestamp = new Date().toISOString();
-    let delivered_to = 0;
-    let skipped_no_channel = 0;
-
-    const frame: InboundMessageFrame = {
-      event: "message",
-      message_id,
-      from,
-      to: "broadcast",
-      type: "message",
-      content,
-      timestamp,
-    };
-    const serialized = JSON.stringify(frame);
-
-    for (const entry of this.registry.agents.values()) {
-      if (entry.fullName === from) continue;
-      if (!entry.channelCapable) {
-        skipped_no_channel++;
-        continue;
-      }
-
-      try {
-        entry.ws.send(serialized);
-        delivered_to++;
-      } catch {
-        // Half-open WS — the close handler will clean it up.
-      }
-    }
-
-    return { ok: true, message_id, delivered_to, skipped_no_channel };
   }
 
   routeTeam(

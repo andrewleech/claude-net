@@ -13,11 +13,11 @@ C4Component
         Component(dashboardWs, "Dashboard WS Handler", "ws-dashboard.ts", "WebSocket at /ws/dashboard. Pushes agent:connected/disconnected, message:routed, team:changed, system:event, mirror:*, host:* events. Replays initial state on connect.")
         Component(mirrorWs, "Mirror WS Handler", "mirror.ts", "WebSocket at /ws/mirror/{sid}. Registers watchers, replays transcript on connect, forwards live events.")
         Component(hostWs, "Host WS Handler", "ws-host.ts", "WebSocket at /ws/host. Accepts host daemon connections, handles ls/mkdir/launch RPCs.")
-        Component(restApi, "REST API", "api.ts", "GET /api/agents, /api/teams, /api/hosts, /api/status. POST /api/send, /api/broadcast, /api/send_team. GET /api/events, /api/events/summary.")
+        Component(restApi, "REST API", "api.ts", "GET /api/agents, /api/teams, /api/hosts, /api/status. POST /api/send, /api/send_team. GET /api/events, /api/events/summary.")
         Component(mirrorApi, "Mirror REST API", "mirror.ts", "POST /api/mirror/session. GET /api/mirror/sessions, /:sid/transcript, /:sid/commands. POST /:sid/inject, /:sid/paste, /:sid/stop, /:sid/close. GET /api/mirror/archive/:sid.")
         Component(registry, "Registry", "registry.ts", "Agent registration, name uniqueness, full/short name resolution, disconnect timeout with team membership restoration.")
         Component(teams, "Teams", "teams.ts", "Team implicit creation/deletion, join/leave, membership queries.")
-        Component(router, "Router", "router.ts", "Message routing: direct, broadcast, team. Generates message_id, stamps from and timestamp. Returns structured outcome.")
+        Component(router, "Router", "router.ts", "Message routing: direct, team. Generates message_id, stamps from and timestamp. Returns structured outcome.")
         Component(mirrorRegistry, "Mirror Registry", "mirror.ts", "Session state: transcript ring buffer (2000 events), watcher set, agent connection, orphan sweeper. Optional persistent store.")
         Component(hostRegistry, "Host Registry", "host-registry.ts", "Connected host daemons with metadata.")
         Component(eventLog, "Event Log", "event-log.ts", "Bounded ring buffer (default 10k entries). Push/query/summary. Notifies listener on push for dashboard broadcast.")
@@ -34,7 +34,7 @@ C4Component
 
     Rel(pluginWs, registry, "register, name resolution")
     Rel(pluginWs, teams, "join_team, leave_team, list_teams")
-    Rel(pluginWs, router, "send, broadcast, send_team")
+    Rel(pluginWs, router, "send, send_team")
     Rel(pluginWs, eventLog, "push events")
     Rel(pluginWs, mirrorRegistry, "mirror_event, mirror_paste_done, mirror_commands_done")
 

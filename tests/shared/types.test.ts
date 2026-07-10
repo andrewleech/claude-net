@@ -3,7 +3,6 @@ import type {
   AgentConnectedEvent,
   AgentDisconnectedEvent,
   AgentInfo,
-  BroadcastFrame,
   DashboardEvent,
   ErrorFrame,
   HubFrame,
@@ -61,11 +60,6 @@ describe("shared types", () => {
       }
     });
 
-    test("BroadcastFrame", () => {
-      const frame: PluginFrame = { action: "broadcast", content: "announce" };
-      expect(frame.action).toBe("broadcast");
-    });
-
     test("SendTeamFrame", () => {
       const frame: PluginFrame = {
         action: "send_team",
@@ -120,7 +114,6 @@ describe("shared types", () => {
         case "send":
           expect(frame.reply_to).toBe("msg-1");
           break;
-        case "broadcast":
         case "send_team":
         case "join_team":
         case "leave_team":

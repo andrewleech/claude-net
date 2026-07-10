@@ -2,7 +2,7 @@
 
 ## 1. Purpose and Scope
 
-claude-net is a lightweight messaging hub for Claude Code agents on a LAN. It enables multiple concurrent Claude Code sessions to communicate through named identities: agents register with human-readable names, send direct messages, broadcast, and coordinate through teams.
+claude-net is a lightweight messaging hub for Claude Code agents on a LAN. It enables multiple concurrent Claude Code sessions to communicate through named identities: agents register with human-readable names, send direct messages, and coordinate through teams.
 
 The system also provides session mirroring: a local daemon captures Claude Code hook events and streams them to the hub, allowing developers to observe session activity in real time from any browser on the LAN.
 
@@ -41,7 +41,7 @@ The system comprises four runtime participants:
 - **Responsibilities:**
   - Agent registration and name resolution
   - Team lifecycle management
-  - Message routing (direct, broadcast, team)
+  - Message routing (direct, team)
   - WebSocket endpoint for plugins (`/ws`)
   - WebSocket endpoint for dashboard live events (`/ws/dashboard`)
   - WebSocket endpoint for mirror session watchers (`/ws/mirror/{sid}`)
@@ -115,7 +115,7 @@ The system comprises four runtime participants:
 |-----------|------|---------------|
 | **Registry** | `registry.ts` | Agent registration, name uniqueness enforcement, full/short name resolution, disconnect timeout tracking (configurable grace window for team membership restoration) |
 | **Teams** | `teams.ts` | Team implicit creation/deletion, join/leave operations, membership queries, timeout-based cleanup |
-| **Router** | `router.ts` | Message routing for direct, broadcast, and team targets. Generates `message_id` (UUID), stamps `from` and `timestamp` on all messages. Returns structured outcome (delivered / nak with reason) |
+| **Router** | `router.ts` | Message routing for direct and team targets. Generates `message_id` (UUID), stamps `from` and `timestamp` on all messages. Returns structured outcome (delivered / nak with reason) |
 | **Plugin WS Handler** | `ws-plugin.ts` | WebSocket endpoint at `/ws`. Parses incoming JSON frames, dispatches to Registry/Teams/Router/EventLog/MirrorRegistry, sends response and message frames. Manages WS ping/pong liveness and stale-connection eviction |
 | **Dashboard WS Handler** | `ws-dashboard.ts` | WebSocket endpoint at `/ws/dashboard`. Pushes `agent:connected`, `agent:disconnected`, `message:routed`, `team:changed`, `system:event`, `mirror:*`, and `host:*` events. Sends initial state on connection. Acts as virtual `dashboard@hub` agent |
 | **Mirror WS Handler** | `mirror.ts` (wsMirrorPlugin) | WebSocket endpoint at `/ws/mirror/{sid}`. Registers watchers; replays transcript on connect; forwards new events live |
@@ -123,7 +123,7 @@ The system comprises four runtime participants:
 | **Mirror Registry** | `mirror.ts` (MirrorRegistry) | In-memory session state: transcript ring buffer (2000 events), watcher set, agent connection, paste/command pending maps, orphan sweeper. Optional persistent store interface |
 | **Host Registry** | `host-registry.ts` | In-memory set of connected host daemons with their metadata (home dir, recent cwds, launch policy) |
 | **Event Log** | `event-log.ts` | Bounded ring buffer (default 10,000 entries) of structured hub events. Push/query/summary API. Notifies a listener callback on each push (used for dashboard broadcast) |
-| **REST API** | `api.ts` | `GET /api/agents`, `GET /api/teams`, `GET /api/hosts`, `GET /api/status`, `POST /api/send`, `POST /api/broadcast`, `POST /api/send_team`, `GET /api/events`, `GET /api/events/summary` |
+| **REST API** | `api.ts` | `GET /api/agents`, `GET /api/teams`, `GET /api/hosts`, `GET /api/status`, `POST /api/send`, `POST /api/send_team`, `GET /api/events`, `GET /api/events/summary` |
 | **Mirror REST API** | `mirror.ts` (mirrorPlugin) | `POST /api/mirror/session`, `GET /api/mirror/sessions`, `GET /api/mirror/sessions/all`, `GET /api/mirror/:sid/transcript`, `POST /api/mirror/:sid/close`, `POST /api/mirror/:sid/rename`, `POST /api/mirror/:sid/inject`, `POST /api/mirror/:sid/paste`, `POST /api/mirror/:sid/stop`, `GET /api/mirror/:sid/commands`, `GET /api/mirror/config`, `GET /api/mirror/archive/:sid` |
 | **Uploads** | `uploads.ts` | Temporary file store for paste payloads too large for a single inject. Keyed by session; purged on session close |
 | **Setup** | `setup.ts` | `GET /setup` endpoint. Generates a shell script that registers claude-net as an MCP server in Claude Code config |
@@ -157,7 +157,6 @@ All frames are JSON with an optional `requestId` for request-response correlatio
 |--------|-------------|
 | `register` | Claim an identity. Carries `name`, `channel_capable`, `plugin_version` |
 | `send` | Direct message. Carries `to`, `content`, `type` (`message`\|`reply`), optional `reply_to` |
-| `broadcast` | Message to all online agents. Carries `content` |
 | `send_team` | Message to all online team members. Carries `team`, `content`, `type`, optional `reply_to` |
 | `join_team` | Join a team (created implicitly). Carries `team` |
 | `leave_team` | Leave a team (deleted when last member leaves). Carries `team` |
@@ -192,7 +191,7 @@ Dashboard WebSocket is read-only from the dashboard's perspective. All outbound 
 |-------|---------|
 | `agent:connected` | Agent registers or reconnects |
 | `agent:disconnected` | Agent WS closes |
-| `message:routed` | Any message delivery attempt (direct, broadcast, team) |
+| `message:routed` | Any message delivery attempt (direct, team) |
 | `team:changed` | Team join, leave, create, or delete |
 | `system:event` | Every EventLog push — carries `ts`, `name` (event type), `data` |
 | `mirror:session_started` | New mirror session created |
@@ -229,7 +228,6 @@ Every entry: `{ ts: number, event: string, data: Record<string, unknown> }`
 | `agent.evicted` | Ping tick stale threshold | `fullName`, `lastPongAt`, `silentForMs` |
 | `agent.upgraded` | Version mismatch on register | `fullName`, `reportedVersion`, `currentVersion` |
 | `message.sent` | routeDirect completes | `from`, `to`, `messageId`, `outcome`, `reason?`, `elapsedMs` |
-| `message.broadcast` | routeBroadcast completes | `from`, `messageId`, `deliveredTo`, `skippedNoChannel` |
 | `message.team` | routeTeam completes | `from`, `team`, `messageId`, `deliveredTo`, `skippedNoChannel` |
 | `ping.tick` | Ping interval fires | `agentCount`, `evictedCount` |
 
@@ -240,7 +238,6 @@ Every entry: `{ ts: number, event: string, data: Record<string, unknown> }`
 | `whoami` | Local only (no hub round-trip) |
 | `register` | `register` |
 | `send_message` | `send` |
-| `broadcast` | `broadcast` |
 | `send_team` | `send_team` |
 | `join_team` | `join_team` |
 | `leave_team` | `leave_team` |

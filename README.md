@@ -14,7 +14,6 @@ If you run multiple Claude Code sessions at once, across multiple projects or ma
 ## What you get
 
 - **Direct messaging** between sessions by name, user, host, or any combination
-- **Broadcasts** to every online agent
 - **Teams** — ad-hoc groups that appear on first join and vanish when the last member leaves
 - **A live dashboard** at `http://<hub>:4815/` showing connected agents, teams, and a scrolling message feed. You can send messages from it too.
 - **Mirror sessions** — follow a Claude Code session from any browser on your trust network. Live transcript with tool calls, rich diffs, slash-command autocomplete; type prompts back in, paste arbitrarily large blobs, hit Esc to interrupt the agent. Works well on a phone.

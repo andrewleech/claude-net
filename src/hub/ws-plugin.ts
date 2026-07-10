@@ -354,34 +354,6 @@ export function wsPlugin(
           break;
         }
 
-        case "broadcast": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          const result = router.routeBroadcast(senderName, data.content);
-          sendResponse(ws, requestId, true, {
-            message_id: result.message_id,
-            delivered_to: result.delivered_to,
-            skipped_no_channel: result.skipped_no_channel,
-          });
-          dashboardBroadcastFn({
-            event: "message:routed",
-            message_id: result.message_id,
-            from: senderName,
-            to: "broadcast",
-            type: "message",
-            content: data.content,
-            timestamp: new Date().toISOString(),
-          });
-          emit("message.broadcast", {
-            from: senderName,
-            messageId: result.message_id,
-            deliveredTo: result.delivered_to,
-            skippedNoChannel: result.skipped_no_channel,
-          });
-          break;
-        }
-
         case "send_team": {
           const senderName = requireRegistered(ws, requestId);
           if (!senderName) return;

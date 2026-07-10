@@ -21,7 +21,7 @@ export interface RegisterFrame {
    * `claude/channel` capability. Set from `Server.getClientCapabilities()`
    * after the MCP `initialize` handshake completes. Hub refuses to
    * promise direct delivery to recipients with `channel_capable: false`
-   * and silently skips them on broadcast/team sends.   */
+   * and silently skips them on team sends.   */
   channel_capable: boolean;
   /**
    * Plugin's self-reported version — sourced from the same value declared
@@ -69,12 +69,6 @@ export interface SendFrame {
   content: string;
   type: MessageType;
   reply_to?: string;
-  requestId?: string;
-}
-
-export interface BroadcastFrame {
-  action: "broadcast";
-  content: string;
   requestId?: string;
 }
 
@@ -236,7 +230,6 @@ export interface MirrorStatuslineFrame {
 export type PluginFrame =
   | RegisterFrame
   | SendFrame
-  | BroadcastFrame
   | SendTeamFrame
   | JoinTeamFrame
   | LeaveTeamFrame
@@ -264,7 +257,7 @@ export interface ResponseFrame {
 
 // ── Send-outcome response shapes (informational) ──────────────────────────
 //
-// These document the `data` payloads returned on send/broadcast/send_team
+// These document the `data` payloads returned on send/send_team
 // responses. The ResponseFrame wire format is unchanged; these aliases
 // exist so call sites that need to interpret `data` can do so with a
 // typed view.
@@ -284,13 +277,6 @@ export type SendDirectResponseData =
       to_dashboard?: boolean;
     }
   | { outcome: "nak"; reason: SendNakReason };
-
-export interface SendBroadcastResponseData {
-  message_id: string;
-  delivered_to: number;
-  /** Count of online agents skipped because their `channel_capable` is false. */
-  skipped_no_channel: number;
-}
 
 export interface SendTeamResponseData {
   message_id: string;

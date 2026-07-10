@@ -1459,6 +1459,78 @@
     margin-top: 7px;
     opacity: 0.75;
   }
+
+  /* ── Session context menu (desktop right-click / mobile long-press) ──
+     A floating, pointer-anchored menu of per-session actions. Fixed so it
+     can escape the scrolling sidebar. Visual language mirrors the schedule
+     popover. */
+  .cn-ctx-menu {
+    position: fixed;
+    z-index: 1200;
+    min-width: 172px;
+    max-width: 280px;
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    font-family: var(--font-mono);
+  }
+  .cn-ctx-menu[hidden] { display: none; }
+  .cn-ctx-title {
+    font-size: 9px;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 4px 8px 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cn-ctx-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 6px 8px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .cn-ctx-item:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
+  .cn-ctx-item:disabled { color: var(--text-muted); cursor: default; }
+  .cn-ctx-note { padding: 5px 8px 3px; font-size: 9px; color: var(--text-muted); }
+
+  /* Dead (closed / source-detached) session rows: dimmed but present, so
+     they can still be selected and reconnected. Long-press must not raise
+     the OS text-selection callout. */
+  .cn-session-row { -webkit-touch-callout: none; }
+  .cn-session-row.is-dead .cn-session-title,
+  .cn-session-row.is-dead .cn-session-cwd { color: var(--text-muted); }
+  .cn-session-dead { color: var(--text-muted); }
+
+  /* Transient toast for context-menu action feedback (reconnect result). */
+  .cn-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 1300;
+    max-width: 88vw;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  }
+  .cn-toast.is-ok { border-color: var(--green); }
+  .cn-toast.is-err { border-color: var(--accent); }
   /* Suppress the OS text-selection callout during a long-press hold. */
   #mirror-compose-send {
     -webkit-touch-callout: none;
@@ -3030,19 +3102,40 @@
         refreshMirrorSessions();
         break;
 
-      case 'mirror:session_ended': {
-        // Composite map: remove every entry that shares this sid.
-        // Cross-host UUID collisions would normally leave the sibling
-        // entry intact, but the broadcast doesn't carry host today —
-        // the worst case is a sidebar that re-populates from the next
-        // refresh, which is acceptable for the collision corner case.
-        var endedKeys = [];
-        mirrorBySid.forEach(function (s, k) {
-          if (s.sid === event.sid) endedKeys.push(k);
+      case 'mirror:agent_state': {
+        // Source (mirror-agent) attached/detached. Flip the matching
+        // sidebar rows' attached flag so a session dims to offline the
+        // moment its source dies — no wait for the orphan sweep. When it
+        // re-attaches (e.g. after a reconnect/resume revived the session),
+        // also clear closed_at so a revived gravestone stops showing as
+        // dead — the restored-session path emits no session_started event.
+        var stateChanged = false;
+        mirrorBySid.forEach(function (s) {
+          if (s.sid !== event.sid) return;
+          if (s.attached !== event.attached) {
+            s.attached = event.attached;
+            stateChanged = true;
+          }
+          if (event.attached && s.closed_at) {
+            s.closed_at = null;
+            stateChanged = true;
+          }
         });
-        for (var ek = 0; ek < endedKeys.length; ek++) {
-          mirrorBySid.delete(endedKeys[ek]);
-        }
+        if (stateChanged) renderAgentsDebounced();
+        break;
+      }
+
+      case 'mirror:session_ended': {
+        // Mark every entry sharing this sid as closed rather than removing
+        // it — dead sessions stay listed (dimmed, reconnectable) until the
+        // hub ages them out of retention and a refresh drops them. The
+        // broadcast doesn't carry host, so cross-host UUID collisions mark
+        // both siblings; the next refresh corrects that corner case.
+        mirrorBySid.forEach(function (s) {
+          if (s.sid !== event.sid) return;
+          s.closed_at = event.ended_at || new Date().toISOString();
+          s.attached = false;
+        });
         // An agent can own multiple mirror sessions (fork-sessions in
         // the same cwd). If the one that ended was just the last-wins
         // binding, re-attach to whichever of their remaining sessions
@@ -3227,9 +3320,14 @@
   //     its /ws/host channel yet)
   //   - Offline hosts at the bottom, dimmed, launch button disabled
   function hostIdForAgent(fullName) {
-    // agent fullName format: session:user@host  →  host_id = user@host
-    var m = String(fullName || '').match(/:(.+@[^@]+)$/);
-    return m ? m[1] : null;
+    // agent fullName format: session:user@host  →  host_id = user@host.
+    // The session name may contain ':' (a /rename title), so split on the
+    // LAST ':'; neither user nor host can contain one.
+    var s = String(fullName || '');
+    var colon = s.lastIndexOf(':');
+    if (colon < 0) return null;
+    var hid = s.slice(colon + 1);
+    return hid.indexOf('@') >= 0 ? hid : null;
   }
 
   // Rows are keyed off mirror sessions (one row per sid). MCP agents
@@ -3239,11 +3337,11 @@
   // owner_agent — each session gets its own row regardless.
   function renderAgents() {
     // Bucket mirror sessions by host (derived from owner_agent's user@host
-    // suffix). Skip closed sessions.
+    // suffix). Dead sessions (closed, or source-detached) stay listed —
+    // dimmed and reconnectable — until the hub ages them out of retention.
     var sessionsByHost = new Map();
     var sessionOrphans = [];
     mirrorBySid.forEach(function(sess) {
-      if (sess.closed_at) return;
       var hid = hostIdForAgent(sess.owner_agent);
       var target = hid && hosts.has(hid) ? sessionsByHost : null;
       if (target) {
@@ -3257,9 +3355,12 @@
     // MCP agents that aren't the owner of any live mirror session —
     // these are messaging-only registrations. Render at the tail of
     // their host group (or the Other group if host unknown).
+    // Include dead sessions: an owner with a dimmed gravestone row should
+    // not also get a redundant MCP-only row (its dead session row already
+    // represents it, and is reconnectable).
     var agentsWithMirror = new Set();
     mirrorBySid.forEach(function(sess) {
-      if (!sess.closed_at) agentsWithMirror.add(sess.owner_agent);
+      agentsWithMirror.add(sess.owner_agent);
     });
     var mcpByHost = new Map();
     var mcpOrphans = [];
@@ -3301,7 +3402,6 @@
     // for disambiguation (e.g. "claude-net · ab12cd").
     var ownerCounts = {};
     mirrorBySid.forEach(function(sess) {
-      if (sess.closed_at) return;
       ownerCounts[sess.owner_agent] = (ownerCounts[sess.owner_agent] || 0) + 1;
     });
 
@@ -3376,21 +3476,29 @@
     var parts = cwd.split('/').filter(Boolean);
     var cwdShort = parts.length <= 2 ? cwd : '…/' + parts.slice(-2).join('/');
     var age = relativeTime(sess.last_event_at);
-    var awaiting = sess.activity_state === 'awaiting_input' && !sess.closed_at;
-    var dotCls = 'agent-dot online' + (awaiting ? ' awaiting' : '');
+    // Dead = closed (ended/orphan-swept) or source-detached (mirror-agent
+    // WS unbound). `attached` is absent on pre-rollout summaries; treat
+    // only an explicit false as detached so old hubs don't dim everything.
+    var dead = !!sess.closed_at || sess.attached === false;
+    var awaiting = sess.activity_state === 'awaiting_input' && !dead;
+    var dotCls = dead
+      ? 'agent-dot offline'
+      : 'agent-dot online' + (awaiting ? ' awaiting' : '');
     return (
-      '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + '"'
+      '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + (dead ? ' is-dead' : '') + '"'
       + ' href="#agent=' + encodeURIComponent(sess.sid)
         + (sess.host ? '&host=' + encodeURIComponent(sess.host) : '') + '"'
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
       + ' data-host="' + escapeAttr(sess.host || '') + '"'
+      + ' data-dead="' + (dead ? '1' : '0') + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
-      + '<span class="' + dotCls + '"' + (awaiting ? ' title="Waiting for user input"' : '') + '></span>'
+      + '<span class="' + dotCls + '"' + (awaiting ? ' title="Waiting for user input"' : (dead ? ' title="Source offline — right-click / long-press to reconnect"' : '')) + '></span>'
       + '<div class="cn-session-body">'
       +   '<div class="cn-session-title">' + escapeHtml(label) + suffix + '</div>'
       +   '<div class="cn-session-sub">'
       +     '<span class="cn-session-cwd">' + escapeHtml(cwdShort) + '</span>'
       +     (age ? ' <span class="cn-session-age">· ' + escapeHtml(age) + '</span>' : '')
+      +     (dead ? ' <span class="cn-session-dead">· offline</span>' : '')
       +   '</div>'
       + '</div>'
       + '</a>'
@@ -3643,6 +3751,154 @@
       }
     });
   }
+
+  // ── Session context menu (right-click / long-press → Reconnect) ────
+  // Desktop: right-click a session row. Mobile: long-press it. Both open a
+  // small floating menu whose Reconnect action POSTs /api/mirror/:sid/
+  // reconnect — the hub re-attaches a live-but-unregistered source, or
+  // relaunches a dead one with `claude --resume <sid>`.
+  var cnToastEl = null;
+  var cnToastTimer = null;
+  function cnToast(msg, kind) {
+    if (!cnToastEl) {
+      cnToastEl = document.createElement('div');
+      document.body.appendChild(cnToastEl);
+    }
+    cnToastEl.className = 'cn-toast' + (kind === 'ok' ? ' is-ok' : kind === 'err' ? ' is-err' : '');
+    cnToastEl.textContent = msg;
+    cnToastEl.hidden = false;
+    if (cnToastTimer) clearTimeout(cnToastTimer);
+    cnToastTimer = setTimeout(function() { if (cnToastEl) cnToastEl.hidden = true; }, 4000);
+  }
+
+  var cnCtxMenu = null;
+  function closeCtxMenu() {
+    if (cnCtxMenu) { cnCtxMenu.hidden = true; }
+  }
+  function reconnectSession(sid, host, label) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    cnToast('Reconnecting ' + (label || sid) + '…', '');
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/reconnect' + q, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        if (res.body && res.body.status === 'already_attached') {
+          cnToast('Already connected — nothing to reconnect.', 'ok');
+        } else {
+          cnToast('Reconnect launched' + (res.body && res.body.tmux_session ? ' (' + res.body.tmux_session + ')' : '') + '.', 'ok');
+        }
+      } else {
+        cnToast('Reconnect failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Reconnect failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
+  function openCtxMenu(row, x, y) {
+    var sid = row.getAttribute('data-sid');
+    if (!sid) return;
+    var host = row.getAttribute('data-host') || '';
+    var dead = row.getAttribute('data-dead') === '1';
+    var name = row.getAttribute('data-name') || sid;
+    var shortMatch = String(name).match(/^([^:]+):/);
+    var label = shortMatch ? shortMatch[1] : name;
+    if (!cnCtxMenu) {
+      cnCtxMenu = document.createElement('div');
+      cnCtxMenu.className = 'cn-ctx-menu';
+      cnCtxMenu.hidden = true;
+      document.body.appendChild(cnCtxMenu);
+    }
+    cnCtxMenu.innerHTML = '';
+    var title = document.createElement('div');
+    title.className = 'cn-ctx-title';
+    title.textContent = label;
+    cnCtxMenu.appendChild(title);
+    var reBtn = document.createElement('button');
+    reBtn.type = 'button';
+    reBtn.className = 'cn-ctx-item';
+    reBtn.textContent = dead ? '⟳ Reconnect (resume)' : '⟳ Reconnect';
+    reBtn.addEventListener('click', function() {
+      closeCtxMenu();
+      reconnectSession(sid, host, label);
+    });
+    cnCtxMenu.appendChild(reBtn);
+    if (!dead) {
+      var note = document.createElement('div');
+      note.className = 'cn-ctx-note';
+      note.textContent = 'session appears live';
+      cnCtxMenu.appendChild(note);
+    }
+    // Show then clamp to viewport.
+    cnCtxMenu.hidden = false;
+    var mw = cnCtxMenu.offsetWidth, mh = cnCtxMenu.offsetHeight;
+    var px = Math.min(x, window.innerWidth - mw - 8);
+    var py = Math.min(y, window.innerHeight - mh - 8);
+    cnCtxMenu.style.left = Math.max(8, px) + 'px';
+    cnCtxMenu.style.top = Math.max(8, py) + 'px';
+  }
+
+  // Desktop: right-click.
+  document.addEventListener('contextmenu', function(e) {
+    var row = e.target.closest && e.target.closest('#agent-list .cn-session-row');
+    if (!row) return;
+    e.preventDefault();
+    openCtxMenu(row, e.clientX, e.clientY);
+  });
+  // Mobile: long-press (pointer events). A move beyond a small slop or an
+  // early release cancels; firing sets a flag so the trailing click that
+  // would navigate to the session is swallowed.
+  var cnLpTimer = null;
+  var cnLpStart = null;
+  var cnLpSwallowClick = false;
+  var CN_LONG_PRESS_MS = 500;
+  function cnClearLp() {
+    if (cnLpTimer) { clearTimeout(cnLpTimer); cnLpTimer = null; }
+    cnLpStart = null;
+  }
+  document.addEventListener('pointerdown', function(e) {
+    if (e.pointerType === 'mouse') return; // desktop uses right-click
+    var row = e.target.closest && e.target.closest('#agent-list .cn-session-row');
+    if (!row) return;
+    // Fresh press: clear any stale swallow flag from a prior long-press
+    // that never produced a synthetic click, so this tap isn't eaten.
+    cnLpSwallowClick = false;
+    cnLpStart = { x: e.clientX, y: e.clientY };
+    cnClearLp();
+    cnLpTimer = setTimeout(function() {
+      cnLpTimer = null;
+      cnLpSwallowClick = true;
+      openCtxMenu(row, cnLpStart ? cnLpStart.x : e.clientX, cnLpStart ? cnLpStart.y : e.clientY);
+    }, CN_LONG_PRESS_MS);
+  });
+  document.addEventListener('pointermove', function(e) {
+    if (!cnLpStart) return;
+    if (Math.abs(e.clientX - cnLpStart.x) > 10 || Math.abs(e.clientY - cnLpStart.y) > 10) cnClearLp();
+  });
+  document.addEventListener('pointerup', cnClearLp);
+  document.addEventListener('pointercancel', cnClearLp);
+  // Swallow the click synthesised after a long-press so it doesn't also
+  // navigate into the session. Capture phase to beat the row's href nav.
+  document.addEventListener('click', function(e) {
+    if (cnLpSwallowClick) {
+      cnLpSwallowClick = false;
+      if (e.target.closest && e.target.closest('#agent-list .cn-session-row')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+  }, true);
+  // Dismiss the menu on any outside interaction / scroll / escape.
+  document.addEventListener('click', function(e) {
+    if (cnCtxMenu && !cnCtxMenu.hidden && !(e.target.closest && e.target.closest('.cn-ctx-menu'))) {
+      closeCtxMenu();
+    }
+  });
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeCtxMenu(); });
+  window.addEventListener('scroll', closeCtxMenu, true);
 
   // ── Launch modal wiring (Phase C) ─────────────────────────────────
   // Click "+ launch" on any host row → open the modal scoped to that host.

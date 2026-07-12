@@ -730,6 +730,10 @@ export interface AgentInfo {
   status: "online" | "offline";
   teams: string[];
   connectedAt: string;
+  /** Working directory of the agent's Claude Code process, when known.
+   *  Lets the dashboard relaunch a registered-but-unmirrored agent in its
+   *  cwd. null for offline gravestones (cwd isn't retained). */
+  cwd: string | null;
 }
 
 export interface TeamInfo {

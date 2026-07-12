@@ -325,6 +325,7 @@ export class Registry {
         status: "online",
         teams: [...entry.teams],
         connectedAt: entry.connectedAt.toISOString(),
+        cwd: entry.cwd,
       });
     }
 
@@ -339,6 +340,7 @@ export class Registry {
         status: "offline",
         teams: [...entry.teams],
         connectedAt: entry.disconnectedAt.toISOString(),
+        cwd: null,
       });
     }
 

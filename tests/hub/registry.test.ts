@@ -42,6 +42,15 @@ describe("Registry", () => {
     expect(agents[0]?.user).toBe("alice");
   });
 
+  test("list() carries cwd for online agents (drives relaunch-in-cwd)", () => {
+    const ws = mockWs();
+    registry.register("test:alice@host", ws, undefined, {
+      cwd: "/home/alice/projects/foo",
+    });
+    const agents = registry.list();
+    expect(agents[0]?.cwd).toBe("/home/alice/projects/foo");
+  });
+
   test("register duplicate name with different WS returns error", () => {
     const ws1 = mockWs();
     const ws2 = mockWs();

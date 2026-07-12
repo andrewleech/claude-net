@@ -1504,10 +1504,18 @@
   .cn-ctx-item:disabled { color: var(--text-muted); cursor: default; }
   .cn-ctx-note { padding: 5px 8px 3px; font-size: 9px; color: var(--text-muted); }
 
+  /* Agent rows own the long-press gesture for the context menu, so the OS
+     text-selection / callout must not steal it (selection also fires
+     pointercancel, which would kill the long-press timer). Copying the
+     name is a menu action instead. */
+  #agent-list .agent-item {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   /* Dead (closed / source-detached) session rows: dimmed but present, so
-     they can still be selected and reconnected. Long-press must not raise
-     the OS text-selection callout. */
-  .cn-session-row { -webkit-touch-callout: none; }
+     they can still be selected and reconnected. */
   .cn-session-row.is-dead .cn-session-title,
   .cn-session-row.is-dead .cn-session-cwd { color: var(--text-muted); }
   .cn-session-dead { color: var(--text-muted); }
@@ -3527,9 +3535,13 @@
     var hint = offline
       ? '<span class="row-hint">offline</span>'
       : '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
+    var hid = hostIdForAgent(ag.fullName) || '';
+    var cwd = ag.cwd || '';
     return (
       '<div class="list-group-item agent-item cn-host-child is-inactive"'
       + ' data-sid=""'
+      + ' data-cwd="' + escapeAttr(cwd) + '"'
+      + ' data-hostid="' + escapeAttr(hid) + '"'
       + ' data-name="' + escapeAttr(ag.fullName) + '">'
       + '<span class="agent-dot ' + (offline ? 'offline' : 'no-mirror') + '"></span>'
       + '<span class="agent-name">' + escapeHtml(label) + '</span>'
@@ -3752,11 +3764,12 @@
     });
   }
 
-  // ── Session context menu (right-click / long-press → Reconnect) ────
-  // Desktop: right-click a session row. Mobile: long-press it. Both open a
-  // small floating menu whose Reconnect action POSTs /api/mirror/:sid/
-  // reconnect — the hub re-attaches a live-but-unregistered source, or
-  // relaunches a dead one with `claude --resume <sid>`.
+  // ── Agent-row context menu (right-click / long-press) ──────────────
+  // Desktop: right-click a row. Mobile: long-press it. Opens a floating
+  // menu with Reconnect (mirror sessions, via /api/mirror/:sid/reconnect),
+  // Relaunch-in-cwd (registered agents with no mirror session, via
+  // /api/host/:id/launch), and Copy name. Rows suppress text selection so
+  // the long-press isn't stolen by the OS — copying is a menu action.
   var cnToastEl = null;
   var cnToastTimer = null;
   function cnToast(msg, kind) {
@@ -3798,14 +3811,74 @@
       cnToast('Reconnect failed: ' + (err && err.message ? err.message : 'network error'), 'err');
     });
   }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(function() { cnToast('Copied: ' + text, 'ok'); })
+        .catch(function() { fallbackCopy(text); });
+    } else {
+      fallbackCopy(text);
+    }
+  }
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      cnToast('Copied: ' + text, 'ok');
+    } catch (e) {
+      cnToast('Copy failed', 'err');
+    }
+  }
+  function relaunchInCwd(hostId, cwd, label) {
+    cnToast('Relaunching ' + (label || cwd) + '…', '');
+    fetch('/api/host/' + encodeURIComponent(hostId) + '/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: cwd, continue_session: true }),
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        cnToast('Relaunch started' + (res.body && res.body.tmux_session ? ' (' + res.body.tmux_session + ')' : '') + '.', 'ok');
+      } else {
+        cnToast('Relaunch failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Relaunch failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
+  function addCtxItem(menu, text, onClick) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cn-ctx-item';
+    b.textContent = text;
+    b.addEventListener('click', onClick);
+    menu.appendChild(b);
+    return b;
+  }
+  function addCtxNote(menu, text) {
+    var n = document.createElement('div');
+    n.className = 'cn-ctx-note';
+    n.textContent = text;
+    menu.appendChild(n);
+  }
   function openCtxMenu(row, x, y) {
-    var sid = row.getAttribute('data-sid');
-    if (!sid) return;
+    var sid = row.getAttribute('data-sid') || '';
     var host = row.getAttribute('data-host') || '';
     var dead = row.getAttribute('data-dead') === '1';
-    var name = row.getAttribute('data-name') || sid;
+    var cwd = row.getAttribute('data-cwd') || '';
+    var hostId = row.getAttribute('data-hostid') || '';
+    var name = row.getAttribute('data-name') || sid || '';
     var shortMatch = String(name).match(/^([^:]+):/);
     var label = shortMatch ? shortMatch[1] : name;
+    if (!label) return;
     if (!cnCtxMenu) {
       cnCtxMenu = document.createElement('div');
       cnCtxMenu.className = 'cn-ctx-menu';
@@ -3817,21 +3890,38 @@
     title.className = 'cn-ctx-title';
     title.textContent = label;
     cnCtxMenu.appendChild(title);
-    var reBtn = document.createElement('button');
-    reBtn.type = 'button';
-    reBtn.className = 'cn-ctx-item';
-    reBtn.textContent = dead ? '⟳ Reconnect (resume)' : '⟳ Reconnect';
-    reBtn.addEventListener('click', function() {
-      closeCtxMenu();
-      reconnectSession(sid, host, label);
-    });
-    cnCtxMenu.appendChild(reBtn);
-    if (!dead) {
-      var note = document.createElement('div');
-      note.className = 'cn-ctx-note';
-      note.textContent = 'session appears live';
-      cnCtxMenu.appendChild(note);
+
+    if (sid) {
+      // Mirror session — resume by sid.
+      addCtxItem(cnCtxMenu, dead ? '⟳ Reconnect (resume)' : '⟳ Reconnect', function() {
+        closeCtxMenu();
+        reconnectSession(sid, host, label);
+      });
+      if (!dead) addCtxNote(cnCtxMenu, 'session appears live');
+    } else if (cwd && hostId) {
+      // Registered agent with no mirror session (e.g. launched outside
+      // claude-channels) — relaunch in its cwd to get a mirrored session.
+      addCtxItem(cnCtxMenu, '⟳ Relaunch in cwd', function() {
+        closeCtxMenu();
+        relaunchInCwd(hostId, cwd, label);
+      });
+    } else {
+      addCtxNote(cnCtxMenu, 'no mirror session — cannot relaunch');
     }
+
+    // Copy actions — on every row, so long-press has a use even where
+    // relaunch doesn't apply, and text-selection can stay suppressed.
+    addCtxItem(cnCtxMenu, '⧉ Copy name', function() {
+      closeCtxMenu();
+      copyText(label);
+    });
+    if (name && name !== label) {
+      addCtxItem(cnCtxMenu, '⧉ Copy full name', function() {
+        closeCtxMenu();
+        copyText(name);
+      });
+    }
+
     // Show then clamp to viewport.
     cnCtxMenu.hidden = false;
     var mw = cnCtxMenu.offsetWidth, mh = cnCtxMenu.offsetHeight;
@@ -3843,7 +3933,7 @@
 
   // Desktop: right-click.
   document.addEventListener('contextmenu', function(e) {
-    var row = e.target.closest && e.target.closest('#agent-list .cn-session-row');
+    var row = e.target.closest && e.target.closest('#agent-list .agent-item');
     if (!row) return;
     e.preventDefault();
     openCtxMenu(row, e.clientX, e.clientY);
@@ -3861,7 +3951,7 @@
   }
   document.addEventListener('pointerdown', function(e) {
     if (e.pointerType === 'mouse') return; // desktop uses right-click
-    var row = e.target.closest && e.target.closest('#agent-list .cn-session-row');
+    var row = e.target.closest && e.target.closest('#agent-list .agent-item');
     if (!row) return;
     // Fresh press: clear any stale swallow flag from a prior long-press
     // that never produced a synthetic click, so this tap isn't eaten.
@@ -3885,7 +3975,7 @@
   document.addEventListener('click', function(e) {
     if (cnLpSwallowClick) {
       cnLpSwallowClick = false;
-      if (e.target.closest && e.target.closest('#agent-list .cn-session-row')) {
+      if (e.target.closest && e.target.closest('#agent-list .agent-item')) {
         e.preventDefault();
         e.stopPropagation();
       }

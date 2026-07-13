@@ -461,21 +461,64 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
     && [ "$(mirror_injection_mode)" = "tmux" ] \
     && command -v tmux >/dev/null 2>&1; then
     export CLAUDE_NET_IN_TMUX_WRAP=1
-    tmux_session_name="$(basename "$PWD")"
-    echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
-    if tmux has-session -t "$tmux_session_name" 2>/dev/null; then
-        # Session exists. If the pane is sitting at an idle shell (claude
-        # exited), cd to the current directory and re-launch. Any active
-        # process (bun, claude, …) is left undisturbed and we just attach.
-        pane_cmd=$(tmux display-message -t "$tmux_session_name" -p "#{pane_current_command}" 2>/dev/null || true)
-        case "$pane_cmd" in bash|sh|zsh|fish|dash|ksh|csh|tcsh)
-            relaunch="cd $(printf '%q' "$PWD")"
-            for a in "$SELF" "$@"; do relaunch="$relaunch $(printf '%q' "$a")"; done
-            tmux send-keys -t "$tmux_session_name" "$relaunch" Enter
+    tmux_session_base="$(basename "$PWD")"
+
+    # A fork/branch/resume is a *second* Claude in the *same directory*, so it
+    # collides with the first session's cwd-derived name. If we reattached to the
+    # existing session we would (a) silently drop these session-selecting args and
+    # (b) mirror one pane into two clients — which reads as the new session
+    # "clobbering" the old. So any launch that selects or forks a session always
+    # gets its own distinct tmux session instead of reattaching.
+    wants_distinct_session=false
+    for arg in "$@"; do
+        case "$arg" in
+            -r|--resume|-c|--continue|--fork-session|--session-id)
+                wants_distinct_session=true; break ;;
         esac
-        exec tmux attach-session -t "$tmux_session_name"
-    else
+    done
+
+    # First unused name in the series base, base-2, base-3, … (matches the
+    # plugin's same-dir agent-name collision scheme).
+    _free_tmux_session_name() {
+        local n=1 name="$tmux_session_base"
+        while tmux has-session -t "$name" 2>/dev/null; do
+            n=$((n + 1)); name="${tmux_session_base}-${n}"
+        done
+        echo "$name"
+    }
+
+    # True when the session's pane is sitting at an idle shell (claude exited).
+    _tmux_pane_is_idle_shell() {
+        local cmd
+        cmd=$(tmux display-message -t "$1" -p "#{pane_current_command}" 2>/dev/null || true)
+        case "$cmd" in bash|sh|zsh|fish|dash|ksh|csh|tcsh) return 0 ;; *) return 1 ;; esac
+    }
+
+    if tmux has-session -t "$tmux_session_base" 2>/dev/null \
+        && ! $wants_distinct_session \
+        && _tmux_pane_is_idle_shell "$tmux_session_base"; then
+        # Coming back to this project's session and its claude has exited: cd to
+        # the current directory and relaunch in place, then attach. The `&& exec`
+        # keeps a single command line (an earlier version omitted the separator,
+        # producing `cd DIR SELF ARGS` → "cd: too many arguments") and replaces
+        # the pane's shell so its process becomes claude, not a shell parent.
+        echo "[claude-net/mirror] reattaching tmux session '$tmux_session_base'" >&2
+        relaunch="cd $(printf '%q' "$PWD") && exec"
+        for a in "$SELF" "$@"; do relaunch="$relaunch $(printf '%q' "$a")"; done
+        tmux send-keys -t "$tmux_session_base" "$relaunch" Enter
+        exec tmux attach-session -t "$tmux_session_base"
+    elif tmux has-session -t "$tmux_session_base" 2>/dev/null; then
+        # Session exists but is busy (or this is an explicit resume/fork): never
+        # hijack the running pane. Start a distinct session so the original stays
+        # put and reachable and this launch keeps its args.
+        tmux_session_name="$(_free_tmux_session_name)"
+        echo "[claude-net/mirror] '$tmux_session_base' in use; starting distinct session '$tmux_session_name'" >&2
         exec tmux new-session -s "$tmux_session_name" \
+            -e CLAUDE_NET_IN_TMUX_WRAP=1 \
+            -- "$SELF" "$@"
+    else
+        echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_base' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
+        exec tmux new-session -s "$tmux_session_base" \
             -e CLAUDE_NET_IN_TMUX_WRAP=1 \
             -- "$SELF" "$@"
     fi

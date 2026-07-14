@@ -2,7 +2,8 @@ node_modules
 dist
 .env
 *.log
-bin/__pycache__/
+__pycache__/
+*.pyc
 # Build artifact — the hub builds this lazily on first /bin/mirror-agent.bundle.js
 # request, and the Dockerfile pre-builds it at image time.
 bin/mirror-agent.bundle.js

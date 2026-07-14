@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-net-patcher"
+version = "0.1.0"
+description = "claude-net's channel-unlock patches for the cc-patcher engine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["cc-patcher"]
+
+[project.entry-points."cc_patcher.patches"]
+channels = "claude_net_patcher:PATCHES"
+
+[tool.hatch.build.targets.wheel]
+packages = ["claude_net_patcher"]

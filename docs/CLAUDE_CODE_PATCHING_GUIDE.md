@@ -15,7 +15,7 @@ readelf -S /path/to/claude | grep .bun
 
 Bun compiled binaries store internal offsets to the embedded JS payload. **Any change to the file size breaks these offsets** and the binary falls back to being a plain Bun runtime (shows Bun help instead of Claude Code).
 
-**Every replacement MUST be exactly the same byte length as the original.** The `patch-binary.py` script enforces this with a size assertion.
+**Every replacement MUST be exactly the same byte length as the original.** The `cc-patcher` engine (`~/cc-patcher`) enforces this — its `EditApplier` validates that every edit's replacement is the same length as what it replaces before writing the output.
 
 Techniques for same-length patching:
 - **Space padding:** `{return!0` + spaces + `}` to fill a function body
@@ -83,7 +83,7 @@ When reverse-engineering a new gate or check:
 
 ## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159)
 
-Implementation: `bin/patch-binary.py`
+Implementation: `patcher-ext/claude_net_patcher/channels.py`, a `cc_patcher.patches` entry-point provider consumed by the `cc-patcher` engine (`~/cc-patcher`).
 
 ### Patch 1: Channels feature gate
 
@@ -220,11 +220,11 @@ The function and helper names (Y2, B48, a87, BP6, fP5) all mangle per build. The
 
 ## The launcher script
 
-`bin/claude-channels` wraps the patched binary:
+`bin/claude-channels` wraps the patched binary. All patching, caching, and fallback logic lives in `cc_patcher.launch.resolve_patched_binary()` (the `cc-patcher` engine, pip-installed alongside `claude-net-patcher`); `bin/claude-channels` itself only calls it and handles channel-arg/mirror-agent setup:
 
 1. Finds the Claude Code binary (prefers native ELF at known locations over npm/bun installs)
-2. Caches a patched copy at `~/.local/share/claude-channels/claude-patched-{hash}`. The hash is a digest of the source binary AND `patch-binary.py` combined, so a change to either invalidates the cache.
-3. Re-patches automatically when the binary or patcher changes (hash mismatch)
+2. Caches a patched copy at `~/.local/share/cc-patcher/`, keyed by a hash of the source binary folded with the discovered provider registry's combined `cache_key()`s. Either a binary update or an installed/removed/changed provider package invalidates the cache.
+3. Re-patches automatically on a cache-key mismatch
 4. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each
 5. On partial patch failure, prints diagnostics and offers fallback to previous version
 6. Execs the patched binary with all injected + user-provided args
@@ -233,7 +233,7 @@ The function and helper names (Y2, B48, a87, BP6, fP5) all mangle per build. The
 
 When Claude Code updates and a patch pattern stops matching:
 
-1. Clear the cache: `rm -rf ~/.local/share/claude-channels`
+1. Clear the cache: `rm -rf ~/.local/share/cc-patcher`
 2. Run `bin/claude-channels --version` — the patcher will report which patches failed
 3. For each failed patch, search the new binary for the stable anchor string:
    ```bash
@@ -241,8 +241,8 @@ When Claude Code updates and a patch pattern stops matching:
    grep -aoP '.{0,200}tengu_harbor.{0,200}' "$BINARY" | fold -w 120
    ```
 4. Check if the surrounding code structure changed. The stable anchors (string literals) should still be present — the minified variable names around them will have changed.
-5. Update the regex in `patch-binary.py` to match the new structure
-6. Verify: `python3 bin/patch-binary.py $BINARY /tmp/test && /tmp/test --version`
+5. Update the regex in `patcher-ext/claude_net_patcher/channels.py` to match the new structure
+6. Verify: `cc-patcher $BINARY /tmp/test && /tmp/test --version`
 
 If a stable anchor string is completely gone (not just renamed), the feature may have been restructured. Search for the error message or behavior description to find the new location.
 
@@ -251,8 +251,9 @@ If a stable anchor string is completely gone (not just renamed), the feature may
 ```bash
 BINARY=$(readlink -f $(which claude))
 
-# Apply patches
-python3 bin/patch-binary.py "$BINARY" /tmp/test-patched
+# Apply patches (cc-patcher discovers claude-net-patcher's channel patches
+# via the cc_patcher.patches entry-point group; both must be pip-installed)
+cc-patcher "$BINARY" /tmp/test-patched
 
 # Verify it still runs as Claude Code (not plain Bun)
 /tmp/test-patched --version

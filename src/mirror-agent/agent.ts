@@ -1939,9 +1939,9 @@ export interface DiscoveredCcProcess {
  *
  * Identification heuristic: read /proc/<pid>/exe → matches a path that
  * contains `/claude/versions/` (Anthropic's native install layout), ends
- * in `/claude`, or contains `/claude-channels/claude-patched` (bin/claude-
- * channels' same-length binary patcher, cached at
- * ~/.local/share/claude-channels/claude-patched-<hash>). Skips anything
+ * in `/claude`, or contains `/cc-patcher/claude-patched` (the cc-patcher
+ * engine's same-length binary patcher, cached at
+ * ~/.local/share/cc-patcher/claude-patched(-<hash>)). Skips anything
  * else (bun runner, npm wrapper). False positives are absorbed by
  * `findActiveSessionForCcPid` — a non-CC process won't have a matching
  * JSONL on disk, so discovery silently skips it.
@@ -1971,7 +1971,7 @@ export function discoverRunningCcSessions(
     if (
       !/\/claude\/versions\//.test(exe) &&
       !/\/claude$/.test(exe) &&
-      !/\/claude-channels\/claude-patched/.test(exe)
+      !/\/cc-patcher\/claude-patched/.test(exe)
     ) {
       continue;
     }

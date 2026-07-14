@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/hub/index.ts",
-    "proxy": "bun --watch src/proxy/index.ts",
     "test": "bun test",
     "lint": "biome check .",
     "fmt": "biome format --write .",

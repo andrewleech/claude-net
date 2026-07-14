@@ -35,9 +35,10 @@ src/
   shared/
     types.ts          # shared type definitions (frames, events, data models)
 bin/
-    claude-channels   # launcher — patches Claude Code binary, auto-spawns mirror-agent if enabled
-    patch-binary.py   # same-length binary patcher (5 patches for channel restrictions; 6th for IPC inject in Phase M4)
-    install-channels  # installer for claude-channels + mirror binaries on other hosts
+    claude-channels   # launcher — patches Claude Code binary (via cc-patcher + claude-net-patcher), auto-spawns mirror-agent if enabled
+    install-channels  # installer for claude-channels + mirror binaries on other hosts; also pip-installs cc-patcher + claude-net-patcher
+patcher-ext/
+    claude_net_patcher/  # claude-net's channel + workflow-gate patches, provided to the cc-patcher engine as a `cc_patcher.patches` entry point
     statusline.py     # custom statusline with clock emoji, rate limits, claude-net status
     install-statusline # installer for the statusline script
     claude-net-mirror-push  # tiny hook forwarder — stdin JSON → loopback POST to mirror-agent
@@ -75,7 +76,7 @@ The setup endpoint (`GET /setup`) generates a shell script that downloads the pl
 
 ## Binary Patcher
 
-`bin/claude-channels` patches the Claude Code binary to enable channels without manual CLI flags. See `docs/CLAUDE_CODE_PATCHING_GUIDE.md` for technical details. Patches are same-length replacements (file size must not change or the Bun binary breaks). Patched binaries are cached by hash at `~/.local/share/claude-channels/`.
+`bin/claude-channels` patches the Claude Code binary to enable channels without manual CLI flags. Patching itself is delegated to the `cc-patcher` engine (a standalone package, sibling repo `~/cc-patcher`) plus the `claude-net-patcher` provider package (`patcher-ext/` in this repo), discovered via the `cc_patcher.patches` entry-point group — `bin/claude-channels` itself contains no patch logic. See `docs/CLAUDE_CODE_PATCHING_GUIDE.md` for technical details. Patches are same-length replacements (file size must not change or the Bun binary breaks). Patched binaries are cached by hash at `~/.local/share/cc-patcher/`, keyed on the binary's bytes plus the discovered provider registry (so installing/removing a provider invalidates the cache).
 
 ## Self-inject
 

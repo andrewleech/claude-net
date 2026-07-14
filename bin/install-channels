@@ -20,7 +20,7 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 # Locate the repo clone this script is running from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || echo "")"
 
-if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/claude-channels" ] || [ ! -f "$SCRIPT_DIR/patch-binary.py" ]; then
+if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/claude-channels" ]; then
     echo "ERROR: install-channels must be run from a local repo clone." >&2
     echo "For remote install, point at your hub's /setup endpoint:" >&2
     echo "    curl -fsSL \"\$YOUR_HUB/setup\" | bash" >&2
@@ -29,7 +29,41 @@ fi
 
 echo "Installing from local clone: $SCRIPT_DIR"
 cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
-cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"
+
+# claude-channels delegates binary patching to the `cc-patcher` engine
+# plus the `claude-net-patcher` provider (patcher-ext/). Both live in a
+# single `uv tool` environment: cc-patcher is the tool (it owns the
+# `cc-patcher` command claude-channels calls), and claude-net-patcher is
+# injected with --with so its channel patches are discovered in the same
+# venv. Sibling local clones are preferred when present (dev); otherwise
+# they're pulled straight from GitHub.
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PARENT_DIR="$(cd "$REPO_ROOT/.." && pwd)"
+CC_PATCHER_GIT="git+https://github.com/andrewleech/cc-patcher"
+# claude-net-patcher ships inside the claude-net repo, so it installs
+# from that repo's patcher-ext/ subdirectory rather than a repo of its own.
+CN_PATCHER_GIT="git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"
+if command -v uv >/dev/null 2>&1; then
+    if [ -d "$PARENT_DIR/cc-patcher" ]; then
+        cc_patcher_src="$PARENT_DIR/cc-patcher"
+    else
+        cc_patcher_src="$CC_PATCHER_GIT"
+    fi
+    if [ -d "$REPO_ROOT/patcher-ext" ]; then
+        cn_patcher_src="$REPO_ROOT/patcher-ext"
+    else
+        cn_patcher_src="$CN_PATCHER_GIT"
+    fi
+    echo "Installing cc-patcher + claude-net-patcher as a uv tool…"
+    # --reinstall so a re-run picks up updated code even at an unchanged
+    # version (uv otherwise serves a cached wheel).
+    uv tool install --force --reinstall "$cc_patcher_src" --with "$cn_patcher_src"
+else
+    echo "WARN: uv not found; skipping cc-patcher / claude-net-patcher install." >&2
+    echo "      claude-channels cannot patch the Claude Code binary until you run:" >&2
+    echo "          uv tool install $CC_PATCHER_GIT --with $CN_PATCHER_GIT" >&2
+fi
+
 if [ -f "$SCRIPT_DIR/claude-net-mirror-push" ]; then
     cp "$SCRIPT_DIR/claude-net-mirror-push" "$INSTALL_DIR/claude-net-mirror-push"
 fi

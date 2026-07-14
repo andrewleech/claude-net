@@ -3,18 +3,17 @@ set -euo pipefail
 # claude-channels: Drop-in replacement for the `claude` command that enables
 # MCP channel support without manual CLI flags or approval prompts.
 #
-# Patches the Claude Code binary (same-length replacements, original untouched)
-# to bypass five channel-related restrictions:
-#   1. Feature gate    -- tengu_harbor Statsig flag forced true
-#   2. Org policy      -- channelsEnabled check inverted (never blocks)
-#   3. Allowlist gate  -- non-dev channel entries skip allowlist check
-#   4. Dialog          -- dev channels approval prompt auto-accepted
-#   5. Notification    -- suppress stale allowlist warning toast
+# Patching is delegated to the `cc-patcher` engine plus the
+# `claude-net-patcher` provider package (see patcher-ext/), which must be
+# pip-installed in the `python3` environment this script runs under. Together
+# they apply six same-length edits to bypass the channel-related
+# restrictions and force the dynamic-workflows master gate on; see
+# patcher-ext/claude_net_patcher/channels.py for the patch definitions.
 #
 # Auto-detects MCP servers from ~/.claude.json and injects
 # --dangerously-load-development-channels for each.
 #
-# Patched binaries are cached by hash at ~/.local/share/claude-channels/
+# Patched binaries are cached by hash at ~/.local/share/cc-patcher/
 # and re-patched automatically when Claude Code updates.
 #
 # Install:
@@ -25,61 +24,31 @@ set -euo pipefail
 #   claude-channels              # channels enabled, no prompts
 #   claude-channels [any claude args...]
 
-CACHE_DIR="$HOME/.local/share/claude-channels"
-PATCHED_LINK="$CACHE_DIR/claude-patched"
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-PATCHER="$(cd "$(dirname "$SELF")" && pwd)/patch-binary.py"
 
-# ── Find Claude Code binary ──────────────────────────────────────────────
+# ── Resolve, patch, and cache the Claude Code binary ─────────────────────
+# `cc_patcher.launch.resolve_patched_binary()` finds the real binary
+# (honouring $CLAUDE_CLI_PATH, falling back to well-known install
+# locations, then PATH), applies every patch discovered from installed
+# `cc_patcher.patches` providers, and caches the result under
+# ~/.local/share/cc-patcher/ keyed by binary hash + provider registry.
+# It also handles the partial-success / fatal-error fallback semantics
+# and macOS re-signing internally.
 
-find_claude_binary() {
-    if [ -n "${CLAUDE_CLI_PATH:-}" ] && [ -f "$CLAUDE_CLI_PATH" ]; then
-        echo "$CLAUDE_CLI_PATH"; return 0
-    fi
-
-    # Prefer the native binary at known locations (avoids picking up
-    # npm/bun global installs which resolve to cli.js instead)
-    local candidate resolved
-    for candidate in \
-        "$HOME/.local/bin/claude" \
-        "$HOME/.claude/local/claude" \
-        "$HOME/.local/share/claude/versions/"*; do
-        if [ -f "$candidate" ]; then
-            resolved=$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")
-            if [ -f "$resolved" ] && file "$resolved" 2>/dev/null | grep -q "ELF"; then
-                echo "$resolved"; return 0
-            fi
-        fi
-    done
-
-    # Fallback: PATH resolution. May find the npm-install launcher
-    # `claude.exe` (a tiny wrapper script under .claude/local/node_modules/)
-    # which is NOT the Bun-compiled ELF the patcher targets — surface
-    # that case with a clear hint instead of letting the patcher fail
-    # with "no anchor strings found" once per patch.
-    local claude_bin
-    claude_bin=$(which claude 2>/dev/null || true)
-    if [ -n "$claude_bin" ]; then
-        resolved=$(readlink -f "$claude_bin" 2>/dev/null || echo "$claude_bin")
-        if [ -f "$resolved" ]; then
-            if file "$resolved" 2>/dev/null | grep -q "ELF"; then
-                echo "$resolved"; return 0
-            fi
-            echo "ERROR: \$PATH 'claude' resolves to $resolved, which is not the" >&2
-            echo "       Bun-compiled native binary the patcher needs. Likely the" >&2
-            echo "       npm-install launcher (claude.exe / cli.js wrapper)." >&2
-            echo "       Install the native binary alongside the npm one:" >&2
-            echo "           curl -fsSL https://claude.ai/install.sh | bash" >&2
-            echo "       That populates ~/.local/share/claude/versions/<v> and" >&2
-            echo "       symlinks ~/.local/bin/claude to it — claude-channels" >&2
-            echo "       will pick that up automatically." >&2
-            return 1
-        fi
-    fi
-
-    echo "ERROR: Could not find Claude Code binary." >&2
-    return 1
-}
+# Patching is delegated to the `cc-patcher` console script, which lives
+# in its own environment (typically a `uv tool` venv) alongside the
+# channel-patch provider. `cc-patcher resolve` patches + caches the real
+# binary and prints its path; it fails non-zero if no patch provider is
+# installed. We keep the returned path so channel MCP args and the
+# mirror-agent can be layered on before exec below.
+if ! command -v cc-patcher >/dev/null 2>&1; then
+    echo "ERROR: cc-patcher not found on PATH. Install it with the channel" >&2
+    echo "       provider, e.g.:" >&2
+    echo "           uv tool install git+https://github.com/andrewleech/cc-patcher \\" >&2
+    echo "               --with git+https://github.com/andrewleech/claude-net-patcher" >&2
+    exit 1
+fi
+CLI_PATH=$(cc-patcher resolve) || exit 1
 
 # ── Auto-detect channel MCP servers ──────────────────────────────────────
 
@@ -109,78 +78,7 @@ except Exception:
 " 2>/dev/null || true
 }
 
-# ── Main ─────────────────────────────────────────────────────────────────
-
-CLI_PATH=$(find_claude_binary)
-mkdir -p "$CACHE_DIR"
-
-# Version key from binary hash + patcher hash. The patcher contribution
-# matters: when patch-binary.py changes (new patch added, existing patch
-# fixed), every cached binary needs re-patching even if the source binary
-# is unchanged. Without it, hosts silently keep running the old patch set.
-#
-# Pipe contents (not file paths) to sha256sum — `sha256sum FILE1 FILE2`
-# embeds the paths in its output, which would make the in-repo launcher
-# and the installed launcher produce different cache keys even for the
-# same byte-identical patcher.
-HASH=$(cat "$CLI_PATH" "$PATCHER" | sha256sum | head -c 12)
-PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${HASH}"
-
-# Patch if this hash hasn't been patched yet
-if [ ! -f "$PATCHED_VERSIONED" ]; then
-    patch_exit=0
-    python3 "$PATCHER" "$CLI_PATH" "$PATCHED_VERSIONED" || patch_exit=$?
-
-    if [ "$patch_exit" -eq 1 ]; then
-        # Fatal error — patched binary is unusable
-        rm -f "$PATCHED_VERSIONED"
-        echo "Fatal patching error. Falling back to unpatched binary." >&2
-        PATCHED_VERSIONED="$CLI_PATH"
-    elif [ "$patch_exit" -eq 2 ]; then
-        # Partial success — some patches failed.
-        # Fall back to the previous patched binary if one exists; otherwise run
-        # with partial patches. Don't prompt: this fires on every Claude Code
-        # update and the user has already opted in by running claude-channels.
-        PREV_PATCHED="$(readlink -f "$PATCHED_LINK" 2>/dev/null || true)"
-        if [ -n "$PREV_PATCHED" ] && [ -f "$PREV_PATCHED" ] && [ "$PREV_PATCHED" != "$PATCHED_VERSIONED" ]; then
-            echo "[claude-channels] partial patch on new build; using previous patched binary $(basename "$PREV_PATCHED")" >&2
-            rm -f "$PATCHED_VERSIONED"
-            PATCHED_VERSIONED="$PREV_PATCHED"
-        else
-            echo "[claude-channels] partial patch; continuing — some channel restrictions may still prompt" >&2
-        fi
-    fi
-
-    # On macOS, the in-place byte patches invalidate Apple's code
-    # signature; AMFI then silently kills the binary at exec ("zsh:
-    # killed" with no other output). Ad-hoc re-sign with preserved
-    # entitlements so Bun's JIT / dylib loading still works.
-    if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ] && [ -f "$PATCHED_VERSIONED" ] \
-        && [ "$(uname -s)" = "Darwin" ] \
-        && command -v codesign >/dev/null 2>&1; then
-        if ! codesign --force \
-            --preserve-metadata=entitlements,requirements,flags,runtime \
-            --sign - "$PATCHED_VERSIONED" 2>/dev/null; then
-            # Some binaries don't have enough metadata to preserve —
-            # fall back to a bare ad-hoc sign.
-            codesign --force --sign - "$PATCHED_VERSIONED" 2>/dev/null || {
-                echo "WARN: codesign failed — macOS AMFI may kill the patched binary at exec." >&2
-            }
-        fi
-    fi
-
-    # Clean up old versioned files (keep current + any fallback target)
-    if [ "$PATCHED_VERSIONED" != "$CLI_PATH" ]; then
-        find "$CACHE_DIR" -name 'claude-patched-*' \
-            ! -name "$(basename "$PATCHED_VERSIONED")" \
-            -delete 2>/dev/null || true
-    fi
-fi
-
-# Symlink to the common name (atomic update, safe even if old version is running)
-ln -snf "$PATCHED_VERSIONED" "$PATCHED_LINK"
-
-# Build extra flags
+# ── Build extra CLI flags ─────────────────────────────────────────────────
 EXTRA_ARGS=()
 
 already_has_channels=false
@@ -434,4 +332,4 @@ fi
 # fragile "LLM call _ack_channel within 60s" ceremony, which agents have
 # been observed to ignore as noise.
 export CLAUDE_NET_CHANNELS_PATCHED=1
-exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"
+exec "$CLI_PATH" "${EXTRA_ARGS[@]}" "$@"

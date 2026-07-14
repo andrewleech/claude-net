@@ -35,10 +35,6 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
     rel: "bin/claude-net-mirror-agent",
     contentType: "text/x-shellscript",
   },
-  "patch-binary.py": {
-    rel: "bin/patch-binary.py",
-    contentType: "text/x-python",
-  },
   "install-channels": {
     rel: "bin/install-channels",
     contentType: "text/x-shellscript",

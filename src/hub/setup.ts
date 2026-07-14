@@ -57,16 +57,41 @@ mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude"
 
 echo "[1/5] Downloading claude-channels + mirror binaries from \${HUB}…"
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
-         patch-binary.py mirror-agent.bundle.js; do
+         mirror-agent.bundle.js; do
     curl -fsSL "\$HUB/bin/\$f" -o "\$INSTALL_DIR/\$f"
 done
 chmod +x "\$INSTALL_DIR/claude-channels" \\
          "\$INSTALL_DIR/claude-net-mirror-push" \\
          "\$INSTALL_DIR/claude-net-mirror-agent"
 
+# claude-channels delegates binary patching to the cc-patcher engine plus
+# the claude-net-patcher provider package rather than bundling patch
+# logic itself. Both are installed as one uv tool (cc-patcher owns the
+# command; claude-net-patcher is injected with --with so its channel
+# patches are discovered in the same venv), pulled directly from GitHub.
+# A failure here is non-fatal to the rest of setup (MCP registration +
+# hooks still work), but claude-channels won't be able to patch the
+# binary until the tool is installed.
+echo "[1b/5] Installing cc-patcher + claude-net-patcher (binary-patching engine)…"
+if command -v uv >/dev/null 2>&1; then
+    if ! uv tool install --force --reinstall \\
+            git+https://github.com/andrewleech/cc-patcher \\
+            --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"; then
+        echo "WARN: uv tool install of cc-patcher / claude-net-patcher failed;" >&2
+        echo "      claude-channels won't be able to patch the Claude Code binary" >&2
+        echo "      until you re-run:" >&2
+        echo "          uv tool install git+https://github.com/andrewleech/cc-patcher \\\\" >&2
+        echo "              --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"" >&2
+    fi
+else
+    echo "WARN: uv not found; skipping binary-patcher install. Install uv, then:" >&2
+    echo "          uv tool install git+https://github.com/andrewleech/cc-patcher \\\\" >&2
+    echo "              --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"" >&2
+fi
+
 # Statusline script lives in ~/.claude/ because that's where Claude Code
 # resolves relative paths from in settings.json.statusLine.command.
-echo "[1b/5] Installing statusline script…"
+echo "[1c/5] Installing statusline script…"
 curl -fsSL "\$HUB/bin/statusline.py" -o "\$HOME/.claude/statusline.py"
 chmod +x "\$HOME/.claude/statusline.py"
 

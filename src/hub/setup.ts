@@ -72,21 +72,31 @@ chmod +x "\$INSTALL_DIR/claude-channels" \\
 # A failure here is non-fatal to the rest of setup (MCP registration +
 # hooks still work), but claude-channels won't be able to patch the
 # binary until the tool is installed.
-echo "[1b/5] Installing cc-patcher + claude-net-patcher (binary-patching engine)…"
+echo "[1b/5] Installing/upgrading cc-patcher + claude-net-patcher (binary-patching engine)…"
+CN_PATCHER="git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"
 if command -v uv >/dev/null 2>&1; then
-    if ! uv tool install --force --reinstall \\
-            git+https://github.com/andrewleech/cc-patcher \\
-            --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"; then
+    if uv tool list 2>/dev/null | awk '{print \$1}' | grep -qx cc-patcher; then
+        # Already installed — upgrade in place. 'uv tool upgrade' refreshes
+        # the engine and every registered provider from its recorded source
+        # without redefining the --with set, so a separately-installed
+        # provider (e.g. a model-router plugin) is preserved. A --reinstall
+        # would drop it.
+        echo "  cc-patcher present — upgrading in place (preserves other providers)…"
+        uv tool upgrade cc-patcher || echo "WARN: cc-patcher upgrade failed" >&2
+        if ! cc-patcher --list-providers 2>/dev/null | grep -q claude-net-patcher; then
+            echo "WARN: cc-patcher is installed without the claude-net channel provider." >&2
+            echo "      Add it (alongside any existing providers) with:" >&2
+            echo "          uv tool install --force cc-patcher --with \$CN_PATCHER" >&2
+        fi
+    elif ! uv tool install git+https://github.com/andrewleech/cc-patcher --with "\$CN_PATCHER"; then
         echo "WARN: uv tool install of cc-patcher / claude-net-patcher failed;" >&2
         echo "      claude-channels won't be able to patch the Claude Code binary" >&2
         echo "      until you re-run:" >&2
-        echo "          uv tool install git+https://github.com/andrewleech/cc-patcher \\\\" >&2
-        echo "              --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"" >&2
+        echo "          uv tool install git+https://github.com/andrewleech/cc-patcher --with \$CN_PATCHER" >&2
     fi
 else
     echo "WARN: uv not found; skipping binary-patcher install. Install uv, then:" >&2
-    echo "          uv tool install git+https://github.com/andrewleech/cc-patcher \\\\" >&2
-    echo "              --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"" >&2
+    echo "          uv tool install git+https://github.com/andrewleech/cc-patcher --with \$CN_PATCHER" >&2
 fi
 
 # Statusline script lives in ~/.claude/ because that's where Claude Code

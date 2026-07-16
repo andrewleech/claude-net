@@ -54,10 +54,24 @@ if command -v uv >/dev/null 2>&1; then
     else
         cn_patcher_src="$CN_PATCHER_GIT"
     fi
-    echo "Installing cc-patcher + claude-net-patcher as a uv tool…"
-    # --reinstall so a re-run picks up updated code even at an unchanged
-    # version (uv otherwise serves a cached wheel).
-    uv tool install --force --reinstall "$cc_patcher_src" --with "$cn_patcher_src"
+    if uv tool list 2>/dev/null | grep -qE '^cc-patcher( |$)'; then
+        # Already installed — upgrade in place. `uv tool upgrade` rebuilds
+        # the engine and every registered provider from its recorded
+        # source without redefining the --with set, so any co-installed
+        # provider (e.g. a separately-installed model-router plugin) is
+        # preserved. A --reinstall here would drop those other providers.
+        echo "cc-patcher already installed — upgrading (preserves other providers)…"
+        uv tool upgrade cc-patcher
+        if ! cc-patcher --list-providers 2>/dev/null | grep -q 'claude-net-patcher'; then
+            echo "WARN: cc-patcher is installed but the claude-net channel provider" >&2
+            echo "      (claude-net-patcher) is not registered. Add it without" >&2
+            echo "      disturbing existing providers, e.g.:" >&2
+            echo "          uv tool install --force cc-patcher --with \"$cn_patcher_src\"" >&2
+        fi
+    else
+        echo "Installing cc-patcher + claude-net-patcher as a uv tool…"
+        uv tool install "$cc_patcher_src" --with "$cn_patcher_src"
+    fi
 else
     echo "WARN: uv not found; skipping cc-patcher / claude-net-patcher install." >&2
     echo "      claude-channels cannot patch the Claude Code binary until you run:" >&2

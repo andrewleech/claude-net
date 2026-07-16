@@ -127,15 +127,27 @@ The dev channels dialog and the allowlist toast aren't controllable via settings
 
 ## The patcher (zero-friction option)
 
-If you want channels to _just work_ with no prompts, no flags, no setup dialogs, install the `claude-channels` launcher. It keeps a patched copy of the Claude Code binary at `~/.local/share/claude-channels/` (the original is never touched) and uses that instead. Five same-length byte-level patches:
+If you want channels to _just work_ with no prompts, no flags, no setup dialogs, install the `claude-channels` launcher. Rather than bundling patch logic, it delegates to [`cc-patcher`](https://github.com/andrewleech/cc-patcher) — a standalone engine that applies patch definitions supplied by provider packages. claude-net ships its channel patches as one such provider, `claude-net-patcher` (in `patcher-ext/`).
+
+`cc-patcher` keeps a patched copy of the Claude Code binary under `~/.local/share/cc-patcher/` (the original is never touched), re-patching automatically when Claude Code updates. claude-net's provider registers six same-length byte-level patches:
 
 1. Forces the `tengu_harbor` feature gate true, so channels are always available
 2. Inverts the `channelsEnabled` org policy check so it never blocks
 3. Skips the non-dev channel allowlist check
 4. Auto-accepts the dev channels approval dialog
 5. Suppresses the stale allowlist toast
+6. Opens the dynamic-workflows master gate
 
-The launcher also auto-detects MCP servers configured in `~/.claude.json` and adds the right `--dangerously-load-development-channels` flag for each, so you don't have to. Re-patches automatically when Claude Code updates.
+The launcher also auto-detects MCP servers configured in `~/.claude.json` and adds the right `--dangerously-load-development-channels` flag for each, so you don't have to.
+
+The engine and the channel provider install as a single `uv tool` — `cc-patcher` owns the command, and `claude-net-patcher` is injected with `--with` so its patches are discovered in the same environment:
+
+```bash
+uv tool install git+https://github.com/andrewleech/cc-patcher \
+    --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"
+```
+
+You don't normally run that by hand — the install paths below do it for you, and a re-run upgrades the tool in place, preserving any other `cc-patcher` providers you have installed. (cc-patcher can host additional providers; its README lists the supported ones.)
 
 Install — pipe the hub's `/setup` endpoint to bash. The hub serves its own launcher + mirror binaries so install follows whichever branch / tag is deployed, and doesn't depend on a GitHub org being reachable:
 

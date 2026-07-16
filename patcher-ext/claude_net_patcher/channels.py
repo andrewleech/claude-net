@@ -190,7 +190,7 @@ class DynamicWorkflowsMasterGatePatch:
     PATTERN = (
         rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;'
         rb'let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+\(\);'
-        rb'if\(![\w$]+\)return!1;return [\w$]+\(\)\?\?[\w$]+'
+        rb'if\(![\w$]+\)return!1;return [\w$]+\(\)(?:\?\.[\w$]+(?:\.[\w$]+)*)?\?\?[\w$]+'
     )
     NEW_BODY = b"return!0"
 

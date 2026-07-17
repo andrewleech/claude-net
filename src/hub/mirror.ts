@@ -631,32 +631,17 @@ export class MirrorRegistry {
       ? this.entryByKey(host, actualSid)
       : this.entryBySid(actualSid);
     if (existing) {
-      // Owner mismatch: reject if the session already has a known host and
-      // the incoming owner differs. Legitimate keep-alive reconnects always
-      // send the same cwd-derived owner; a mismatch from a different peer
-      // would silently relabel the session on a shared Tailscale network.
-      // Exception 1: existing.ownerAgent may be blank for pre-rollout
-      // sessions. Exception 2: if the incoming POST proves it's the same
-      // process via (host, ccPid) — both non-null and identical — trust
-      // it. This is the MCP-rename-during-recovery path: the agent stores
-      // the cwd-derived owner from its initial POST and never learns the
-      // MCP-registered label, so its recovery POST after a WS drop sends
-      // a "stale" owner. Rejecting that POST permanently wedges the
-      // session until claude-channels restarts.
-      const identityMatches =
-        existing.ccPid !== null && ccPid !== null && existing.ccPid === ccPid;
-      if (
-        // `existing.host` is the rollout guard for the original 409:
-        // pre-rollout entries (legacy fixture-driven calls without a host)
-        // never carried hostile-peer risk, and skipping the check keeps
-        // their idempotent re-POSTs behaving as keep-alives.
-        existing.host &&
-        existing.ownerAgent &&
-        ownerAgent !== existing.ownerAgent &&
-        !identityMatches
-      ) {
-        return { ok: false, error: "Session owner mismatch." };
-      }
+      // `existing` was looked up by (host, sid), so this re-POST is for the
+      // very same session — a UUID sid is strong identity on a trusted
+      // network. We deliberately do NOT adopt the incoming owner here: the
+      // hub's copy is canonical (it may have been rewritten by the MCP
+      // register join or a dashboard rename), while the daemon keeps
+      // re-sending the cwd-derived owner it captured at first POST. Keeping
+      // the existing owner makes every re-POST an idempotent keep-alive and
+      // means a stray peer can't relabel the session. (This replaces an
+      // earlier "Session owner mismatch" 409 that permanently wedged any
+      // renamed session whose ccPid couldn't vouch for identity — the
+      // session showed offline/no-mirror while Claude ran fine.)
       if (existing.closedAt) {
         // Re-open a closed session when the same owner comes back with
         // the same sid. Happens after mirror-agent restarts where the
@@ -1807,6 +1792,10 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         return {
           sid: result.entry.sid,
           restored: result.restored,
+          // Canonical owner (may differ from what the daemon posted after
+          // an MCP-register join or rename); the daemon adopts it so its
+          // future POSTs and logs converge on the real label.
+          owner_agent: result.entry.ownerAgent,
         };
       })
 
@@ -2692,11 +2681,22 @@ export function wsMirrorPlugin(
 
       const frame = data as { action: string } & Record<string, unknown>;
       if (frame.action === "mirror_event" && frame.sid === meta.sid) {
-        mirrorRegistry.recordEvent(
+        const rec = mirrorRegistry.recordEvent(
           meta.sid,
           frame as unknown as MirrorEventFrame,
           meta.host,
         );
+        // A healthy WS bound to a closed/unknown session would otherwise
+        // silently swallow every event (the daemon flushes into a bit
+        // bucket, no close, no recovery). Close with a distinct code so
+        // the daemon reconnects; its onOpen re-POST reopens the session.
+        if (!rec.ok) {
+          try {
+            ws.close(4004, "session not open");
+          } catch {
+            // already closing — ignore
+          }
+        }
       } else if (
         frame.action === "mirror_paste_done" &&
         frame.sid === meta.sid &&

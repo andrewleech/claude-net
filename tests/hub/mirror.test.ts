@@ -75,12 +75,11 @@ describe("MirrorRegistry", () => {
     expect(r2.entry.ownerAgent).toBe("renamed:u@h");
   });
 
-  test("createSession bypasses owner mismatch when (host, ccPid) identity matches", () => {
-    // Production version of the keep-alive case above: the hub-side
-    // entry has a host AND was renamed, so the old guard fires the
-    // mismatch check and 409s. With matching host + ccPid the new
-    // POST proves it's the same process, so the rename is accepted as
-    // a keep-alive and the existing (likely better) label is kept.
+  test("createSession keeps the renamed owner on a same-sid keep-alive re-POST", () => {
+    // The hub-side entry was renamed after creation (MCP-join / dashboard
+    // rename); the daemon re-POSTs its original cwd-derived owner. The
+    // re-POST is accepted as an idempotent keep-alive and the existing
+    // (post-rename) label is preserved rather than reverted.
     const r1 = reg.createSession(
       "alice:u@h",
       "/home/alice",
@@ -186,7 +185,11 @@ describe("MirrorRegistry", () => {
     expect(sent.some((s) => s.startsWith("desktop:"))).toBe(false);
   });
 
-  test("createSession still rejects owner mismatch when ccPid differs", () => {
+  test("createSession keeps the existing owner on a same-sid re-POST (no relabel, no 409)", () => {
+    // A re-POST for an existing (host, sid) is the same session — accepted
+    // as an idempotent keep-alive regardless of the incoming owner or
+    // ccPid, so a renamed session can never wedge on "owner mismatch".
+    // The incoming owner is ignored, so a stray peer can't relabel it.
     const r1 = reg.createSession(
       "alice:u@h",
       "/home/alice",
@@ -203,7 +206,10 @@ describe("MirrorRegistry", () => {
       "laptop",
       9999,
     );
-    expect(r2.ok).toBe(false);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.restored).toBe(true);
+    expect(r2.entry.ownerAgent).toBe("alice:u@h");
   });
 
   test("createSession dedupes zombie placeholders sharing (host, ccPid)", () => {
@@ -295,9 +301,12 @@ describe("MirrorRegistry", () => {
     expect(reg.hasSession("sid-laptop")).toBe(true);
   });
 
-  test("createSession rejects owner mismatch when existing ccPid is null", () => {
-    // Defensive: pre-rollout sessions without ccPid stay strict on
-    // owner check — identity proof requires non-null ccPid match.
+  test("createSession keeps existing owner on same-sid re-POST even when stored ccPid is null", () => {
+    // This is the exact wedge the old 409 caused: a session created without
+    // a ccPid (pre-CC_PID hook) then renamed on the hub. The daemon keeps
+    // re-POSTing its cwd-derived owner; identity can't be proven by ccPid.
+    // It must still succeed (keep-alive) with the renamed owner preserved,
+    // rather than 409-ing forever and showing offline while Claude runs.
     const r1 = reg.createSession(
       "alice:u@h",
       "/home/alice",
@@ -307,14 +316,17 @@ describe("MirrorRegistry", () => {
     );
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
+    r1.entry.ownerAgent = "renamed-by-mcp:u@h"; // hub-side rename
     const r2 = reg.createSession(
-      "evil:u@h",
+      "alice:u@h", // daemon still re-POSTs the stale cwd-derived owner
       "/home/alice",
       "sid-h4",
       "laptop",
-      4815,
+      null,
     );
-    expect(r2.ok).toBe(false);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.entry.ownerAgent).toBe("renamed-by-mcp:u@h");
   });
 
   test("getSession returns the entry for a known sid, 404 otherwise", () => {
@@ -1092,6 +1104,49 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       const payload = (await transcript.json()) as Record<string, unknown>;
       expect(payload.sid).toBe("auto-sid-1");
       expect(Array.isArray(payload.transcript)).toBe(true);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("POST /session returns canonical owner and never 409s a renamed re-POST", async () => {
+    const reg = new MirrorRegistry({ transcriptRing: 100, retentionMs: 0 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    try {
+      const mk = (owner: string) =>
+        fetch(`http://localhost:${port}/api/mirror/session`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_agent: owner,
+            cwd: "/workspace",
+            sid: "own-1",
+            host: "h",
+            cc_pid: null,
+          }),
+        });
+
+      let res = await mk("proj:u@h");
+      expect(res.status).toBe(200);
+      let body = (await res.json()) as Record<string, unknown>;
+      expect(body.owner_agent).toBe("proj:u@h");
+
+      // Hub-side rename (MCP join / dashboard rename).
+      const found = reg.getSession("own-1", "h");
+      expect(found.ok).toBe(true);
+      if (!found.ok) return;
+      found.entry.ownerAgent = "renamed:u@h";
+
+      // Daemon re-POSTs its stale cwd-derived owner: must NOT 409, and the
+      // response carries the canonical owner so the daemon can adopt it.
+      res = await mk("proj:u@h");
+      expect(res.status).toBe(200);
+      body = (await res.json()) as Record<string, unknown>;
+      expect(body.restored).toBe(true);
+      expect(body.owner_agent).toBe("renamed:u@h");
     } finally {
       app.stop();
     }

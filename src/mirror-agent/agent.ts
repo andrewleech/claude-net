@@ -74,6 +74,11 @@ interface SessionState {
   /** True while a keep-alive POST with a new ccPid is in flight, to
    *  prevent duplicate concurrent POSTs from rapid hook arrivals. */
   pendingPidUpdate: boolean;
+  /** True from WS open until the re-assert POST has confirmed the session
+   *  is open on the hub. While set, queueEvent buffers into the outbox
+   *  instead of sending — otherwise events raced onto the wire before the
+   *  reopen lands are dropped by the hub as "session closed". */
+  reopening: boolean;
   /** JSONL record uuids for which we have already POSTed an
    *  api-error report to the hub. Prevents double-firing within a
    *  single agent run; on restart the timestamp filter in
@@ -139,6 +144,9 @@ const RECOVERY_INITIAL_DELAY_MS = 1_000;
 const RECOVERY_MAX_DELAY_MS = 30_000;
 const RECOVERY_BURST_ATTEMPTS = 20;
 const RECOVERY_SLOW_DELAY_MS = 5 * 60 * 1000;
+/** Cap the WS-open re-assert POST so a half-open socket after suspend/resume
+ *  can't hang the reopen (and thus the flush) indefinitely. */
+const REOPEN_TIMEOUT_MS = 10_000;
 
 /** Maximum age of an isApiErrorMessage JSONL record we'll report to the
  *  hub. The JSONL tail re-reads from byte 0 on every agent start, so
@@ -716,7 +724,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     tmuxPane: string | undefined,
     ccPid: number | undefined,
   ): Promise<SessionState | null> {
-    const ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
+    let ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
     const host = os.hostname() || "host";
     const resolvedPid =
       typeof ccPid === "number" && Number.isFinite(ccPid) ? ccPid : null;
@@ -736,7 +744,14 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         log(`session create failed: HTTP ${res.status} ${await res.text()}`);
         return null;
       }
-      await res.json().catch(() => ({}));
+      // Adopt the hub's canonical owner (it may already carry an MCP-join
+      // rename) so our future POSTs and logs don't keep diverging.
+      const body = (await res.json().catch(() => ({}))) as {
+        owner_agent?: unknown;
+      };
+      if (typeof body.owner_agent === "string" && body.owner_agent) {
+        ownerAgent = body.owner_agent;
+      }
     } catch (err) {
       log(`session create threw: ${String(err)}`);
       return null;
@@ -757,6 +772,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       closed: false,
       tmuxPane: tmuxPane ?? null,
       recovering: false,
+      reopening: false,
       ctxWindow: 200_000,
       lastCtxPct: -1,
       lastUsage: null,
@@ -793,7 +809,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     const client = new HubClient({
       url: wsUrl,
       logPrefix: `claude-net/mirror:${sid}`,
-      onOpen: () => {
+      onOpen: async () => {
         // Re-assert the session on the hub every time the WS opens
         // (first connect and every reconnect). Covers sleep-wake, hub
         // restart, orphan auto-close — all the states where the WS
@@ -801,19 +817,46 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         // or closed and silently drops incoming events. createSession
         // is idempotent: existing open sessions no-op, closed ones
         // get reopened, lost ones get re-created with the same sid.
-        fetch(`${hubUrl}/api/mirror/session`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            owner_agent: session.ownerAgent,
-            cwd: session.cwd,
-            sid: session.sid,
-            host: session.host,
-            cc_pid: session.ccPid,
-          }),
-        }).catch(() => {
-          // WS onClose will retry; nothing to do here.
-        });
+        //
+        // Await it BEFORE flushing: until the hub confirms the session is
+        // open, events raced onto the wire would be dropped as "session
+        // closed". `reopening` makes queueEvent buffer in the meantime.
+        session.reopening = true;
+        try {
+          const res = await fetch(`${hubUrl}/api/mirror/session`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            signal: AbortSignal.timeout(REOPEN_TIMEOUT_MS),
+            body: JSON.stringify({
+              owner_agent: session.ownerAgent,
+              cwd: session.cwd,
+              sid: session.sid,
+              host: session.host,
+              cc_pid: session.ccPid,
+            }),
+          });
+          if (!res.ok) {
+            // Reopen rejected — don't flush into a session the hub still
+            // considers closed. Leave events buffered; the next event will
+            // trip the hub's close-on-closed-session path and drive a
+            // reconnect that retries the reopen.
+            session.reopening = false;
+            return;
+          }
+          const body = (await res.json().catch(() => ({}))) as {
+            owner_agent?: unknown;
+          };
+          if (typeof body.owner_agent === "string" && body.owner_agent) {
+            session.ownerAgent = body.owner_agent;
+          }
+        } catch {
+          // Network error / timeout — leave the outbox buffered; onClose
+          // (or the watchdog) will reconnect and retry the reopen.
+          session.reopening = false;
+          return;
+        }
+        session.reopening = false;
+        if (session.closed) return;
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);
@@ -1081,7 +1124,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // prose) into the session's fetch allowlist. Scanning the serialized
     // frame catches both without walking the payload shape by hand.
     session.observer.observeText(json);
-    if (session.ws?.isOpen()) {
+    // While `reopening`, the WS is open but the hub hasn't confirmed the
+    // session is open yet — buffer so nothing is sent into a still-closed
+    // session and silently dropped.
+    if (session.ws?.isOpen() && !session.reopening) {
       session.ws.send(json);
     } else {
       if (session.outbox.length >= OUTBOX_MAX) {

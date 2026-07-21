@@ -57,6 +57,12 @@ export interface RawHookPayload {
   message?: string;
   phase?: string;
   summary?: string;
+  /** Present on sub-agent-originated hooks (PreToolUse/PostToolUse/SubagentStop). */
+  agent_id?: string;
+  /** Sub-agent type, present alongside agent_id. */
+  agent_type?: string;
+  /** Present on SubagentStop: the sub-agent's own transcript file. */
+  agent_transcript_path?: string;
   /** Synthetic metadata added by claude-net-mirror-push (not a hook field). */
   _mirror_env?: {
     TMUX?: string;
@@ -75,6 +81,8 @@ export interface IngestedEvent {
   cwd: string | undefined;
   tmuxPane: string | undefined;
   ccPid: number | undefined;
+  agentId: string | undefined;
+  agentType: string | undefined;
 }
 
 /**
@@ -99,10 +107,15 @@ export function ingestHook(payload: RawHookPayload): IngestedEvent | null {
   const mirrorPayload = hookToPayload(hook, payload);
   if (!mirrorPayload) return null;
 
+  const agentId = stringField(payload.agent_id);
+  const agentType = stringField(payload.agent_type);
+
   const frame: MirrorEventFrame = {
     ...base,
     kind: mirrorPayload.kind,
     payload: mirrorPayload,
+    ...(agentId ? { agent_id: agentId } : {}),
+    ...(agentType ? { agent_type: agentType } : {}),
   };
 
   return {
@@ -121,6 +134,8 @@ export function ingestHook(payload: RawHookPayload): IngestedEvent | null {
       typeof payload._mirror_env?.CC_PID === "number"
         ? payload._mirror_env.CC_PID
         : undefined,
+    agentId,
+    agentType,
   };
 }
 

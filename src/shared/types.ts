@@ -129,6 +129,10 @@ export interface MirrorEventFrame {
   ts: number;
   payload: MirrorEventPayload;
   requestId?: string;
+  /** Present when this frame originated from a sub-agent (Task/Agent tool). */
+  agent_id?: string;
+  /** Sub-agent type, e.g. "general-purpose", present alongside agent_id. */
+  agent_type?: string;
 }
 
 /**
@@ -526,6 +530,10 @@ export interface MirrorEventBroadcastEvent {
   kind: MirrorEventKind;
   ts: number;
   payload: MirrorEventPayload;
+  /** Present when this frame originated from a sub-agent (Task/Agent tool). */
+  agent_id?: string;
+  /** Sub-agent type, e.g. "general-purpose", present alongside agent_id. */
+  agent_type?: string;
 }
 
 export interface MirrorWatcherJoinedEvent {
@@ -788,6 +796,12 @@ export interface MirrorAssistantMessagePayload {
    * the hub does not flip session activity state to awaiting_input.
    */
   subagent?: boolean;
+  /**
+   * Set for a minimal marker frame emitted in place of a sub-agent's
+   * SubagentStop text (the real text arrives via the sub-agent's own JSONL
+   * tail). It has no text; it only flips the agent's tab status to done.
+   */
+  subagent_done?: boolean;
 }
 
 export interface MirrorToolCallPayload {

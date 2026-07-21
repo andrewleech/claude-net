@@ -139,6 +139,59 @@ describe("ingestHook", () => {
     }
   });
 
+  test("a sub-agent-tagged hook stamps agent_id/agent_type onto the frame", () => {
+    const out = ingestHook({
+      hook_event_name: "PreToolUse",
+      session_id: "s-1",
+      tool_use_id: "use-1",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      agent_id: "agent-42",
+      agent_type: "general-purpose",
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.agent_id).toBe("agent-42");
+    expect(out.frame.agent_type).toBe("general-purpose");
+    expect(out.agentId).toBe("agent-42");
+    expect(out.agentType).toBe("general-purpose");
+  });
+
+  test("a main-thread hook leaves agent_id/agent_type undefined", () => {
+    const out = ingestHook({
+      hook_event_name: "PreToolUse",
+      session_id: "s-1",
+      tool_use_id: "use-1",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.agent_id).toBeUndefined();
+    expect(out.frame.agent_type).toBeUndefined();
+    expect(out.agentId).toBeUndefined();
+    expect(out.agentType).toBeUndefined();
+  });
+
+  test("SubagentStop carries agent_id/agent_type alongside subagent: true", () => {
+    const out = ingestHook({
+      hook_event_name: "SubagentStop",
+      session_id: "s-1",
+      last_assistant_message: "subdone",
+      stop_reason: "end_turn",
+      agent_id: "agent-7",
+      agent_type: "code-reviewer",
+      agent_transcript_path: "/tmp/proj/s-1/subagents/agent-agent-7.jsonl",
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.agent_id).toBe("agent-7");
+    expect(out.frame.agent_type).toBe("code-reviewer");
+    if (out.frame.payload.kind !== "assistant_message")
+      throw new Error("wrong kind");
+    expect(out.frame.payload.subagent).toBe(true);
+  });
+
   test("Unknown hook names return null", () => {
     expect(
       ingestHook({ hook_event_name: "WeirdHook", session_id: "s-1" }),

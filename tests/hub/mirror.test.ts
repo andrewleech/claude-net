@@ -4,6 +4,7 @@ import {
   type SessionWatcher,
   _resetSessionCreateLimiterForTest,
   mirrorPlugin,
+  nextActivityState,
 } from "@/hub/mirror";
 import { Scheduler } from "@/hub/scheduler";
 import type { MirrorEventFrame } from "@/shared/types";
@@ -482,6 +483,132 @@ describe("MirrorRegistry", () => {
       }),
     );
     expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("nextActivityState: an agent_id-tagged frame always preserves prev, regardless of kind", () => {
+    // A sub-agent's own tool_call/tool_result would normally flip an
+    // untagged session busy; tagged, it must be a pure no-op so the
+    // parent's dot only ever reflects the parent's own turn.
+    expect(
+      nextActivityState(
+        "awaiting_input",
+        "tool_call",
+        { kind: "tool_call", tool_use_id: "u-1", tool_name: "Bash", input: {} },
+        "agent-1",
+      ),
+    ).toBe("awaiting_input");
+    expect(
+      nextActivityState(
+        "busy",
+        "assistant_message",
+        {
+          kind: "assistant_message",
+          text: "",
+          stop_reason: "",
+          subagent_done: true,
+        },
+        "agent-1",
+      ),
+    ).toBe("busy");
+    expect(
+      nextActivityState(
+        "busy",
+        "notification",
+        { kind: "notification", text: "hi" },
+        "agent-1",
+      ),
+    ).toBe("busy");
+  });
+
+  test("activityState: tagged tool_call/tool_result/subagent_done never flip a fresh session out of awaiting_input", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    expect(r.entry.activityState).toBe("awaiting_input");
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "sub-call", {
+        kind: "tool_call",
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "use-1",
+          tool_name: "Bash",
+          input: { command: "ls" },
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "sub-result", {
+        kind: "tool_result",
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "use-1",
+          tool_name: "Bash",
+          response: "ok",
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "sub-done", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "",
+          stop_reason: "",
+          subagent_done: true,
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    expect(r.entry.activityState).toBe("awaiting_input");
+  });
+
+  test("recordEvent broadcast and transcript carry agent_id/agent_type", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const sent: string[] = [];
+    reg.addWatcher(sid, {
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+      id: "w-1",
+    });
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "sub-call", {
+        kind: "tool_call",
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "use-1",
+          tool_name: "Bash",
+          input: { command: "ls" },
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    // biome-ignore lint/style/noNonNullAssertion: length asserted by addWatcher/recordEvent above
+    const msg = JSON.parse(sent[0]!) as Record<string, unknown>;
+    expect(msg.agent_id).toBe("agent-1");
+    expect(msg.agent_type).toBe("general-purpose");
+    // The ring buffer stores the whole frame, so untagged events keep no
+    // stray agent_id/agent_type keys.
+    expect(r.entry.transcript[0]?.agent_id).toBe("agent-1");
+    expect(r.entry.transcript[0]?.agent_type).toBe("general-purpose");
   });
 
   test("activityState: restored session preserves prior state", () => {

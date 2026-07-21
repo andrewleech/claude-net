@@ -58,6 +58,10 @@ interface SessionState {
   seenUuids: Set<string>;
   outbox: string[];
   tail: TailHandle | null;
+  /** Sub-agent JSONL tails, keyed by agent_id. Each tails a sub-agent's
+   *  own transcript for its assistant reasoning/final text (tool calls
+   *  and results already arrive tagged via hooks). */
+  subagentTails: Map<string, TailHandle>;
   lastEventAt: number;
   closed: boolean;
   tmuxPane: string | null;
@@ -703,15 +707,55 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       if (stale) closeSession(stale, "replaced-by-clear");
     }
 
-    // Stop / SubagentStop fire at turn end and carry only the FINAL
-    // assistant text block. When the JSONL tail is running for this
-    // session we already emit every text block (including the final
-    // one), so suppress the hook-sourced duplicate. The hook's arrival
-    // is still our "turn ended" signal for the thinking indicator —
-    // Stop / SubagentStop ends the turn. The hook's arrival is still
-    // the definitive turn-ended signal for the thinking indicator even
-    // when we're about to suppress its event (because the JSONL tail
-    // already emitted the final text).
+    // Start a sub-agent JSONL tail on first sighting of a new agent_id.
+    // Guarded on the sub-agent's transcript file existing yet - a
+    // sub-agent emits many hooks over its lifetime, so a later one
+    // retries once Claude Code has created the file.
+    if (ingested.frame.agent_id) {
+      startSubagentTailIfNeeded(
+        session,
+        ingested.frame.agent_id,
+        ingested.frame.agent_type,
+      );
+    }
+
+    // Sub-agent SubagentStop → done marker, not text. The sub-agent's
+    // reasoning/final text arrives via its own JSONL tail (started
+    // above), so replace the hook-sourced text with a minimal marker
+    // that only flips the tab's status to done.
+    if (
+      ingested.frame.kind === "assistant_message" &&
+      ingested.frame.agent_id
+    ) {
+      const doneFrame: MirrorEventFrame = {
+        action: "mirror_event",
+        sid: session.sid,
+        uuid: crypto.randomUUID(),
+        kind: "assistant_message",
+        ts: Date.now(),
+        payload: {
+          kind: "assistant_message",
+          text: "",
+          stop_reason: "",
+          subagent_done: true,
+        },
+        agent_id: ingested.frame.agent_id,
+        ...(ingested.frame.agent_type
+          ? { agent_type: ingested.frame.agent_type }
+          : {}),
+      };
+      queueEvent(session, doneFrame);
+      return new Response("ok", { status: 202 });
+    }
+
+    // Stop fires at turn end and carries only the FINAL assistant text
+    // block. When the JSONL tail is running for this session we already
+    // emit every text block (including the final one), so suppress the
+    // hook-sourced duplicate. The hook's arrival is still the definitive
+    // turn-ended signal for the thinking indicator even when we're about
+    // to suppress its event (because the JSONL tail already emitted the
+    // final text). SubagentStop never reaches this check - it is always
+    // agent_id-tagged and handled above.
     if (ingested.frame.kind === "assistant_message" && session.tail !== null) {
       onTurnEnd(session);
       return new Response("suppressed-tail-active", { status: 202 });
@@ -738,21 +782,26 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       );
     }
 
-    // Drive the thinking indicator purely off hook transitions.
-    if (ingested.frame.kind === "user_prompt") {
-      onTurnStart(session);
-    } else if (ingested.frame.kind === "tool_call") {
-      const payload = ingested.frame.payload as { tool_name?: string };
-      const toolName =
-        typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
-      onToolStart(session, toolName);
-    } else if (ingested.frame.kind === "tool_result") {
-      onToolEnd(session);
-    } else if (
-      ingested.frame.kind === "assistant_message" ||
-      ingested.frame.kind === "session_end"
-    ) {
-      onTurnEnd(session);
+    // Drive the thinking indicator purely off hook transitions. Sub-agent
+    // hooks are tagged with agent_id and must not flip the parent's
+    // busy/indicator state - they're already redacted + queued above
+    // (tagged), this just keeps them out of the parent's state machine.
+    if (!ingested.frame.agent_id) {
+      if (ingested.frame.kind === "user_prompt") {
+        onTurnStart(session);
+      } else if (ingested.frame.kind === "tool_call") {
+        const payload = ingested.frame.payload as { tool_name?: string };
+        const toolName =
+          typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
+        onToolStart(session, toolName);
+      } else if (ingested.frame.kind === "tool_result") {
+        onToolEnd(session);
+      } else if (
+        ingested.frame.kind === "assistant_message" ||
+        ingested.frame.kind === "session_end"
+      ) {
+        onTurnEnd(session);
+      }
     }
 
     // Close on session_end.
@@ -841,6 +890,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       seenUuids: new Set(),
       outbox: [],
       tail: null,
+      subagentTails: new Map(),
       lastEventAt: Date.now(),
       closed: false,
       tmuxPane: tmuxPane ?? null,
@@ -1150,6 +1200,74 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   /**
+   * Start tailing a sub-agent's own JSONL transcript on first sighting of
+   * its agent_id. Mirrors the main tail's text-block extraction (tool
+   * calls/results already arrive tagged via hooks, so this emits
+   * assistant text blocks only - no duplication). Skips
+   * `emitCtxFromUsage`/`maybeReportApiError`: a sub-agent's usage would
+   * corrupt the parent's context bar, and API-error reporting is scoped
+   * to the parent thread's conversation. Reuses `session.seenUuids` for
+   * dedup - sub-agent record uuids are globally unique.
+   *
+   * No-ops if a tail is already running for this agent_id, or if the
+   * sub-agent's transcript file doesn't exist yet - a sub-agent emits
+   * many hooks over its lifetime, so a later one retries once Claude
+   * Code has created the file.
+   */
+  function startSubagentTailIfNeeded(
+    session: SessionState,
+    agentId: string,
+    agentType: string | undefined,
+  ): void {
+    if (session.subagentTails.has(agentId) || !session.transcriptPath) return;
+    const dir = path.dirname(session.transcriptPath);
+    const base = path.basename(session.transcriptPath, ".jsonl");
+    const subPath = path.join(dir, base, "subagents", `agent-${agentId}.jsonl`);
+    if (!fs.existsSync(subPath)) return;
+    const tail = tailJsonl(subPath, {
+      onRecord: (rec) => {
+        if (typeof rec.uuid === "string") {
+          session.seenUuids.add(rec.uuid);
+        }
+        if (
+          rec.type === "assistant" &&
+          rec.message &&
+          typeof rec.message === "object"
+        ) {
+          const msg = rec.message as { content?: unknown };
+          const content = Array.isArray(msg.content) ? msg.content : [];
+          for (let i = 0; i < content.length; i++) {
+            const block = content[i] as
+              | { type?: string; text?: string }
+              | undefined;
+            if (
+              block &&
+              block.type === "text" &&
+              typeof block.text === "string" &&
+              block.text.length > 0
+            ) {
+              emitAssistantTextFromJsonl(
+                session,
+                rec,
+                i,
+                block.text,
+                agentId,
+                agentType,
+              );
+            }
+          }
+        }
+      },
+      onError: (err) => {
+        log(
+          `[${session.sid}] sub-agent JSONL tail error (agent_id=${agentId}): ${err.message}`,
+        );
+      },
+    });
+    session.subagentTails.set(agentId, tail);
+  }
+
+  /**
    * POST a CC-side API-error record back to the hub. Dedupes per-uuid in
    * memory (lost on agent restart) and applies a 5-minute recency filter
    * so an agent restart re-reading old JSONL doesn't spam the hub with
@@ -1206,6 +1324,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     rec: { uuid?: string; timestamp?: string },
     blockIndex: number,
     text: string,
+    agentId?: string,
+    agentType?: string,
   ): void {
     const baseUuid =
       typeof rec.uuid === "string" && rec.uuid.length > 0
@@ -1230,6 +1350,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         stop_reason: "",
         ...(clamped.truncated ? { truncated: true } : {}),
       },
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(agentType ? { agent_type: agentType } : {}),
     };
     redactor.redactFrame(frame);
     queueEvent(session, frame);
@@ -1838,6 +1960,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       session.tail.stop();
       session.tail = null;
     }
+    for (const subTail of session.subagentTails.values()) {
+      subTail.stop();
+    }
+    session.subagentTails.clear();
     if (session.ws) {
       session.ws.stop();
       session.ws = null;

@@ -259,4 +259,113 @@ describe("mirror-session end-to-end", () => {
     );
     expect(close.status).toBe(200);
   });
+
+  test("tagged sub-agent frames survive the hub round-trip without disturbing main activity state", async () => {
+    const s = await createSession(hub.port);
+    const wsBase = `ws://localhost:${hub.port}/ws/mirror/${encodeURIComponent(s.sid)}`;
+
+    const agent = await connectWs(`${wsBase}?as=agent`);
+    await agent.waitFor((m) => m.event === "mirror:agent_ready");
+    const watcher = await connectWs(wsBase);
+    await watcher.waitFor((m) => m.event === "mirror:init");
+
+    async function activityState(): Promise<string> {
+      const res = await fetch(
+        `http://localhost:${hub.port}/api/mirror/sessions/all`,
+      );
+      const all = (await res.json()) as Array<Record<string, unknown>>;
+      const mine = all.find((e) => e.sid === s.sid);
+      if (!mine) throw new Error("session missing from /sessions/all");
+      return mine.activity_state as string;
+    }
+
+    expect(await activityState()).toBe("awaiting_input");
+
+    const callUuid = crypto.randomUUID();
+    agent.ws.send(
+      JSON.stringify({
+        action: "mirror_event",
+        sid: s.sid,
+        uuid: callUuid,
+        kind: "tool_call",
+        ts: Date.now(),
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "use-1",
+          tool_name: "Bash",
+          input: { command: "ls" },
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    const callEvt = (await watcher.waitFor(
+      (m) => m.uuid === callUuid,
+    )) as Record<string, unknown>;
+    expect(callEvt.agent_id).toBe("agent-1");
+    expect(callEvt.agent_type).toBe("general-purpose");
+    // A tagged tool_call must not flip the parent session busy.
+    expect(await activityState()).toBe("awaiting_input");
+
+    const resultUuid = crypto.randomUUID();
+    agent.ws.send(
+      JSON.stringify({
+        action: "mirror_event",
+        sid: s.sid,
+        uuid: resultUuid,
+        kind: "tool_result",
+        ts: Date.now(),
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "use-1",
+          tool_name: "Bash",
+          response: "ok",
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    await watcher.waitFor((m) => m.uuid === resultUuid);
+    expect(await activityState()).toBe("awaiting_input");
+
+    const doneUuid = crypto.randomUUID();
+    agent.ws.send(
+      JSON.stringify({
+        action: "mirror_event",
+        sid: s.sid,
+        uuid: doneUuid,
+        kind: "assistant_message",
+        ts: Date.now(),
+        payload: {
+          kind: "assistant_message",
+          text: "",
+          stop_reason: "",
+          subagent_done: true,
+        },
+        agent_id: "agent-1",
+        agent_type: "general-purpose",
+      }),
+    );
+    const doneEvt = (await watcher.waitFor(
+      (m) => m.uuid === doneUuid,
+    )) as Record<string, unknown>;
+    expect(doneEvt.agent_id).toBe("agent-1");
+    // A tagged SubagentStop marker must not flip activity state either.
+    expect(await activityState()).toBe("awaiting_input");
+
+    // Reconnecting should replay the tagged frames with agent_id/agent_type
+    // intact so a fresh watcher can rebuild its tabs from mirror:init.
+    const watcher2 = await connectWs(wsBase);
+    const init2 = (await watcher2.waitFor(
+      (m) => m.event === "mirror:init",
+    )) as { transcript: Array<Record<string, unknown>> };
+    const replayedCall = init2.transcript.find((f) => f.uuid === callUuid);
+    expect(replayedCall).toBeDefined();
+    expect(replayedCall?.agent_id).toBe("agent-1");
+    expect(replayedCall?.agent_type).toBe("general-purpose");
+
+    agent.close();
+    watcher.close();
+    watcher2.close();
+  });
 });

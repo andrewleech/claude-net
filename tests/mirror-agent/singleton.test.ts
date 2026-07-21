@@ -54,6 +54,23 @@ describe("checkExistingDaemon", () => {
     expect(fs.existsSync(portFile())).toBe(false);
   });
 
+  test("defers to a slow (timeout) peer and keeps the port file", async () => {
+    fs.writeFileSync(portFile(), "9999");
+    let calls = 0;
+    const fakeFetch = (async () => {
+      calls++;
+      const e = new Error("timed out");
+      e.name = "TimeoutError";
+      throw e;
+    }) as unknown as typeof fetch;
+    const result = await checkExistingDaemon(stateDir, fakeFetch);
+    // A slow-but-live peer must count as present: do not spawn a duplicate,
+    // and leave the port file intact.
+    expect(result).toEqual({ healthy: true, port: 9999 });
+    expect(fs.existsSync(portFile())).toBe(true);
+    expect(calls).toBeGreaterThan(1); // retried rather than giving up at once
+  });
+
   test("removes port file with non-numeric contents", async () => {
     fs.writeFileSync(portFile(), "garbage\n");
     const result = await checkExistingDaemon(stateDir);
@@ -145,5 +162,24 @@ describe("evictIfPeerOwnsPortFile", () => {
       exited = true;
     }) as unknown as (code: number) => never);
     expect(exited).toBe(false);
+  });
+
+  test("exits when the named peer times out (slow but listening)", async () => {
+    fs.writeFileSync(portFile(), "9999");
+    let exited = false;
+    let exitCode = -1;
+    const fakeFetch = (async () => {
+      const e = new Error("timed out");
+      e.name = "TimeoutError";
+      throw e;
+    }) as unknown as typeof fetch;
+    await evictIfPeerOwnsPortFile(8000, stateDir, fakeFetch, ((c: number) => {
+      exited = true;
+      exitCode = c;
+    }) as unknown as (code: number) => never);
+    // A timeout on loopback means something is listening but slow — a live
+    // owner. The duplicate must yield.
+    expect(exited).toBe(true);
+    expect(exitCode).toBe(0);
   });
 });

@@ -2177,7 +2177,7 @@ export async function evictIfPeerOwnsPortFile(
   // Different port registered — see if it's healthy.
   try {
     const res = await fetchImpl(`http://127.0.0.1:${registeredPort}/health`, {
-      signal: AbortSignal.timeout(1000),
+      signal: AbortSignal.timeout(2000),
     });
     if (res.ok) {
       process.stderr.write(
@@ -2185,9 +2185,19 @@ export async function evictIfPeerOwnsPortFile(
       );
       exit(0);
     }
-  } catch {
-    // Peer unreachable — leave the port file alone; the next startup
-    // singleton check on someone else will deal with reclaiming it.
+  } catch (err) {
+    // A *timeout* means something is listening on that loopback port but is
+    // slow to answer — a live-but-overloaded peer owns the port file. We
+    // are the duplicate; yield rather than persist (persisting under load
+    // is what let duplicates accumulate). A connection refusal means the
+    // recorded owner is actually gone — stay put and let a startup check
+    // reclaim the port file.
+    if (isProbeTimeout(err)) {
+      process.stderr.write(
+        `[claude-net/mirror] [singleton] peer on port ${registeredPort} slow but listening; exiting (my port ${myPort})\n`,
+      );
+      exit(0);
+    }
   }
 }
 
@@ -2224,13 +2234,37 @@ export async function checkExistingDaemon(
     }
     return { healthy: false, port: null };
   }
-  try {
-    const res = await fetchImpl(`http://127.0.0.1:${port}/health`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    if (res.ok) return { healthy: true, port };
-  } catch {
-    // unreachable — peer is dead
+  // Probe the recorded peer. A live daemon under memory/swap pressure can
+  // be too slow to answer within a single short timeout; mis-reading that
+  // as "dead" spawns a duplicate, which adds load and slows the next probe
+  // further — the feedback loop that let a fleet of daemons pile up and OOM
+  // a host. Retry, and treat a *timeout* (something is listening but slow)
+  // as "peer alive, just slow": defer and keep the port file. Only a
+  // definitive connection failure or an unhealthy response means the peer
+  // is gone and we should take over.
+  let sawTimeout = false;
+  let peerGone = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchImpl(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) return { healthy: true, port };
+      peerGone = true; // responded but unhealthy → replaceable
+      break;
+    } catch (err) {
+      if (isProbeTimeout(err)) {
+        sawTimeout = true;
+        continue;
+      }
+      peerGone = true; // connection refused / no listener → gone
+      break;
+    }
+  }
+  if (!peerGone && sawTimeout) {
+    // Only timeouts, no definitive "gone" signal: assume a slow-but-live
+    // peer and defer rather than risk a duplicate. Leave the port file.
+    return { healthy: true, port };
   }
   try {
     fs.unlinkSync(portFile);
@@ -2238,6 +2272,22 @@ export async function checkExistingDaemon(
     // ignore
   }
   return { healthy: false, port };
+}
+
+/**
+ * Distinguish a probe *timeout* (something is listening on the loopback
+ * port but is slow to answer — a live, overloaded peer) from a connection
+ * failure (nothing there). Under load the singleton guards treat a timeout
+ * as "peer alive" so a new/duplicate daemon yields instead of piling on.
+ * AbortSignal.timeout() surfaces as a TimeoutError (AbortError on some
+ * runtimes); a refused connection surfaces as a plain Error.
+ */
+function isProbeTimeout(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("name" in err)) {
+    return false;
+  }
+  const name = (err as { name?: unknown }).name;
+  return name === "TimeoutError" || name === "AbortError";
 }
 
 function writeSentinelFile(stateDir: string): void {

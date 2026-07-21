@@ -134,7 +134,10 @@ claude mcp add \\
 # hub URL. The launcher's /health probe only detects liveness, not
 # version, so a stale daemon would otherwise keep running the old
 # code and the dashboard would show "NO MIRROR".
-pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || true
+# Match the daemon's own argv only (bun runner + bundle path anchored to
+# end-of-cmdline) so an unrelated shell that merely mentions the path isn't
+# killed.
+pkill -f 'bun .*mirror-agent\\.bundle\\.js$' 2>/dev/null || true
 rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
 echo "[3/5] Merging mirror hooks + launch config into \${SETTINGS}…"

@@ -82,6 +82,12 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
     }
     if (stat.size <= offset) return;
 
+    // Track whether this call actually advanced. A readSync error or a
+    // short/zero read (stat can transiently over-report readable size on
+    // 9p/WSL/network mounts) must NOT re-arm the 0 ms drain below, or the
+    // tail spins in a busy-loop re-firing onError every pass.
+    const startOffset = offset;
+
     let fd: number;
     try {
       fd = fs.openSync(filePath, "r");
@@ -136,7 +142,14 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
 
     // A large backlog remains (capped read above) — continue on a fresh
     // tick so we yield the event loop between chunks instead of blocking.
-    if (!stopped && stat.size > offset && !drainScheduled) {
+    // Only reschedule if we made forward progress this pass; otherwise the
+    // regular poll retries, so a persistent read error can't 0 ms-spin.
+    if (
+      !stopped &&
+      offset > startOffset &&
+      stat.size > offset &&
+      !drainScheduled
+    ) {
       drainScheduled = true;
       const t = setTimeout(() => {
         drainScheduled = false;

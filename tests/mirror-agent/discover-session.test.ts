@@ -117,6 +117,43 @@ describe("findActiveSessionForCcPid", () => {
     fs.writeFileSync(path.join(dir, "scratch.txt"), "no transcripts here");
     expect(findActiveSessionForCcPid(0, cwd, tmpHome)).toBe(null);
   });
+
+  test("/proc/<pid>/fd pins to the held transcript over the mtime scan", () => {
+    if (process.platform !== "linux") return;
+    const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cn-proc-"));
+    try {
+      const cwd = "/home/alice/work";
+      // olderSid is what the pid holds open; sampleSid is newer but NOT
+      // held — the fd scan must win so co-located sessions don't collide.
+      const heldFile = writeJsonl(cwd, olderSid, Date.now() - 10_000);
+      writeJsonl(cwd, sampleSid, Date.now());
+      const fdDir = path.join(procRoot, "4242", "fd");
+      fs.mkdirSync(fdDir, { recursive: true });
+      fs.symlinkSync(heldFile, path.join(fdDir, "5"));
+      const found = findActiveSessionForCcPid(4242, cwd, tmpHome, procRoot);
+      expect(found?.sessionId).toBe(olderSid);
+    } finally {
+      fs.rmSync(procRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("/proc/<pid>/fd picks the most recently modified held transcript", () => {
+    if (process.platform !== "linux") return;
+    const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cn-proc-"));
+    try {
+      const cwd = "/home/alice/work";
+      const older = writeJsonl(cwd, olderSid, Date.now() - 10_000);
+      const newer = writeJsonl(cwd, sampleSid, Date.now());
+      const fdDir = path.join(procRoot, "4242", "fd");
+      fs.mkdirSync(fdDir, { recursive: true });
+      fs.symlinkSync(older, path.join(fdDir, "5"));
+      fs.symlinkSync(newer, path.join(fdDir, "6"));
+      const found = findActiveSessionForCcPid(4242, cwd, tmpHome, procRoot);
+      expect(found?.sessionId).toBe(sampleSid);
+    } finally {
+      fs.rmSync(procRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readTmuxPaneFromCcEnv", () => {

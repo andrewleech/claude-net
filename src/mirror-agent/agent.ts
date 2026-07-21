@@ -905,6 +905,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         // Await it BEFORE flushing: until the hub confirms the session is
         // open, events raced onto the wire would be dropped as "session
         // closed". `reopening` makes queueEvent buffer in the meantime.
+        // A newer HubClient may already have superseded this one
+        // (recoverSession replaced session.ws while this callback was
+        // queued). If so, do nothing: touching the shared reopening flag or
+        // flushing the outbox would corrupt the live client's state and
+        // drain buffered events into this now-dead socket.
+        if (session.ws !== client) return;
         session.reopening = true;
         try {
           const res = await fetch(`${hubUrl}/api/mirror/session`, {
@@ -919,6 +925,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
               cc_pid: session.ccPid,
             }),
           });
+          // Superseded while awaiting the reopen — bail without clearing
+          // reopening or flushing; the live client re-drives both.
+          if (session.ws !== client) return;
           if (!res.ok) {
             // Reopen rejected — don't flush into a session the hub still
             // considers closed. Leave events buffered; the next event will
@@ -935,12 +944,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           }
         } catch {
           // Network error / timeout — leave the outbox buffered; onClose
-          // (or the watchdog) will reconnect and retry the reopen.
-          session.reopening = false;
+          // (or the watchdog) will reconnect and retry the reopen. Only
+          // clear reopening if we're still the live client.
+          if (session.ws === client) session.reopening = false;
           return;
         }
         session.reopening = false;
-        if (session.closed) return;
+        if (session.closed || session.ws !== client) return;
         const outbox = session.outbox;
         session.outbox = [];
         for (const frame of outbox) client.send(frame);
@@ -2015,9 +2025,10 @@ export interface DiscoveredSession {
 function findOpenJsonlForPid(
   ccPid: number,
   projectDir: string,
+  procRoot = "/proc",
 ): DiscoveredSession | null {
   if (!Number.isFinite(ccPid) || ccPid <= 0) return null;
-  const fdDir = `/proc/${ccPid}/fd`;
+  const fdDir = path.join(procRoot, String(ccPid), "fd");
   let fds: string[];
   try {
     fds = fs.readdirSync(fdDir);
@@ -2032,6 +2043,12 @@ function findOpenJsonlForPid(
   } catch {
     // dir may not exist yet — fall back to the literal path.
   }
+  // A CC process can briefly hold more than one transcript in the same
+  // project dir open (main session + a sub-agent/sidechain, or a resume).
+  // fd enumeration order is arbitrary, so pick the most-recently-modified
+  // to keep the resolved sid deterministic and tracking the active session.
+  let best: DiscoveredSession | null = null;
+  let bestMtime = -1;
   for (const fd of fds) {
     let target: string;
     try {
@@ -2043,9 +2060,18 @@ function findOpenJsonlForPid(
     if (path.dirname(target) !== canonicalDir) continue;
     const sessionId = path.basename(target).slice(0, -".jsonl".length);
     if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) continue;
-    return { sessionId, transcriptPath: target };
+    let mtime: number;
+    try {
+      mtime = fs.statSync(target).mtimeMs;
+    } catch {
+      continue; // fd target vanished between readlink and stat
+    }
+    if (mtime > bestMtime) {
+      bestMtime = mtime;
+      best = { sessionId, transcriptPath: target };
+    }
   }
-  return null;
+  return best;
 }
 
 /**
@@ -2069,6 +2095,7 @@ export function findActiveSessionForCcPid(
   ccPid: number,
   cwd: string,
   home: string = os.homedir(),
+  procRoot = "/proc",
 ): DiscoveredSession | null {
   if (!cwd) return null;
   const projectDir = path.join(
@@ -2079,7 +2106,7 @@ export function findActiveSessionForCcPid(
   );
 
   // Preferred: a JSONL under this project dir that pid `ccPid` has open.
-  const held = findOpenJsonlForPid(ccPid, projectDir);
+  const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
   if (held) return held;
 
   let entries: string[];
@@ -2317,6 +2344,7 @@ export async function evictIfPeerOwnsPortFile(
   stateDir: string,
   fetchImpl: typeof fetch = fetch,
   exit: (code: number) => never = process.exit,
+  aliveImpl: () => boolean = anotherMirrorAgentAlive,
 ): Promise<void> {
   const portFile = portFilePath(stateDir);
   let registeredPort: number | null = null;
@@ -2346,7 +2374,10 @@ export async function evictIfPeerOwnsPortFile(
     // is what let duplicates accumulate). A connection refusal means the
     // recorded owner is actually gone — stay put and let a startup check
     // reclaim the port file.
-    if (isProbeTimeout(err)) {
+    // Yield only if the slow listener is really another mirror-agent; a
+    // recycled port held by a mute foreign listener must not make the live
+    // daemon exit.
+    if (isProbeTimeout(err) && aliveImpl()) {
       process.stderr.write(
         `[claude-net/mirror] [singleton] peer on port ${registeredPort} slow but listening; exiting (my port ${myPort})\n`,
       );
@@ -2370,6 +2401,7 @@ export async function evictIfPeerOwnsPortFile(
 export async function checkExistingDaemon(
   stateDir: string,
   fetchImpl: typeof fetch = fetch,
+  aliveImpl: () => boolean = anotherMirrorAgentAlive,
 ): Promise<{ healthy: boolean; port: number | null }> {
   const portFile = portFilePath(stateDir);
   let port: number | null = null;
@@ -2416,9 +2448,14 @@ export async function checkExistingDaemon(
     }
   }
   if (!peerGone && sawTimeout) {
-    // Only timeouts, no definitive "gone" signal: assume a slow-but-live
-    // peer and defer rather than risk a duplicate. Leave the port file.
-    return { healthy: true, port };
+    // Only timeouts, no definitive "gone" signal. Something is listening
+    // but slow — defer ONLY if a mirror-agent process is actually alive.
+    // If none is, the recorded loopback port was recycled by an unrelated,
+    // non-answering listener; deferring forever would strand us with no
+    // daemon, so fall through and take over.
+    if (aliveImpl()) {
+      return { healthy: true, port };
+    }
   }
   try {
     fs.unlinkSync(portFile);
@@ -2442,6 +2479,44 @@ function isProbeTimeout(err: unknown): boolean {
   }
   const name = (err as { name?: unknown }).name;
   return name === "TimeoutError" || name === "AbortError";
+}
+
+/**
+ * Is another mirror-agent daemon process alive right now? Scans /proc for a
+ * `bun …/mirror-agent.bundle.js` process other than this one (the daemon
+ * form has exactly the bundle as its final argv; `… inject <text>` runs
+ * carry trailing args). A load-independent liveness signal so the singleton
+ * guards can tell a slow-but-live peer from a recycled loopback port held
+ * by an unrelated listener. Non-Linux has no /proc, so we can't check —
+ * return true to keep the conservative "a peer may exist" default.
+ */
+export function anotherMirrorAgentAlive(
+  procRoot = "/proc",
+  selfPid: number = process.pid,
+): boolean {
+  if (process.platform !== "linux") return true;
+  let pids: string[];
+  try {
+    pids = fs.readdirSync(procRoot);
+  } catch {
+    return false;
+  }
+  for (const dir of pids) {
+    if (!/^\d+$/.test(dir)) continue;
+    if (Number(dir) === selfPid) continue;
+    let cmdline: string;
+    try {
+      cmdline = fs.readFileSync(path.join(procRoot, dir, "cmdline"), "utf8");
+    } catch {
+      continue;
+    }
+    // /proc cmdline is NUL-separated argv. Daemon form: `bun <bundle>`.
+    const argv = cmdline.split("\0").filter((s) => s.length > 0);
+    if (argv.length === 2 && argv[1].endsWith("mirror-agent.bundle.js")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function writeSentinelFile(stateDir: string): void {

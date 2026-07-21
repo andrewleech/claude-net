@@ -7,9 +7,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  anotherMirrorAgentAlive,
   checkExistingDaemon,
   evictIfPeerOwnsPortFile,
 } from "@/mirror-agent/agent";
+
+// A TimeoutError, as AbortSignal.timeout() surfaces it — the singleton
+// guards treat this as "listening but slow" (vs a plain connect error).
+function timeoutError(): Error {
+  const e = new Error("timed out");
+  e.name = "TimeoutError";
+  return e;
+}
 
 let stateDir = "";
 
@@ -54,21 +63,33 @@ describe("checkExistingDaemon", () => {
     expect(fs.existsSync(portFile())).toBe(false);
   });
 
-  test("defers to a slow (timeout) peer and keeps the port file", async () => {
+  test("defers to a slow (timeout) peer when a daemon is alive", async () => {
     fs.writeFileSync(portFile(), "9999");
     let calls = 0;
     const fakeFetch = (async () => {
       calls++;
-      const e = new Error("timed out");
-      e.name = "TimeoutError";
-      throw e;
+      throw timeoutError();
     }) as unknown as typeof fetch;
-    const result = await checkExistingDaemon(stateDir, fakeFetch);
+    // aliveImpl=() => true: a mirror-agent process is actually running.
+    const result = await checkExistingDaemon(stateDir, fakeFetch, () => true);
     // A slow-but-live peer must count as present: do not spawn a duplicate,
     // and leave the port file intact.
     expect(result).toEqual({ healthy: true, port: 9999 });
     expect(fs.existsSync(portFile())).toBe(true);
     expect(calls).toBeGreaterThan(1); // retried rather than giving up at once
+  });
+
+  test("takes over on timeout when NO daemon process is alive", async () => {
+    // Recorded loopback port was recycled by an unrelated, mute listener:
+    // every probe times out but no mirror-agent exists. We must NOT defer
+    // forever (that would strand the host with no daemon) — take over.
+    fs.writeFileSync(portFile(), "9999");
+    const fakeFetch = (async () => {
+      throw timeoutError();
+    }) as unknown as typeof fetch;
+    const result = await checkExistingDaemon(stateDir, fakeFetch, () => false);
+    expect(result).toEqual({ healthy: false, port: 9999 });
+    expect(fs.existsSync(portFile())).toBe(false);
   });
 
   test("removes port file with non-numeric contents", async () => {
@@ -164,22 +185,95 @@ describe("evictIfPeerOwnsPortFile", () => {
     expect(exited).toBe(false);
   });
 
-  test("exits when the named peer times out (slow but listening)", async () => {
+  test("exits on timeout when another daemon is alive (slow owner)", async () => {
     fs.writeFileSync(portFile(), "9999");
     let exited = false;
     let exitCode = -1;
     const fakeFetch = (async () => {
-      const e = new Error("timed out");
-      e.name = "TimeoutError";
-      throw e;
+      throw timeoutError();
     }) as unknown as typeof fetch;
-    await evictIfPeerOwnsPortFile(8000, stateDir, fakeFetch, ((c: number) => {
-      exited = true;
-      exitCode = c;
-    }) as unknown as (code: number) => never);
+    await evictIfPeerOwnsPortFile(
+      8000,
+      stateDir,
+      fakeFetch,
+      ((c: number) => {
+        exited = true;
+        exitCode = c;
+      }) as unknown as (code: number) => never,
+      () => true, // a real mirror-agent owns the slow port
+    );
     // A timeout on loopback means something is listening but slow — a live
     // owner. The duplicate must yield.
     expect(exited).toBe(true);
     expect(exitCode).toBe(0);
+  });
+
+  test("does NOT exit on timeout when no daemon is alive (foreign port)", async () => {
+    // The recorded port is held by an unrelated, mute listener — not a
+    // mirror-agent. The live daemon must stay, not exit into a no-daemon
+    // state.
+    fs.writeFileSync(portFile(), "9999");
+    let exited = false;
+    const fakeFetch = (async () => {
+      throw timeoutError();
+    }) as unknown as typeof fetch;
+    await evictIfPeerOwnsPortFile(
+      8000,
+      stateDir,
+      fakeFetch,
+      ((_c: number) => {
+        exited = true;
+      }) as unknown as (code: number) => never,
+      () => false,
+    );
+    expect(exited).toBe(false);
+  });
+});
+
+describe("anotherMirrorAgentAlive", () => {
+  let procRoot = "";
+
+  beforeEach(() => {
+    procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mirror-proc-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(procRoot, { recursive: true, force: true });
+  });
+
+  // Build a fake /proc/<pid>/cmdline (NUL-separated argv).
+  function fakeProc(pid: number, argv: string[]): void {
+    const dir = path.join(procRoot, String(pid));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "cmdline"), `${argv.join("\0")}\0`);
+  }
+
+  test("returns false on non-linux", () => {
+    if (process.platform === "linux") return;
+    fakeProc(4242, ["bun", "/x/mirror-agent.bundle.js"]);
+    // Non-linux can't read /proc; the guard conservatively returns true,
+    // so this assertion only holds off-linux where the early return fires.
+    expect(anotherMirrorAgentAlive(procRoot, 1)).toBe(true);
+  });
+
+  test("detects another bun mirror-agent daemon", () => {
+    if (process.platform !== "linux") return;
+    fakeProc(4242, ["bun", "/home/u/.local/share/cc/mirror-agent.bundle.js"]);
+    expect(anotherMirrorAgentAlive(procRoot, 1)).toBe(true);
+  });
+
+  test("excludes self", () => {
+    if (process.platform !== "linux") return;
+    fakeProc(4242, ["bun", "/x/mirror-agent.bundle.js"]);
+    expect(anotherMirrorAgentAlive(procRoot, 4242)).toBe(false);
+  });
+
+  test("ignores inject subcommand and unrelated processes", () => {
+    if (process.platform !== "linux") return;
+    // inject run: trailing args after the bundle → not the daemon form.
+    fakeProc(10, ["bun", "/x/mirror-agent.bundle.js", "inject", "hello"]);
+    fakeProc(11, ["bun", "/x/some-other.js"]);
+    fakeProc(12, ["node", "server.js"]);
+    expect(anotherMirrorAgentAlive(procRoot, 1)).toBe(false);
   });
 });

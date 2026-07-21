@@ -61,7 +61,9 @@ if command -v uv >/dev/null 2>&1; then
         # provider (e.g. a separately-installed model-router plugin) is
         # preserved. A --reinstall here would drop those other providers.
         echo "cc-patcher already installed — upgrading (preserves other providers)…"
-        uv tool upgrade cc-patcher
+        # Non-fatal under `set -e`: a patcher upgrade failure (e.g. GitHub
+        # unreachable) must not abort the launcher/mirror install below.
+        uv tool upgrade cc-patcher || echo "WARN: cc-patcher upgrade failed; continuing with launcher/mirror install." >&2
         if ! cc-patcher --list-providers 2>/dev/null | grep -q 'claude-net-patcher'; then
             echo "WARN: cc-patcher is installed but the claude-net channel provider" >&2
             echo "      (claude-net-patcher) is not registered. Add it without" >&2
@@ -70,7 +72,9 @@ if command -v uv >/dev/null 2>&1; then
         fi
     else
         echo "Installing cc-patcher + claude-net-patcher as a uv tool…"
-        uv tool install "$cc_patcher_src" --with "$cn_patcher_src"
+        # Non-fatal under `set -e` (see above): don't abort the rest of the
+        # install if the patcher can't be fetched.
+        uv tool install "$cc_patcher_src" --with "$cn_patcher_src" || echo "WARN: cc-patcher install failed; continuing with launcher/mirror install." >&2
     fi
 else
     echo "WARN: uv not found; skipping cc-patcher / claude-net-patcher install." >&2

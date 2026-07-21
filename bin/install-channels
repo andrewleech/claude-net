@@ -132,7 +132,13 @@ ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
 # respawns against the just-installed bundle. The launcher's /health probe
 # only detects liveness, not version, so a stale daemon would otherwise
 # silently keep running the old code.
-pkill -f 'claude-net-mirror-agent|mirror-agent\.bundle\.js' 2>/dev/null || true
+#
+# Match the daemon's own argv only — it runs as `bun …/mirror-agent.bundle.js`,
+# so require the bun runner and anchor the bundle path to end-of-cmdline. A
+# bare `-f 'mirror-agent.bundle.js'` matches ANY process whose command line
+# merely contains that string (an editor, a grep, or this very script's
+# invoking shell), which would kill unrelated processes.
+pkill -f 'bun .*mirror-agent\.bundle\.js$' 2>/dev/null || true
 rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
 echo ""

@@ -535,7 +535,12 @@ export function wsPlugin(
       evictingWs.delete(ws.raw);
       wsToAgent.delete(ws.raw);
       const entry = registry.getByFullName(fullName);
-      registry.unregister(fullName);
+      // Stale close: if a same-session reconnect already reclaimed this
+      // name on a fresh socket, `entry` now belongs to that socket. Our
+      // own map bookkeeping is cleaned up above, but don't unregister or
+      // announce a disconnect for the live owner.
+      if (entry && entry.wsIdentity !== ws.raw) return;
+      registry.unregister(fullName, ws.raw);
 
       dashboardBroadcastFn({
         event: "agent:disconnected",

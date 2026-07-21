@@ -112,10 +112,26 @@ export class Registry {
 
     const existing = this.agents.get(fullName);
     if (existing && existing.wsIdentity !== identity) {
-      return {
-        ok: false,
-        error: `Name '${fullName}' is already registered. Choose a different name.`,
-      };
+      // A different transport already holds this exact name. Distinguish a
+      // reconnect of the SAME Claude Code session — which must be allowed
+      // to reclaim its name — from a genuine collision with a different
+      // session, which must still be rejected so the plugin falls back to
+      // a `-N` suffix.
+      //
+      // Same session ⇔ same Claude Code process. The plugin announces
+      // ccPid on every register, and a reconnect on a fresh socket (even
+      // when the hub has not yet processed the old socket's close) carries
+      // the same ccPid as the stale holder. Reclaim in that case: drop the
+      // stale entry and carry its team memberships forward.
+      const sameSession = ccPid !== null && existing.ccPid === ccPid;
+      if (!sameSession) {
+        return {
+          ok: false,
+          error: `Name '${fullName}' is already registered. Choose a different name.`,
+        };
+      }
+      inheritedTeams = inheritedTeams ?? new Set(existing.teams);
+      this.agents.delete(fullName);
     }
 
     if (existing && existing.wsIdentity === identity) {
@@ -183,9 +199,14 @@ export class Registry {
     return null;
   }
 
-  unregister(fullName: string): void {
+  unregister(fullName: string, wsIdentity?: object): void {
     const entry = this.agents.get(fullName);
     if (!entry) return;
+    // Identity guard: when a specific transport is unregistering (its
+    // socket closed), only act if that transport still owns the name.
+    // After a same-session reconnect reclaimed the name on a fresh socket,
+    // the old socket's delayed close must not evict the live owner.
+    if (wsIdentity !== undefined && entry.wsIdentity !== wsIdentity) return;
 
     this.agents.delete(fullName);
 

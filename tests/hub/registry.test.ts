@@ -68,6 +68,69 @@ describe("Registry", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("same-session reconnect reclaims its name on a fresh socket", () => {
+    // Old socket registered; its close has NOT been processed yet, so the
+    // stale entry is still present when the same CC process reconnects on
+    // a brand-new socket.
+    const ws1 = mockWs();
+    const r1 = registry.register("test:alice@host", ws1, undefined, {
+      ccPid: 4242,
+    });
+    expect(r1.ok).toBe(true);
+
+    const ws2 = mockWs();
+    const r2 = registry.register("test:alice@host", ws2, undefined, {
+      ccPid: 4242,
+    });
+    expect(r2.ok).toBe(true);
+    // The live owner is now the fresh socket.
+    expect(registry.getByFullName("test:alice@host")?.wsIdentity).toBe(ws2);
+  });
+
+  test("different session with the same name is still rejected", () => {
+    // A distinct CC process (different ccPid) must not steal the name — the
+    // plugin relies on this to fall back to a -N suffix.
+    const ws1 = mockWs();
+    registry.register("test:alice@host", ws1, undefined, { ccPid: 100 });
+    const ws2 = mockWs();
+    const r = registry.register("test:alice@host", ws2, undefined, {
+      ccPid: 999,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("already registered");
+  });
+
+  test("reclaim carries team memberships forward", () => {
+    const ws1 = mockWs();
+    registry.register("test:alice@host", ws1, undefined, { ccPid: 5 });
+    registry.getByFullName("test:alice@host")?.teams.add("teamX");
+
+    const ws2 = mockWs();
+    const r = registry.register("test:alice@host", ws2, undefined, {
+      ccPid: 5,
+    });
+    expect(r.ok).toBe(true);
+    expect(registry.getByFullName("test:alice@host")?.teams.has("teamX")).toBe(
+      true,
+    );
+  });
+
+  test("stale close after a reconnect does not evict the live owner", () => {
+    const ws1 = mockWs();
+    registry.register("test:alice@host", ws1, undefined, { ccPid: 7 });
+    const ws2 = mockWs();
+    registry.register("test:alice@host", ws2, undefined, { ccPid: 7 });
+
+    // Old socket's delayed close arrives, scoped to ws1's identity.
+    registry.unregister("test:alice@host", ws1);
+
+    // The name must still be registered and owned by the fresh socket.
+    const entry = registry.getByFullName("test:alice@host");
+    expect(entry).not.toBeNull();
+    expect(entry?.wsIdentity).toBe(ws2);
+  });
+
   test("unregister moves agent to disconnected when it has teams", () => {
     const ws = mockWs();
     registry.register("test:alice@host", ws);

@@ -88,9 +88,27 @@ fi
 # the source tree alongside.
 if [ -f "$SCRIPT_DIR/../src/mirror-agent/agent.ts" ] && command -v bun >/dev/null 2>&1; then
     echo "Bundling mirror-agent..."
-    if ! bun build --target=bun \
+    if bun build --target=bun \
         "$SCRIPT_DIR/../src/mirror-agent/agent.ts" \
         --outfile "$INSTALL_DIR/mirror-agent.bundle.js" 2>/dev/null; then
+        # Stamp the build hash into the bundle so the agent's self-update
+        # check is live. bun build leaves the MIRROR_BUILD_HASH constant as
+        # the "__MIRROR_BUILD_HASH__" placeholder; the runtime dev guard
+        # (localVersion !== "__MIRROR_BUILD_HASH__") then reads as dev mode
+        # and self-update never fires — so a locally-installed agent stays
+        # frozen at install-time code forever. Substitute ONLY the constant
+        # assignment (never the guard literal), mirroring the hub's
+        # substituteBuildHash in src/hub/bin-server.ts. The hub-served
+        # bundle is stamped there; this covers the local-clone install path.
+        HASH="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+        if [ -n "$HASH" ] && command -v perl >/dev/null 2>&1; then
+            perl -pi -e 's/MIRROR_BUILD_HASH\s*=\s*"__MIRROR_BUILD_HASH__"/MIRROR_BUILD_HASH = "'"$HASH"'"/' \
+                "$INSTALL_DIR/mirror-agent.bundle.js"
+            echo "  stamped mirror-agent build hash: $HASH"
+        else
+            echo "WARN: could not stamp build hash (no git rev or perl); mirror-agent self-update will be inert" >&2
+        fi
+    else
         echo "WARN: mirror-agent bundle failed; mirror feature will only work from the repo clone" >&2
     fi
 fi

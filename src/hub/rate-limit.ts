@@ -43,10 +43,16 @@ export class RateLimiter {
     arr.push(t);
     this.hits.set(key, arr);
 
-    // Periodic background sweep to reclaim memory from dead keys.
+    // Periodic background sweep to reclaim memory from dead keys. Prune
+    // each key's stale timestamps then drop the empties — a key never
+    // queried again is only pruned here, so deleting on `length === 0`
+    // alone would leak keys with high cardinality (e.g. per-host).
     if (t - this.lastSweepAt > this.windowMs * 10) {
       this.lastSweepAt = t;
       for (const [k, v] of this.hits) {
+        let f = 0;
+        while (f < v.length && (v[f] ?? 0) < cutoff) f++;
+        if (f > 0) v.splice(0, f);
         if (v.length === 0) this.hits.delete(k);
       }
     }

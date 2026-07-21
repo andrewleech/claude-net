@@ -1,16 +1,27 @@
 // Tails a Claude Code session JSONL transcript for reconciliation with the
-// hook stream. Yields one parsed record per complete line as it appears,
-// starting from byte 0 (so the reconciler sees everything and dedupes by
-// uuid). Uses fs.watch plus a fallback poller in case inotify doesn't fire
-// (WSL / network filesystems).
+// hook stream. Yields one parsed record per complete line as it appears.
+// Small files are read from the start; large files (> INITIAL_TAIL_MAX_BYTES)
+// are read from a bounded window before EOF so a huge transcript isn't read
+// whole. Dedup against the hook stream is by uuid, in the caller. Uses
+// fs.watch plus a fallback poller in case inotify doesn't fire (WSL /
+// network filesystems).
 //
 // This is a safety net, not the primary capture — the hook stream delivers
-// events in real time. JSONL reconciliation closes any gaps from dropped
-// hooks and restores transcripts after a mirror-agent restart.
+// events in real time. JSONL reconciliation closes gaps from dropped hooks
+// and restores recent transcript after a mirror-agent restart.
 
 import * as fs from "node:fs";
 
 const POLL_INTERVAL_MS = 1000;
+// On first attach to an existing transcript, read only this many bytes
+// before EOF rather than the whole file — reading a multi-hundred-MB
+// session whole would allocate a size-of-file buffer and block the event
+// loop. The hook stream + the hub's bounded ring cover recent events, and
+// deep history has its own on-demand backfill path.
+const INITIAL_TAIL_MAX_BYTES = 512 * 1024;
+// Cap bytes read per readMore() call so a single call can't allocate a
+// giant buffer or block; the remainder is drained on later ticks.
+const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 export interface JsonlRecord {
   uuid?: string;
@@ -38,6 +49,11 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
   let offset = 0;
   let buffer = "";
   let stopped = false;
+  let firstRead = true;
+  // After a mid-file seek on the first read, the leading partial line is
+  // dropped so the first parsed record is complete.
+  let skipPartialLine = false;
+  let drainScheduled = false;
   let watcher: fs.FSWatcher | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   const pollInterval = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -54,8 +70,17 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
       // File was truncated or replaced — restart from beginning.
       offset = 0;
       buffer = "";
+      firstRead = true;
+      skipPartialLine = false;
     }
-    if (stat.size === offset) return;
+    if (firstRead) {
+      firstRead = false;
+      if (stat.size > INITIAL_TAIL_MAX_BYTES) {
+        offset = stat.size - INITIAL_TAIL_MAX_BYTES;
+        skipPartialLine = true;
+      }
+    }
+    if (stat.size <= offset) return;
 
     let fd: number;
     try {
@@ -65,7 +90,8 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
       return;
     }
     try {
-      const length = stat.size - offset;
+      // Cap each read so one call can't allocate a huge buffer or block.
+      const length = Math.min(stat.size - offset, READ_CHUNK_BYTES);
       const chunk = Buffer.alloc(length);
       const bytes = fs.readSync(fd, chunk, 0, length, offset);
       offset += bytes;
@@ -80,19 +106,43 @@ export function tailJsonl(filePath: string, opts: TailOptions): TailHandle {
       }
     }
 
-    let newlineIdx = buffer.indexOf("\n");
-    while (newlineIdx !== -1) {
-      const line = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
-      if (line.trim().length > 0) {
-        try {
-          const rec = JSON.parse(line) as JsonlRecord;
-          opts.onRecord(rec);
-        } catch (err) {
-          opts.onError?.(err as Error);
-        }
+    if (skipPartialLine) {
+      const nl = buffer.indexOf("\n");
+      if (nl === -1) {
+        // No line boundary in the window yet — drop it and wait for more.
+        buffer = "";
+      } else {
+        buffer = buffer.slice(nl + 1);
+        skipPartialLine = false;
       }
-      newlineIdx = buffer.indexOf("\n");
+    }
+
+    if (!skipPartialLine) {
+      let newlineIdx = buffer.indexOf("\n");
+      while (newlineIdx !== -1) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        if (line.trim().length > 0) {
+          try {
+            const rec = JSON.parse(line) as JsonlRecord;
+            opts.onRecord(rec);
+          } catch (err) {
+            opts.onError?.(err as Error);
+          }
+        }
+        newlineIdx = buffer.indexOf("\n");
+      }
+    }
+
+    // A large backlog remains (capped read above) — continue on a fresh
+    // tick so we yield the event loop between chunks instead of blocking.
+    if (!stopped && stat.size > offset && !drainScheduled) {
+      drainScheduled = true;
+      const t = setTimeout(() => {
+        drainScheduled = false;
+        readMore();
+      }, 0);
+      if (t && typeof t === "object" && "unref" in t) t.unref();
     }
   };
 

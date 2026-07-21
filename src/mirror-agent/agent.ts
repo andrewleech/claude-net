@@ -119,6 +119,25 @@ const DEFAULT_IDLE_SHUTDOWN_MS = 0;
 const DEFAULT_SESSION_IDLE_MS = 0;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
+// Cap the per-session dedup set. Dedup only needs recent uuids (hook vs
+// JSONL-reconciler adjacency), so the set is bounded — oldest entries are
+// evicted in bulk when the cap is crossed — rather than growing per event.
+const SEEN_UUIDS_MAX = 20_000;
+
+/** Record a uuid as seen, evicting the oldest entries past the cap.
+ *  Set preserves insertion order, so the first entries are the oldest.
+ *  Exported for tests. */
+export function markUuidSeen(seen: Set<string>, uuid: string): void {
+  seen.add(uuid);
+  if (seen.size > SEEN_UUIDS_MAX) {
+    const drop = seen.size - Math.floor(SEEN_UUIDS_MAX * 0.9);
+    let i = 0;
+    for (const old of seen) {
+      seen.delete(old);
+      if (++i >= drop) break;
+    }
+  }
+}
 
 /**
  * Per-call cap for the loopback /inject endpoint (claude-net-self-inject).
@@ -149,7 +168,7 @@ const RECOVERY_SLOW_DELAY_MS = 5 * 60 * 1000;
 const REOPEN_TIMEOUT_MS = 10_000;
 
 /** Maximum age of an isApiErrorMessage JSONL record we'll report to the
- *  hub. The JSONL tail re-reads from byte 0 on every agent start, so
+ *  hub. The JSONL tail re-reads recent transcript on every agent start, so
  *  without a recency filter a restart would re-fire stale errors that
  *  have already been investigated. 5 min is well past the conversation
  *  half-life where a sender would still care. */
@@ -269,6 +288,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
   const sessions = new Map<string, SessionState>();
+  // In-flight openSession promises keyed by sid. Hooks, the probe, and
+  // startup rediscovery can all try to open the same sid within the same
+  // tick; without this, each awaits its own create POST, then each does
+  // `sessions.set(sid, …)` — the later one silently orphans the earlier
+  // SessionState's HubClient and JSONL tail (they keep running + re-reading
+  // the transcript forever). Coalescing on the sid prevents that leak.
+  const openingSessions = new Map<string, Promise<SessionState | null>>();
   // Per-ccPid probe bookkeeping: dedups concurrent in-flight probes,
   // applies a failure cooldown, and reuses the same sid across retries
   // so 429-loops don't accumulate orphan session rows on the hub.
@@ -339,7 +365,24 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // this the probe mints a fresh UUID and the dashboard ends up
       // with two rows per CC — a placeholder probe row that never gets
       // events, and a separate hook-created row that does.
-      const discovered = findActiveSessionForCcPid(ccPid, cwd);
+      let discovered = findActiveSessionForCcPid(ccPid, cwd);
+      // Guard the mtime-fallback collision: two CC processes in one cwd can
+      // resolve to the same transcript. If the discovered sid is already
+      // live-bound to a DIFFERENT pid, don't reuse it (that would silently
+      // attach this pid to the other's session and leave this one
+      // unmirrored). Fall back to a fresh sid so this pid gets its own row;
+      // its next hook carries the real sid + transcript path.
+      if (discovered) {
+        const bound = sessions.get(discovered.sessionId);
+        if (
+          bound &&
+          !bound.closed &&
+          bound.ccPid !== null &&
+          bound.ccPid !== ccPid
+        ) {
+          discovered = null;
+        }
+      }
       // Also pull TMUX_PANE from the CC process's environ so probe-
       // created sessions can be inject targets without waiting for a
       // hook to bring TMUX_PANE through. Hooks remain the source of
@@ -590,12 +633,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         return new Response("hub unavailable", { status: 503 });
       }
     } else {
-      if (
-        ingested.transcriptPath &&
-        session.transcriptPath !== ingested.transcriptPath
-      ) {
-        session.transcriptPath = ingested.transcriptPath;
-        startTailIfNeeded(session);
+      if (ingested.transcriptPath) {
+        retargetTail(session, ingested.transcriptPath);
       }
       // Update tmux pane on each hook — if the user moves panes, we track it.
       if (ingested.tmuxPane && session.tmuxPane !== ingested.tmuxPane) {
@@ -724,6 +763,33 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     tmuxPane: string | undefined,
     ccPid: number | undefined,
   ): Promise<SessionState | null> {
+    // Already tracking this session — never re-create it, which would
+    // orphan the live tail + HubClient. Reuse the existing state, moving
+    // the tail if the transcript path changed.
+    const live = sessions.get(sid);
+    if (live && !live.closed) {
+      if (transcriptPath) retargetTail(live, transcriptPath);
+      return live;
+    }
+    // Coalesce concurrent opens for the same sid onto one create POST.
+    const inflight = openingSessions.get(sid);
+    if (inflight) return inflight;
+    const p = doOpenSession(sid, cwd, transcriptPath, tmuxPane, ccPid);
+    openingSessions.set(sid, p);
+    try {
+      return await p;
+    } finally {
+      openingSessions.delete(sid);
+    }
+  }
+
+  async function doOpenSession(
+    sid: string,
+    cwd: string | undefined,
+    transcriptPath: string | undefined,
+    tmuxPane: string | undefined,
+    ccPid: number | undefined,
+  ): Promise<SessionState | null> {
     let ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
     const host = os.hostname() || "host";
     const resolvedPid =
@@ -780,6 +846,24 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       apiErrorUuidsPosted: new Set(),
       observer: new PathObserver(cwd ?? null),
     };
+    // Defensive: if a prior state for this sid somehow lingers, mark it
+    // closed and stop its tail + client before replacing. Setting `closed`
+    // matters — a running recoverSession loop checks it and bails, so it
+    // can't re-attach a fresh HubClient to the orphaned state.
+    const prev = sessions.get(sid);
+    if (prev && prev !== session) {
+      prev.closed = true;
+      try {
+        prev.tail?.stop();
+      } catch {
+        // ignore
+      }
+      try {
+        prev.ws?.stop();
+      } catch {
+        // ignore
+      }
+    }
     sessions.set(sid, session);
 
     attachHubClient(session);
@@ -929,6 +1013,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             }),
           });
           if (res.ok) {
+            // The session may have been closed while this POST was in
+            // flight (session_end sweep, replaced-by-clear, shutdown).
+            // Re-check before re-attaching, else we'd spin up a zombie
+            // HubClient whose onOpen re-POST reopens the just-closed
+            // session on the hub.
+            if (session.closed) return;
             log(`[${session.sid}] recovered on hub (attempt ${attempt})`);
             attachHubClient(session);
             return;
@@ -968,6 +1058,21 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Point a session's tail at `newPath`. When the transcript path changes
+  // (e.g. --resume from a different cwd reuses the sid under a new project
+  // dir), the running tail must be stopped first — startTailIfNeeded alone
+  // no-ops when a tail already exists, which would leave it streaming the
+  // old file while history reads the new one.
+  function retargetTail(session: SessionState, newPath: string): void {
+    if (session.transcriptPath === newPath) return;
+    session.transcriptPath = newPath;
+    if (session.tail) {
+      session.tail.stop();
+      session.tail = null;
+    }
+    startTailIfNeeded(session);
+  }
+
   function startTailIfNeeded(session: SessionState): void {
     if (session.tail || !session.transcriptPath) return;
     session.tail = tailJsonl(session.transcriptPath, {
@@ -975,7 +1080,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         // Track the record's own uuid (dedup against any future uuid
         // overlaps with the hook stream).
         if (typeof rec.uuid === "string") {
-          session.seenUuids.add(rec.uuid);
+          markUuidSeen(session.seenUuids, rec.uuid);
         }
         // Assistant records are the source of truth for assistant text.
         // The Stop hook only delivers the final text block at end-of-turn,
@@ -1117,7 +1222,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (session.closed) return;
     session.lastEventAt = Date.now();
     if (session.seenUuids.has(frame.uuid)) return;
-    session.seenUuids.add(frame.uuid);
+    markUuidSeen(session.seenUuids, frame.uuid);
 
     const json = JSON.stringify(frame);
     // Record any file paths this frame surfaces (structured tool fields or
@@ -1901,6 +2006,49 @@ export interface DiscoveredSession {
 }
 
 /**
+ * Return the transcript JSONL under `projectDir` that process `ccPid`
+ * currently holds open, via `/proc/<pid>/fd`. This pins a session to the
+ * specific CC process, so co-located agents in one cwd don't collide.
+ * Returns null on non-Linux (no /proc), a dead pid, or when CC isn't
+ * holding the fd at this instant — callers fall back to the mtime scan.
+ */
+function findOpenJsonlForPid(
+  ccPid: number,
+  projectDir: string,
+): DiscoveredSession | null {
+  if (!Number.isFinite(ccPid) || ccPid <= 0) return null;
+  const fdDir = `/proc/${ccPid}/fd`;
+  let fds: string[];
+  try {
+    fds = fs.readdirSync(fdDir);
+  } catch {
+    return null;
+  }
+  // /proc fd targets are canonical paths, so compare against the canonical
+  // project dir — otherwise a symlinked $HOME/.claude makes every match miss.
+  let canonicalDir = projectDir;
+  try {
+    canonicalDir = fs.realpathSync(projectDir);
+  } catch {
+    // dir may not exist yet — fall back to the literal path.
+  }
+  for (const fd of fds) {
+    let target: string;
+    try {
+      target = fs.readlinkSync(path.join(fdDir, fd));
+    } catch {
+      continue;
+    }
+    if (!target.endsWith(".jsonl")) continue;
+    if (path.dirname(target) !== canonicalDir) continue;
+    const sessionId = path.basename(target).slice(0, -".jsonl".length);
+    if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) continue;
+    return { sessionId, transcriptPath: target };
+  }
+  return null;
+}
+
+/**
  * Locate the most recently-modified JSONL transcript for a CC pid +
  * cwd, returning its filename-derived session_id and absolute path.
  * Used by the probe handler so probe-created sessions converge on the
@@ -1911,13 +2059,14 @@ export interface DiscoveredSession {
  * — the probe falls back to its old "fresh UUID" path in that case so
  * the broader behaviour is unchanged.
  *
- * `ccPid` is currently unused but kept on the signature so a future
- * refinement (e.g. /proc/<pid>/fd scan for a held JSONL on Linux) can
- * land without touching call sites. The mtime fallback covers macOS
- * and is robust against CC's open/close-per-write pattern on Linux.
+ * Resolution order: first try `/proc/<pid>/fd` for a transcript the
+ * process actually holds open — that pins the sid to THIS pid, so two CC
+ * processes sharing one cwd don't both resolve to the same (mtime-latest)
+ * file and thrash a single session between them. Fall back to the mtime
+ * scan (covers macOS, and Linux when CC isn't currently holding the fd).
  */
 export function findActiveSessionForCcPid(
-  _ccPid: number,
+  ccPid: number,
   cwd: string,
   home: string = os.homedir(),
 ): DiscoveredSession | null {
@@ -1928,6 +2077,11 @@ export function findActiveSessionForCcPid(
     "projects",
     encodeProjectDirName(cwd),
   );
+
+  // Preferred: a JSONL under this project dir that pid `ccPid` has open.
+  const held = findOpenJsonlForPid(ccPid, projectDir);
+  if (held) return held;
+
   let entries: string[];
   try {
     entries = fs.readdirSync(projectDir);

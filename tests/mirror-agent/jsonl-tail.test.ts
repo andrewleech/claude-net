@@ -88,4 +88,43 @@ describe("tailJsonl", () => {
     expect(seen).toEqual(["good"]);
     expect(errors.length).toBeGreaterThan(0);
   });
+
+  test("skips deep history on a large file but still tails the recent end", async () => {
+    // A record big enough to push the file past the initial tail window
+    // (512 KB), so reading from byte 0 would allocate a size-of-file buffer.
+    const pad = "x".repeat(700 * 1024);
+    fs.writeFileSync(
+      tmpFile,
+      `${JSON.stringify({ uuid: "old", pad })}\n${JSON.stringify({ uuid: "recent-1" })}\n${JSON.stringify({ uuid: "recent-2" })}\n`,
+    );
+    const seen: string[] = [];
+    handle = tailJsonl(tmpFile, {
+      onRecord: (r) => seen.push(r.uuid as string),
+      pollIntervalMs: 50,
+    });
+    await wait(150);
+    // Deep-history record is skipped; the recent tail is read.
+    expect(seen).not.toContain("old");
+    expect(seen).toContain("recent-2");
+    // New appends after attach are still captured.
+    fs.appendFileSync(tmpFile, `${JSON.stringify({ uuid: "after" })}\n`);
+    await wait(200);
+    expect(seen).toContain("after");
+  });
+
+  test("reads a small file in full (below the initial window)", async () => {
+    // Regression: the seek only applies to large files; small transcripts
+    // must still be read from the start so nothing is lost.
+    fs.writeFileSync(
+      tmpFile,
+      `${JSON.stringify({ uuid: "a" })}\n${JSON.stringify({ uuid: "b" })}\n`,
+    );
+    const seen: string[] = [];
+    handle = tailJsonl(tmpFile, {
+      onRecord: (r) => seen.push(r.uuid as string),
+      pollIntervalMs: 50,
+    });
+    await wait(120);
+    expect(seen).toEqual(["a", "b"]);
+  });
 });

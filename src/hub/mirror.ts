@@ -1763,7 +1763,15 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           typeof payload.sid !== "string" ||
           !mirrorRegistry.hasSession(payload.sid);
         if (isNewSid) {
-          const remote = remoteKeyFor(request);
+          // Key the bucket per originating host. `remoteKeyFor` falls back
+          // to the Host header when there's no XFF proxy — and that's the
+          // hub's own name, identical for every client, so a single fleet
+          // could share one bucket and a restart storm would 429 unrelated
+          // hosts. The mirror-agent's reported host is the right grain.
+          const remote =
+            typeof payload.host === "string" && payload.host.length > 0
+              ? `host:${payload.host.slice(0, 64)}`
+              : remoteKeyFor(request);
           if (!sessionCreateLimiter.allow(remote)) {
             const waitMs = sessionCreateLimiter.retryAfterMs(remote);
             set.status = 429;

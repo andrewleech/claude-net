@@ -4626,6 +4626,39 @@
       rec.tabEl.classList.add('has-unread');
     }
 
+    // Drop finished sub-agent tabs/panes from previous turns. Called when a
+    // new main-thread turn starts (a human prompt) so the tab bar tracks the
+    // terminal: only the current turn's sub-agents remain. Running sub-agents
+    // are kept regardless. Main is never pruned.
+    function pruneDoneAgentTabs() {
+      var removed = false;
+      var activeRemoved = false;
+      Object.keys(agentTabs).forEach(function(aid) {
+        if (aid === 'main') return;
+        var rec = agentTabs[aid];
+        if (!rec || rec.status !== 'done') return;
+        if (rec.tabEl && rec.tabEl.parentNode) {
+          rec.tabEl.parentNode.removeChild(rec.tabEl);
+        }
+        var pane = agentPanes[aid];
+        if (pane && pane.parentNode) pane.parentNode.removeChild(pane);
+        delete agentTabs[aid];
+        delete agentPanes[aid];
+        if (activeAgentTab === aid) activeRemoved = true;
+        removed = true;
+      });
+      if (!removed) return;
+      // Drop stale Task-card → agent links pointing at pruned agents so a
+      // later click on an old dispatch card doesn't target a dead tab.
+      if (toolUseToAgent) {
+        Object.keys(toolUseToAgent).forEach(function(tuid) {
+          if (!agentTabs[toolUseToAgent[tuid]]) delete toolUseToAgent[tuid];
+        });
+      }
+      if (activeRemoved) selectAgentTab('main');
+      syncAgentTabsVisibility();
+    }
+
     function addAgentTab(aid, label, agentType) {
       if (agentTabs[aid]) return agentTabs[aid];
       var tab = document.createElement('button');
@@ -7026,6 +7059,11 @@
         // aren't the human typing — render them as a collapsed disclosure
         // box instead of a "user" message.
         var tnLive = parseTaskNotification(payload.prompt || '');
+        // A genuine human prompt on the main thread starts a new turn:
+        // prune finished sub-agent tabs from previous turns (running stay).
+        // Harness task-notifications ride the user turn but aren't the human
+        // typing, so they don't count as a new turn.
+        if (!tagged && !tnLive) pruneDoneAgentTabs();
         if (tnLive) {
           el = buildTaskNotifEl(tnLive, {});
           el.setAttribute('data-ts', ts);

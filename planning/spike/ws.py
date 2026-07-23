@@ -12,9 +12,13 @@ class WSClient:
         self.closed = False
 
     @classmethod
-    async def connect(cls, host, port, path="/"):
-        # asyncio.open_connection resolves via getaddrinfo internally.
-        reader, writer = await asyncio.open_connection(host, port)
+    async def connect(cls, host, port, path="/", ssl=None, server_hostname=None):
+        # asyncio.open_connection resolves via getaddrinfo internally. When ssl
+        # is a tls.SSLContext it wraps the (already non-blocking) socket with
+        # do_handshake_on_connect=False; the actual handshake is then driven by
+        # the poll loop on the first read/write below (see async_tls.py notes).
+        reader, writer = await asyncio.open_connection(
+            host, port, ssl=ssl, server_hostname=server_hostname)
         key = binascii.b2a_base64(os.urandom(16)).strip().decode()
         req = (
             "GET {} HTTP/1.1\r\n"
@@ -72,22 +76,37 @@ class WSClient:
         return await self.r.readexactly(n)
 
     async def _read_frame(self):
-        """Return (opcode, payload) for one frame, or (None, None) on EOF.
-        Control frames are handled internally (auto-PONG); this returns the
-        raw frame so the caller can reassemble fragments."""
-        b0b1 = await self._read_exact(2)
-        b0, b1 = b0b1[0], b0b1[1]
-        fin = b0 & 0x80
-        opcode = b0 & 0x0F
-        masked = b1 & 0x80          # server->client MUST be unmasked
-        ln = b1 & 0x7F
-        if ln == 126:
-            ln = struct.unpack("!H", await self._read_exact(2))[0]
-        elif ln == 127:
-            ln = struct.unpack("!Q", await self._read_exact(8))[0]
-        if masked:
-            mkey = await self._read_exact(4)
-        payload = await self._read_exact(ln)
+        """Return (fin, opcode, payload) for one frame, or None if the
+        connection closed. A close covers every way the peer can vanish
+        while we are reading, and all of them collapse to the single graceful
+        None sentinel that recv() relies on for its documented close contract:
+
+          * clean FIN at a frame boundary or part-way through a frame ->
+            asyncio.StreamReader.readexactly() raises a bare EOFError()
+            (verified on this runtime: no IncompleteReadError type, no
+            .partial attribute);
+          * RST (the real-hub eviction shape) -> the underlying read raises
+            OSError, e.g. ECONNRESET, which readexactly propagates.
+
+        Catching OSError here is safe because a failed stream read leaves the
+        connection unusable regardless of errno; there is nothing to recover,
+        so reporting "closed" is the only correct outcome."""
+        try:
+            b0b1 = await self._read_exact(2)
+            b0, b1 = b0b1[0], b0b1[1]
+            fin = b0 & 0x80
+            opcode = b0 & 0x0F
+            masked = b1 & 0x80          # server->client MUST be unmasked
+            ln = b1 & 0x7F
+            if ln == 126:
+                ln = struct.unpack("!H", await self._read_exact(2))[0]
+            elif ln == 127:
+                ln = struct.unpack("!Q", await self._read_exact(8))[0]
+            if masked:
+                mkey = await self._read_exact(4)
+            payload = await self._read_exact(ln)
+        except (EOFError, OSError):
+            return None
         if masked:
             pb = bytearray(payload)
             for i in range(ln):

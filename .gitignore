@@ -10,3 +10,7 @@ bin/mirror-agent.bundle.js
 .claude/screens/
 .claude/scheduled_tasks.lock
 .playwright-mcp/
+
+planning/spike/localhost_cert.pem
+planning/spike/localhost_key.pem
+planning/spike/localhost_cert.der

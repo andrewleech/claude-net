@@ -14,3 +14,7 @@ bin/mirror-agent.bundle.js
 planning/spike/localhost_cert.pem
 planning/spike/localhost_key.pem
 planning/spike/localhost_cert.der
+
+src/plugin-mpy/lib/mpyws/localhost_cert.pem
+src/plugin-mpy/lib/mpyws/localhost_key.pem
+src/plugin-mpy/lib/mpyws/localhost_cert.der

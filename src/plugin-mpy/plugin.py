@@ -62,6 +62,19 @@ CHANNEL_SELF_TEST_DELAY_S = 2.0
 CHANNEL_SELF_TEST_TIMEOUT_S = 60.0
 RENAME_WATCH_INTERVAL_S = 5.0
 
+# Verbose tracing toggle. `CLAUDE_NET_DEBUG=1` turns on the `debug()`
+# breadcrumbs (frame-level and lifecycle detail); everything else logs at
+# the always-on info level. All logging goes to stderr (stdout is the MCP
+# JSON-RPC channel — writing anything else there corrupts it), which Claude
+# Code captures under ~/.cache/claude-cli-nodejs/<cwd>/mcp-logs-<server>/.
+_DEBUG = os.getenv("CLAUDE_NET_DEBUG") == "1"
+
+
+def _stderr(msg):
+    """Write a prefixed line straight to stderr — usable before the MCP
+    server/peer exists (e.g. the startup breadcrumb in `main`)."""
+    sys.stderr.write("[claude-net] %s\n" % msg)
+
 
 def _js_truthy(value):
     """JS truthiness for a JSON-decoded value: a JS object or array is
@@ -196,6 +209,11 @@ class ClaudeNetApp:
 
     def log(self, msg):
         self.server.peer.log(msg)
+
+    def debug(self, msg):
+        """Verbose breadcrumb — emitted only when CLAUDE_NET_DEBUG=1."""
+        if _DEBUG:
+            self.server.peer.log("DEBUG " + msg)
 
     # ── Tool / prompt registration ──────────────────────────────────
 
@@ -844,12 +862,18 @@ class ClaudeNetApp:
                 log=self.log,
             )
             self.stored_name = self.resolve_initial_name()
+            self.debug("initial name resolved: %s" % self.stored_name)
             self.start_rename_watch()
             self.hub_task = asyncio.create_task(self.hub.run())
         else:
             self.log("CLAUDE_NET_HUB not set — running without hub connection")
 
+        self.log("serving MCP stdio")
         await self.server.serve()
+        # serve() returns on stdin EOF (parent closed the pipe). Log it so a
+        # premature return (the failure mode behind a reconnect that closes
+        # before initialize) is visible rather than a silent exit.
+        self.log("serve() returned (stdin EOF) — shutting down")
 
         # Belt-and-braces: `on_shutdown` (fired inside `serve()`, above)
         # already told the hub to stop reconnecting and close its
@@ -866,5 +890,34 @@ async def main():
     await app.start()
 
 
+def run():
+    """Synchronous entry point for BOTH a direct `plugin.py` run and the
+    packaged romfs entry (`import plugin; plugin.run()` in /rom/main.py) —
+    keep the two paths identical so logging + shutdown handling always apply.
+
+    Emits a startup breadcrumb (proves the process started and how it was
+    configured, before anything that can fail) and wraps `asyncio.run` so a
+    SIGINT — Claude Code's reconnect/teardown — exits quietly instead of
+    letting a KeyboardInterrupt traceback print. MicroPython can emit that
+    traceback to stdout, corrupting the MCP JSON-RPC stream and spamming the
+    client log with "Ignoring non-JSON line". Any fatal error goes to stderr,
+    never stdout."""
+    _stderr(
+        "starting: ppid=%s hub=%s debug=%s"
+        % (
+            identity.getppid(),
+            "set" if os.getenv("CLAUDE_NET_HUB") else "unset",
+            _DEBUG,
+        )
+    )
+    try:
+        asyncio.run(main())
+        _stderr("exited (clean)")
+    except KeyboardInterrupt:
+        _stderr("shutdown (SIGINT)")
+    except Exception as exc:
+        _stderr("fatal: %s" % exc)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()

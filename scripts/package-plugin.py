@@ -103,13 +103,13 @@ _MAIN_PY = '''\
 #
 # picolet's app-runner mode auto-runs /rom/main.py when present. plugin.py
 # is imported as a module (not run as the top-level script) so its
-# `if __name__ == "__main__":` guard does not fire; `plugin.main()` is
-# invoked directly instead.
-import asyncio
-
+# `if __name__ == "__main__":` guard does not fire; call `plugin.run()`
+# explicitly -- the same entry the guard uses -- so the startup breadcrumb
+# and clean SIGINT/shutdown handling (no KeyboardInterrupt traceback on
+# stdout) apply to the packaged binary too.
 import plugin
 
-asyncio.run(plugin.main())
+plugin.run()
 '''
 
 

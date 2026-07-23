@@ -28,15 +28,20 @@ Encrypt via `tailscale cert`.
 
 **Owner phase:** P2.
 
-## Q3 — hashlib/SHA1 for Sec-WebSocket-Accept verification  [OPEN — owner P2]
+## Q3 — hashlib/SHA1 for Sec-WebSocket-Accept verification  [DECIDED 2026-07-23 (P2 measurement)]
 
-**Decision:** Deferred to P2: measure the size cost against the 1 MiB
-ceiling (~146 KB headroom over the 878 KB baseline); enable only if it fits
-comfortably. Accept-header verification is non-load-bearing for a client, so
-skipping it is acceptable if it doesn't fit.
+**Decision:** Enable `hashlib.sha1` in the `mcp` variant (`MICROPY_PY_HASHLIB`
++ `MICROPY_PY_HASHLIB_SHA1`); keep MD5 and SHA256 off. Sec-WebSocket-Accept
+verification stays in the WS client as a defensive check.
 
-**Rationale:** No measurement exists yet against the actual `mcp` variant
-build; the decision depends on a number P2 produces, not on preference.
+**Rationale:** Measured both configurations on the built `linux-x64/mcp`
+binary: without hashlib, 899384 bytes; with `hashlib.sha1` enabled, 899384
+bytes — identical size (85% of the 1 MiB / NFR-MCP-1 ceiling, ~145 KB
+headroom). SHA1 is effectively free because mbedtls' SHA1 implementation is
+already statically linked in for TLS; exposing it to `hashlib` costs no
+measurable additional code. Since verification is free, there is no reason
+to accept the (admittedly non-load-bearing) drop in defense-in-depth by
+leaving it disabled.
 
 **Owner phase:** P2.
 

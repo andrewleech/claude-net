@@ -1,0 +1,143 @@
+name: Package claude-net plugin (linux-x64)
+
+# P8 packaging pipeline: version-lockstep gate, single-file artifact build,
+# and the packaging-specific smoke test all run on the standard GitHub
+# runner. The parity/ceremony harnesses (tests/parity_harness.py,
+# tests/ceremony_tests.py) are NOT run here -- see the `host-parity` job
+# below for why, and where they do run.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "src/plugin-mpy/**"
+      - "scripts/package-plugin.*"
+      - "package.json"
+      - ".github/workflows/package-plugin.yml"
+  pull_request:
+    paths:
+      - "src/plugin-mpy/**"
+      - "scripts/package-plugin.*"
+      - "package.json"
+  workflow_dispatch:
+
+env:
+  # Pin the picolet ref this pipeline builds the mcp runtime from to an
+  # immutable commit SHA. Bump deliberately, not implicitly via `dev`'s
+  # moving HEAD, so a plugin-repo CI run is reproducible independent of
+  # concurrent picolet work (e.g. the micropython submodule rebuild
+  # tracked separately from this packaging effort). This is "Add
+  # linux-x64/mcp variant: cli baseline + static mbedtls TLS", the commit
+  # that both introduces the `mcp` variant and produced the reviewed
+  # 899,384 B binary this pipeline packages -- earlier picolet commits
+  # predate variants/mcp/ and cannot build it at all.
+  PICOLET_REF: be86d845af4556dcea501bb4aebb2dca651ea165
+
+jobs:
+  version-lockstep:
+    # Standalone job (no runtime build needed) so a version mismatch fails
+    # fast without waiting on the docker-based runtime build below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert PLUGIN_VERSION == hub package.json version
+        run: |
+          plugin_version=$(grep -oP '^PLUGIN_VERSION\s*=\s*"\K[^"]+' src/plugin-mpy/_version.py)
+          hub_version=$(node -pe "require('./package.json').version")
+          echo "PLUGIN_VERSION=$plugin_version"
+          echo "hub version=$hub_version"
+          if [ "$plugin_version" != "$hub_version" ]; then
+            echo "::error::version lockstep failed: PLUGIN_VERSION=$plugin_version != hub version=$hub_version"
+            exit 1
+          fi
+
+  build-mcp-runtime:
+    # Prerequisite step (documented, per P8 scope): builds the picolet
+    # linux-x64/mcp runtime binary this pipeline packages. This is the
+    # only job that touches the picolet tree; it never runs against a
+    # runtime this repo's own history controls, and it never checks
+    # anything into picolet -- picolet's `dev` branch is out of scope for
+    # this workflow beyond reading it.
+    runs-on: ubuntu-latest
+    needs: version-lockstep
+    steps:
+      - name: Check out picolet
+        uses: actions/checkout@v4
+        with:
+          repository: andrewleech/picolet
+          ref: ${{ env.PICOLET_REF }}
+          path: picolet
+          submodules: recursive
+
+      - name: Install host build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip libtool automake autoconf
+          pip3 install --user mpremote
+
+      - name: Build linux-x64/mcp runtime
+        run: |
+          cd picolet/packages/picolet-runtime
+          ./scripts/build-runtime.sh --target linux-x64 --variant mcp
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: picolet-runtime-linux-x64-mcp
+          path: picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp
+          retention-days: 14
+
+  package-and-smoke:
+    # Fully CI-portable: builds the single-file artifact and runs the
+    # packaging-specific smoke test (packaged_binary_smoke.py). Does not
+    # depend on any host-specific path.
+    runs-on: ubuntu-latest
+    needs: build-mcp-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: picolet-runtime-linux-x64-mcp
+          path: runtime
+
+      - name: Build packaged plugin binary
+        run: |
+          chmod +x runtime/picolet-runtime-linux-x64-mcp
+          ./scripts/package-plugin.sh -v \
+            --runtime runtime/picolet-runtime-linux-x64-mcp \
+            --output build/claude-net-plugin-linux-x64
+
+      - name: Run packaged-binary smoke test
+        run: python3 src/plugin-mpy/tests/packaged_binary_smoke.py build/claude-net-plugin-linux-x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-net-plugin-linux-x64
+          path: build/claude-net-plugin-linux-x64
+          retention-days: 14
+
+  host-parity:
+    # tests/parity_harness.py and tests/ceremony_tests.py are the P7
+    # plugin-behaviour gates; they are NOT re-authored here. Both hardcode
+    # two host-specific absolute paths that only resolve on Andrew's
+    # fleet:
+    #   - MPY_BINARY = /home/anl/picolet/packages/picolet-runtime/build/
+    #     picolet-runtime-linux-x64-mcp (parity_harness.py)
+    #   - NODE_PATH = /home/anl/claude-net/node_modules, the bun
+    #     dependency tree of this worktree's *sibling* main-repo checkout
+    #     (parity_harness.py's `PluginRunner.start`)
+    # A generic GitHub-hosted runner has neither. This job therefore only
+    # runs on a self-hosted runner that already mirrors that layout
+    # (rebuild picolet's mcp variant to the exact MPY_BINARY path first).
+    # Retargeting the harnesses to take these as parameters is a P7
+    # test-infrastructure change, out of this round's packaging-only
+    # scope.
+    runs-on: [self-hosted, claude-net-fleet]
+    if: false # enable once a self-hosted runner matching the path layout above is registered
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun install
+      - run: python3 src/plugin-mpy/tests/run_all_tests.py

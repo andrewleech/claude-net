@@ -167,27 +167,38 @@ def read_custom_title_from_transcript(transcript_path):
     activity is happening.
     """
     try:
-        with open(transcript_path, "r") as f:
-            raw = f.read()
         mtime = os.stat(transcript_path)[8]
     except OSError:
         return None
-    lines = raw.split("\n")
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i]
-        if not line or '"custom-title"' not in line:
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if (
-            isinstance(obj, dict)
-            and obj.get("type") == "custom-title"
-            and isinstance(obj.get("customTitle"), str)
-            and obj.get("customTitle")
-        ):
-            return obj["customTitle"], mtime
+    # Stream the transcript line by line, keeping the LAST matching
+    # custom-title. Do NOT slurp the whole file: a live Claude Code
+    # transcript grows to many MB, and reading it into one string needs a
+    # single allocation of that size — which fails the MicroPython heap at
+    # startup (observed as "memory allocation failed" right after a
+    # reconnect tears down the previous process). Peak memory here is one
+    # line, not the whole (and ever-growing) file, and the common
+    # never-renamed case no longer allocates the file at all.
+    latest = None
+    try:
+        with open(transcript_path, "r") as f:
+            for line in f:
+                if '"custom-title"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    isinstance(obj, dict)
+                    and obj.get("type") == "custom-title"
+                    and isinstance(obj.get("customTitle"), str)
+                    and obj.get("customTitle")
+                ):
+                    latest = obj["customTitle"]
+    except OSError:
+        return None
+    if latest is not None:
+        return latest, mtime
     return None
 
 

@@ -97,7 +97,7 @@ def test_initialize_result_shape():
     lines, _ = _run([INIT_REQ])
     result = _by_id(lines)[1]["result"]
     assert result["serverInfo"] == {"name": "mpyfastmcp-demo", "version": "0.1.0"}
-    assert result["capabilities"] == {"tools": {}, "prompts": {}}
+    assert result["capabilities"] == {"tools": {}, "prompts": {}, "resources": {}}
     assert "instructions" in result
 
 
@@ -290,6 +290,113 @@ def test_prompts_get_unknown_prompt_is_invalid_params_rpc_error():
     lines, _ = _run([INIT_REQ, _req(2, "prompts/get", {"name": "nope"})])
     error = _by_id(lines)[2]["error"]
     assert error["code"] == -32602
+
+
+# ── resources/list, resources/read ───────────────────────────────────────
+
+
+def test_resources_list_golden_schema():
+    lines, _ = _run([INIT_REQ, _req(2, "resources/list")])
+    resources = _by_id(lines)[2]["result"]["resources"]
+    assert resources == [
+        {
+            "uri": "resource://demo/notes",
+            "name": "Demo Notes",
+            "description": "A short, static, read-only note resource.",
+            "mimeType": "text/plain",
+        }
+    ]
+
+
+def test_resources_read_success_returns_contents_shape():
+    lines, _ = _run(
+        [INIT_REQ, _req(2, "resources/read", {"uri": "resource://demo/notes"})]
+    )
+    result = _by_id(lines)[2]["result"]
+    assert result["contents"] == [
+        {
+            "uri": "resource://demo/notes",
+            "mimeType": "text/plain",
+            "text": "This is a static demo resource exposed by mpyfastmcp.",
+        }
+    ]
+
+
+def test_resources_read_unknown_uri_is_invalid_params_rpc_error():
+    lines, _ = _run(
+        [INIT_REQ, _req(2, "resources/read", {"uri": "resource://demo/nope"})]
+    )
+    error = _by_id(lines)[2]["error"]
+    assert error["code"] == -32602
+
+
+def test_resources_list_before_initialize_is_gated():
+    lines, _ = _run([_req(1, "resources/list")])
+    error = _by_id(lines)[1]["error"]
+    assert error["code"] == -32002
+
+    lines, _ = _run(
+        [_req(1, "resources/read", {"uri": "resource://demo/notes"})]
+    )
+    assert _by_id(lines)[1]["error"]["code"] == -32002
+
+
+def test_resources_capability_only_advertised_when_a_resource_exists(tmp_path):
+    """`{"resources": {}}` must appear in `initialize`'s `capabilities` only
+    once at least one `@server.resource` is registered -- a server with no
+    resources must not advertise the capability, matching how `tools`/
+    `prompts` are only advertised once at least one is registered."""
+    script = tmp_path / "no_resources_server.py"
+    script.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n"
+        "from mpyfastmcp import MCPServer\n"
+        "server = MCPServer('no-resources-demo', '0.0.1')\n"
+        "\n"
+        "@server.tool('noop', 'does nothing', params=[])\n"
+        "def noop():\n"
+        "    return 'ok'\n"
+        "\n"
+        "server.run()\n" % os.path.dirname(HERE)
+    )
+    lines, _ = _run([INIT_REQ], script=str(script))
+    result = _by_id(lines)[1]["result"]
+    assert result["capabilities"] == {"tools": {}}
+    assert "resources" not in result["capabilities"]
+
+
+def test_client_capabilities_and_info_are_none_before_initialize(tmp_path):
+    """Q6 sentinel: `get_client_capabilities()` and `get_client_info()` must
+    both return `None` before `initialize` has been handled -- a shared
+    "not yet known" sentinel distinct from an empty `capabilities: {}` sent
+    by the client."""
+    script = tmp_path / "q6_sentinel_server.py"
+    script.write_text(
+        "import sys\n"
+        "sys.path.insert(0, %r)\n"
+        "from mpyfastmcp import MCPServer\n"
+        "server = MCPServer('q6-demo', '0.0.1')\n"
+        "server.peer.log('pre-init caps=%%r info=%%r' %% "
+        "(server.get_client_capabilities(), server.get_client_info()))\n"
+        "\n"
+        "@server.on_initialized\n"
+        "def _check():\n"
+        "    server.peer.log('post-init caps=%%r info=%%r' %% "
+        "(server.get_client_capabilities(), server.get_client_info()))\n"
+        "\n"
+        "server.run()\n" % os.path.dirname(HERE)
+    )
+    _, stderr = _run(
+        [INIT_REQ, INITIALIZED_NOTIF, _req(2, "tools/list")], script=str(script)
+    )
+    stderr_text = stderr.decode()
+    assert "pre-init caps=None info=None" in stderr_text
+    post_init_line = next(
+        line for line in stderr_text.splitlines() if "post-init" in line
+    )
+    assert "caps={'experimental': {'probe': True}}" in post_init_line
+    assert "info=None" not in post_init_line, post_init_line
+    assert "conformance-client" in post_init_line
 
 
 # ── Unknown JSON-RPC method ───────────────────────────────────────────────

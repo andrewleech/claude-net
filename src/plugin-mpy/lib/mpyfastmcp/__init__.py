@@ -4,7 +4,8 @@ Composes `mpyjsonrpc.JsonRpcPeer` (transport: framing, dispatch, the single
 serialized stdout writer) with `mpyschema` (explicit param specs ->
 `inputSchema` / prompt `arguments`, plus argument validation) into an
 `MCPServer` object that speaks the Model Context Protocol's `initialize`,
-`tools/list`, `tools/call`, `prompts/list`, and `prompts/get` methods.
+`tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `resources/list`,
+and `resources/read` methods.
 
 This module is deliberately generic: it has no knowledge of any specific
 app's tools, prompts, or notification method names. An app built on top of
@@ -19,10 +20,11 @@ Public API
     of the `initialize` result; `instructions` (if given) becomes the
     result's `instructions` string. `capabilities` is merged over the
     layer's own default (`{"tools": {}}` once at least one tool is
-    registered, `{"prompts": {}}` once at least one prompt is registered) —
-    pass e.g. `capabilities={"experimental": {"foo": {}}}` to declare
-    additional capability blocks; keys here always win over the computed
-    default. `stdin`/`stdout` are forwarded to the underlying
+    registered, `{"prompts": {}}` once at least one prompt is registered,
+    `{"resources": {}}` once at least one resource is registered) — pass
+    e.g. `capabilities={"experimental": {"foo": {}}}` to declare additional
+    capability blocks; keys here always win over the computed default.
+    `stdin`/`stdout` are forwarded to the underlying
     `mpyjsonrpc.JsonRpcPeer` (default `sys.stdin.buffer` / `sys.stdout.buffer`).
     `log_prefix` sets the peer's stderr log prefix; defaults to `"[%s] " %
     name`, so two servers with different names never share an indistinguishable
@@ -64,6 +66,22 @@ Public API
     `prompts/get` has no `isError` result convention of its own. Returns
     the undecorated handler.
 
+``@server.resource(uri, name, description=None, mime_type=None)``
+    Registers a resource. `uri` is the resource's stable identifier and
+    registry key; `name` is the human-readable label. `description` and
+    `mime_type` are optional and, when given, surface as `description` /
+    `mimeType` in `resources/list` (omitted entirely when absent, rather
+    than emitted as `null`). The decorated handler takes no arguments and
+    is called on `resources/read` for its `uri`; it may be a plain function
+    or an `async def`. Its return value becomes the `resources/read`
+    result via `resource_result()` (see below) unless it already returns a
+    `{"contents": [...]}`-shaped dict, which is passed through unchanged.
+    An unrecognised `uri` at `resources/read` time raises
+    `mpyjsonrpc.InvalidParams` (`-32602`), matching `prompts/get`'s
+    unknown-name handling -- resources have no `tools/call`-style `isError`
+    result convention. Returns the undecorated handler, so
+    `@server.resource(...)` composes with other decorators.
+
 ``server.on_initialized(callback)``
     Registers `callback()` to run once, when the client's
     `notifications/initialized` notification arrives (i.e. once the MCP
@@ -77,7 +95,9 @@ Public API
 
 ``server.get_client_capabilities()`` / ``server.get_client_info()``
     Return the `capabilities` / `clientInfo` objects the client sent with
-    `initialize` (each `{}`/`None` until `initialize` has been handled).
+    `initialize`. Both return `None` until `initialize` has been handled --
+    a shared sentinel for "not yet known", distinct from the client having
+    sent an empty `capabilities: {}`.
 
 ``server.on_tool_result(callback)``
     Registers `callback(tool_name, result)` to run, in registration order,
@@ -139,20 +159,31 @@ Public API
     handler exceptions, and unknown tool names, and available for a
     handler to return directly for its own domain-specific failures.
 
+``resource_result(uri, data, mime_type=None)``
+    Module-level helper: wraps arbitrary resource-handler return data as an
+    MCP `resources/read` result. A dict already shaped like `{"contents":
+    [...]}` is returned unchanged. A `list` is used directly as the
+    `contents` array (each item already a content block the handler built
+    itself). A `str` becomes a single text content block for `uri` (tagged
+    with `mime_type` when given). Anything else is JSON-encoded into a
+    single text content block for `uri`.
+
 Standard MCP method coverage
 -----------------------------
 
-`initialize`, `tools/list`, `tools/call`, `prompts/list`, `prompts/get` are
-registered as `mpyjsonrpc` method handlers at construction time. Any other
-inbound method falls through to `mpyjsonrpc`'s own "no handler registered"
-path and is reported as JSON-RPC `-32601` (`MethodNotFound`), exactly as
-for any unregistered method on a bare `JsonRpcPeer`.
+`initialize`, `tools/list`, `tools/call`, `prompts/list`, `prompts/get`,
+`resources/list`, and `resources/read` are registered as `mpyjsonrpc`
+method handlers at construction time. Any other inbound method falls
+through to `mpyjsonrpc`'s own "no handler registered" path and is reported
+as JSON-RPC `-32601` (`MethodNotFound`), exactly as for any unregistered
+method on a bare `JsonRpcPeer`.
 
-`tools/list`, `tools/call`, `prompts/list`, and `prompts/get` are gated on
-the MCP lifecycle: a client that calls any of them before `initialize` has
-been handled gets `NotInitialized` (`-32002`, this layer's convention for
-"server not initialized") instead of being served. `initialize` itself and
-`notifications/initialized` are never gated.
+`tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `resources/list`,
+and `resources/read` are gated on the MCP lifecycle: a client that calls
+any of them before `initialize` has been handled gets `NotInitialized`
+(`-32002`, this layer's convention for "server not initialized") instead
+of being served. `initialize` itself and `notifications/initialized` are
+never gated.
 
 `initialize` handshake / protocol version negotiation
 -------------------------------------------------------
@@ -186,8 +217,9 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 class NotInitialized(RpcError):
     """A lifecycle-gated method (`tools/list`, `tools/call`, `prompts/list`,
-    `prompts/get`) was called before `initialize` completed (-32002, this
-    layer's convention for the MCP "server not initialized" condition)."""
+    `prompts/get`, `resources/list`, `resources/read`) was called before
+    `initialize` completed (-32002, this layer's convention for the MCP
+    "server not initialized" condition)."""
 
     code = -32002
 
@@ -212,6 +244,29 @@ def tool_result(data):
 def error_result(message):
     """Build an `isError` MCP `tools/call` result carrying `message` as text."""
     return {"isError": True, "content": [{"type": "text", "text": message}]}
+
+
+def resource_result(uri, data, mime_type=None):
+    """Wrap arbitrary resource-handler return data as an MCP
+    `resources/read` result.
+
+    A dict is passed through unchanged only when it is already shaped like
+    a result -- `contents` present as a *list* (the content-block array).
+    A bare `list` is used directly as that `contents` array (each item
+    already a content block the handler built itself). A `str` becomes a
+    single text content block for `uri`, tagged with `mime_type` when
+    given. Anything else is JSON-encoded into a single text content block
+    for `uri`.
+    """
+    if isinstance(data, dict) and isinstance(data.get("contents"), list):
+        return data
+    if isinstance(data, list):
+        return {"contents": data}
+    block = {"uri": uri}
+    if mime_type:
+        block["mimeType"] = mime_type
+    block["text"] = data if isinstance(data, str) else json.dumps(data)
+    return {"contents": [block]}
 
 
 class _Tool:
@@ -249,9 +304,28 @@ class _Prompt:
         }
 
 
+class _Resource:
+    __slots__ = ("uri", "name", "description", "mime_type", "handler")
+
+    def __init__(self, uri, name, description, mime_type, handler):
+        self.uri = uri
+        self.name = name
+        self.description = description
+        self.mime_type = mime_type
+        self.handler = handler
+
+    def definition(self):
+        d = {"uri": self.uri, "name": self.name}
+        if self.description:
+            d["description"] = self.description
+        if self.mime_type:
+            d["mimeType"] = self.mime_type
+        return d
+
+
 class MCPServer:
-    """A FastMCP-style MCP server: `@tool`/`@prompt` decorators over
-    `mpyjsonrpc.JsonRpcPeer`. See the module docstring for the full public
+    """A FastMCP-style MCP server: `@tool`/`@prompt`/`@resource` decorators
+    over `mpyjsonrpc.JsonRpcPeer`. See the module docstring for the full public
     API.
     """
 
@@ -272,16 +346,21 @@ class MCPServer:
 
         # Plain dicts on MicroPython don't preserve insertion order (see
         # mpyschema's docstring) -- registration order for `tools/list` /
-        # `prompts/list` is tracked separately via the `_order` lists
-        # rather than relying on dict iteration order.
+        # `prompts/list` / `resources/list` is tracked separately via the
+        # `_order` lists rather than relying on dict iteration order.
         self._tools = {}
         self._tool_order = []
         self._prompts = {}
         self._prompt_order = []
+        self._resources = {}
+        self._resource_order = []
 
         self._tool_result_cbs = []
         self._oninitialized_cbs = []
-        self._client_capabilities = {}
+        # `None` is the shared "not yet known" sentinel for both, distinct
+        # from the client having sent an empty `capabilities: {}` -- see
+        # `get_client_capabilities()`/`get_client_info()`.
+        self._client_capabilities = None
         self._client_info = None
         self._initialized = False
 
@@ -296,6 +375,8 @@ class MCPServer:
         self.peer.register_method("tools/call", self._handle_tools_call)
         self.peer.register_method("prompts/list", self._handle_prompts_list)
         self.peer.register_method("prompts/get", self._handle_prompts_get)
+        self.peer.register_method("resources/list", self._handle_resources_list)
+        self.peer.register_method("resources/read", self._handle_resources_read)
 
     # ── Registration decorators ─────────────────────────────────────────
 
@@ -307,6 +388,19 @@ class MCPServer:
             self._tools[name] = t
             if name not in self._tool_order:
                 self._tool_order.append(name)
+            return fn
+
+        return decorator
+
+    def resource(self, uri, name, description=None, mime_type=None):
+        """Decorator: `@server.resource("uri", "name", description=None,
+        mime_type=None)`."""
+
+        def decorator(fn):
+            r = _Resource(uri, name, description, mime_type, fn)
+            self._resources[uri] = r
+            if uri not in self._resource_order:
+                self._resource_order.append(uri)
             return fn
 
         return decorator
@@ -333,7 +427,9 @@ class MCPServer:
 
     def get_client_capabilities(self):
         """Return the `capabilities` object from the client's `initialize`
-        request, or `{}` if `initialize` hasn't been handled yet."""
+        request, or `None` if `initialize` hasn't been handled yet -- the
+        same "not yet known" sentinel `get_client_info()` uses, distinct
+        from the client having sent an empty `capabilities: {}`."""
         return self._client_capabilities
 
     def get_client_info(self):
@@ -347,6 +443,8 @@ class MCPServer:
             caps["tools"] = {}
         if self._prompt_order:
             caps["prompts"] = {}
+        if self._resource_order:
+            caps["resources"] = {}
         caps.update(self._capabilities)
         return caps
 
@@ -455,6 +553,26 @@ class MCPServer:
         if type(result).__name__ == "generator":
             result = await result
         return result
+
+    # ── Resources ────────────────────────────────────────────────────────
+
+    async def _handle_resources_list(self, **_params):
+        self._require_initialized()
+        return {
+            "resources": [
+                self._resources[u].definition() for u in self._resource_order
+            ]
+        }
+
+    async def _handle_resources_read(self, uri):
+        self._require_initialized()
+        resource = self._resources.get(uri)
+        if resource is None:
+            raise InvalidParams("unknown resource: %s" % uri)
+        raw = resource.handler()
+        if type(raw).__name__ == "generator":
+            raw = await raw
+        return resource_result(uri, raw, resource.mime_type)
 
     # ── Notifications / lifecycle ───────────────────────────────────────
 

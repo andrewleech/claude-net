@@ -211,6 +211,7 @@ def test_initialize_result_shape():
     assert "capabilities" in result
     assert "tools" in result["capabilities"]
     assert "prompts" in result["capabilities"]
+    assert "resources" in result["capabilities"]
     assert "instructions" in result
 
 
@@ -395,6 +396,148 @@ def test_prompts_get_unknown_prompt_is_rpc_error():
     except RuntimeError as e:
         # InvalidParams is -32602
         assert "-32602" in str(e), f"Expected InvalidParams error, got {e}"
+
+
+def test_resources_list_golden_schema():
+    """Test: resources/list returns golden schema for the notes resource."""
+    client = _spawn_client(DEMO_SERVER, MPY_BIN)
+    client.request("initialize", {"protocolVersion": "2025-06-18"})
+    result = client.request("resources/list")
+
+    resources = result["resources"]
+    assert len(resources) == 1, f"Expected 1 resource, got {len(resources)}"
+    assert resources[0]["uri"] == "resource://demo/notes"
+    assert resources[0]["name"] == "Demo Notes"
+    assert resources[0]["description"] == "A short, static, read-only note resource."
+    assert resources[0]["mimeType"] == "text/plain"
+
+
+def test_resources_read_success_returns_contents_shape():
+    """Test: resources/read returns a contents array with a text block."""
+    client = _spawn_client(DEMO_SERVER, MPY_BIN)
+    client.request("initialize", {"protocolVersion": "2025-06-18"})
+    result = client.request("resources/read", {"uri": "resource://demo/notes"})
+
+    assert "contents" in result
+    assert isinstance(result["contents"], list)
+    assert len(result["contents"]) == 1
+    content = result["contents"][0]
+    assert content["uri"] == "resource://demo/notes"
+    assert content["mimeType"] == "text/plain"
+    assert content["text"] == "This is a static demo resource exposed by mpyfastmcp."
+
+
+def test_resources_read_unknown_uri_is_rpc_error():
+    """Test: unknown resource uri returns JSON-RPC error (-32602)."""
+    client = _spawn_client(DEMO_SERVER, MPY_BIN)
+    client.request("initialize", {"protocolVersion": "2025-06-18"})
+    try:
+        client.request("resources/read", {"uri": "resource://demo/nope"})
+        assert False, "Should have raised RPC error"
+    except RuntimeError as e:
+        assert "-32602" in str(e), f"Expected InvalidParams error, got {e}"
+
+
+def test_resources_list_before_initialize_is_rejected():
+    """`resources/list` before `initialize` completes must be rejected;
+    after `initialize`, it must work."""
+    client = _spawn_client(DEMO_SERVER, MPY_BIN)
+    try:
+        client.request("resources/list")
+        assert False, "Should have raised RPC error"
+    except RuntimeError as e:
+        assert "-32002" in str(e), f"Expected -32002 (not initialized), got {e}"
+
+    client.request("initialize", {"protocolVersion": "2025-06-18"})
+    result = client.request("resources/list")
+    assert result["resources"]
+
+
+def test_resources_capability_only_advertised_when_a_resource_exists():
+    """`{"resources": {}}` must appear in `initialize`'s `capabilities` only
+    once at least one `@server.resource` is registered, matching how
+    `tools`/`prompts` are only advertised once at least one is
+    registered."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        script = _write_script(
+            tmp_dir,
+            "no_resources_server.py",
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from mpyfastmcp import MCPServer\n"
+            "server = MCPServer('no-resources-demo', '0.0.1')\n"
+            "\n"
+            "@server.tool('noop', 'does nothing', params=[])\n"
+            "def noop():\n"
+            "    return 'ok'\n"
+            "\n"
+            "server.run()\n" % os.path.dirname(HERE),
+        )
+        init_req = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18"},
+            }
+        )
+        lines, _ = _run_script(script, [init_req])
+        result = _by_id(lines, 1)["result"]
+        assert result["capabilities"] == {"tools": {}}
+        assert "resources" not in result["capabilities"]
+
+
+def test_client_capabilities_and_info_are_none_before_initialize():
+    """Q6 sentinel: `get_client_capabilities()` and `get_client_info()` must
+    both return `None` before `initialize` has been handled."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        script = _write_script(
+            tmp_dir,
+            "q6_sentinel_server.py",
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from mpyfastmcp import MCPServer\n"
+            "server = MCPServer('q6-demo', '0.0.1')\n"
+            "server.peer.log('pre-init caps=%%r info=%%r' %% "
+            "(server.get_client_capabilities(), server.get_client_info()))\n"
+            "\n"
+            "@server.on_initialized\n"
+            "def _check():\n"
+            "    server.peer.log('post-init caps=%%r info=%%r' %% "
+            "(server.get_client_capabilities(), server.get_client_info()))\n"
+            "\n"
+            "server.run()\n" % os.path.dirname(HERE),
+        )
+        init_req = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"experimental": {"probe": True}},
+                    "clientInfo": {"name": "conformance-client", "version": "0.0.1"},
+                },
+            }
+        )
+        initialized_notif = json.dumps(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        tools_list_req = json.dumps(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        )
+        _, stderr = _run_script(
+            script, [init_req, initialized_notif, tools_list_req]
+        )
+        assert "pre-init caps=None info=None" in stderr
+        post_init_line = next(
+            line for line in stderr.splitlines() if "post-init" in line
+        )
+        assert "caps={'experimental': {'probe': True}}" in post_init_line
+        assert "info=None" not in post_init_line, post_init_line
+        assert "conformance-client" in post_init_line
 
 
 def test_unknown_method_is_method_not_found():
@@ -817,6 +960,12 @@ def run_all_tests() -> Tuple[bool, List[Tuple[str, bool, str]]]:
         test_prompts_list_golden_schema,
         test_prompts_get_success_returns_messages_shape,
         test_prompts_get_unknown_prompt_is_rpc_error,
+        test_resources_list_golden_schema,
+        test_resources_read_success_returns_contents_shape,
+        test_resources_read_unknown_uri_is_rpc_error,
+        test_resources_list_before_initialize_is_rejected,
+        test_resources_capability_only_advertised_when_a_resource_exists,
+        test_client_capabilities_and_info_are_none_before_initialize,
         test_unknown_method_is_method_not_found,
         test_notify_mid_session_does_not_corrupt_framing,
         test_result_middleware_appends_content_block,

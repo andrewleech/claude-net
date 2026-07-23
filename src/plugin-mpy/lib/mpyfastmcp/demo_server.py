@@ -1,4 +1,4 @@
-"""Minimal example `mpyfastmcp` server: two tools and a prompt.
+"""Minimal example `mpyfastmcp` server: two tools, a prompt, and a resource.
 
 Runnable directly on the picolet MicroPython binary:
 
@@ -6,16 +6,16 @@ Runnable directly on the picolet MicroPython binary:
 
 Speaks MCP over stdio (real `sys.stdin`/`sys.stdout`) — feed it JSON-RPC
 lines (`initialize`, `notifications/initialized`, `tools/list`,
-`tools/call`, `prompts/list`, `prompts/get`) and read the responses back.
-See `test_conformance.py` in this directory for a scripted client driving
-this exact server.
+`tools/call`, `prompts/list`, `prompts/get`, `resources/list`,
+`resources/read`) and read the responses back. See `test_conformance.py`
+in this directory for a scripted client driving this exact server.
 
 Demonstrates: two tools (`echo`, `add`) exercising `mpyschema.Str`/`Num`
 params and validation-error/handler-exception paths; one prompt (`greet`);
-`on_initialized` reading the client's declared capabilities; an
-`on_tool_result` hook that appends a one-shot notice to the next tool
-result; and a `notify()` custom notification fired once initialization
-completes.
+one resource (`notes`); `on_initialized` reading the client's declared
+capabilities; an `on_tool_result` hook that appends a one-shot notice to
+the next tool result; and a `notify()` custom notification fired once
+initialization completes.
 """
 
 import os
@@ -74,6 +74,16 @@ def greet(name):
             }
         ],
     }
+
+
+@server.resource(
+    "resource://demo/notes",
+    "Demo Notes",
+    description="A short, static, read-only note resource.",
+    mime_type="text/plain",
+)
+def notes():
+    return "This is a static demo resource exposed by mpyfastmcp."
 
 
 # One-shot "pending notice" queue, drained into the next tool result by the

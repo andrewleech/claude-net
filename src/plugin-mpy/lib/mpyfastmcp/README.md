@@ -2,7 +2,8 @@
 
 FastMCP-style MCP-server layer for MicroPython, composing `mpyjsonrpc`
 (transport) and `mpyschema` (param specs / schema emission / validation)
-into an `MCPServer` object with `@tool` / `@prompt` decorators.
+into an `MCPServer` object with `@tool` / `@prompt` / `@resource`
+decorators.
 
 Generic by design: this layer has no knowledge of any specific app's tools,
 prompts, or notification method names. See `demo_server.py` for a worked
@@ -62,6 +63,16 @@ def greet(name):
     }
 
 
+@server.resource(
+    "resource://demo/notes",
+    "Demo Notes",
+    description="A short, static, read-only note resource.",
+    mime_type="text/plain",
+)
+def notes():
+    return "This is a static demo resource exposed by mpyfastmcp."
+
+
 # on_tool_result: appends content blocks to an outgoing tools/call result
 # before it is written to stdout, in registration order. This is the generic
 # hook an app uses to drain its own queue of pending out-of-band notices into
@@ -103,10 +114,10 @@ picolet-runtime-linux-x64-mcp demo_server.py
 
 It speaks MCP over stdio: feed it JSON-RPC lines (`initialize`,
 `notifications/initialized`, `tools/list`, `tools/call`, `prompts/list`,
-`prompts/get`) on stdin and read the responses back from stdout.
-`test_conformance.py` in this directory is a scripted client that drives
-this exact server through the full handshake plus every method above; run
-it with:
+`prompts/get`, `resources/list`, `resources/read`) on stdin and read the
+responses back from stdout. `test_conformance.py` in this directory is a
+scripted client that drives this exact server through the full handshake
+plus every method above; run it with:
 
 ```
 MPY_BIN=/path/to/picolet-runtime-linux-x64-mcp python3 -m pytest test_conformance.py
@@ -115,8 +126,9 @@ MPY_BIN=/path/to/picolet-runtime-linux-x64-mcp python3 -m pytest test_conformanc
 ## Public API
 
 See the `mpyfastmcp/__init__.py` module docstring for the full reference:
-`MCPServer` construction, `@server.tool`/`@server.prompt`, `on_initialized`/
-`get_client_capabilities`/`get_client_info`, `on_tool_result`, `notify`,
-`on_shutdown`, `serve`/`run`, and the `tool_result`/`error_result` helpers.
-This is the project's designated reuse surface for P7 (the claude-net
-plugin) and is frozen after API review.
+`MCPServer` construction, `@server.tool`/`@server.prompt`/`@server.resource`,
+`on_initialized`/`get_client_capabilities`/`get_client_info`,
+`on_tool_result`, `notify`, `on_shutdown`, `serve`/`run`, and the
+`tool_result`/`error_result`/`resource_result` helpers. This is the
+project's designated reuse surface for P7 (the claude-net plugin) and is
+frozen after API review.

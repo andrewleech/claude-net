@@ -495,14 +495,17 @@ class MCPServer:
         self._require_initialized()
         return {"tools": [self._tools[n].definition() for n in self._tool_order]}
 
-    async def _handle_tools_call(self, name, arguments=None, **_meta):
-        # `**_meta` absorbs the reserved `_meta` field (and any other
-        # extension params) MCP clients attach to request params — e.g.
-        # Claude Code sends a `_meta.progressToken` on tools/call. Handlers
-        # dispatched via `handler(**params)` would otherwise raise
-        # "unexpected keyword argument" and surface as -32602. Mirrors the
-        # `**_params`-tolerant list handlers.
+    async def _handle_tools_call(self, **params):
+        # Read only the fields this method uses off the request params,
+        # ignoring the reserved MCP `_meta` field (and any other/unknown
+        # params) — the structured field-extraction model the MCP SDKs use
+        # (the TS SDK destructures `req.params.{name,arguments}`; the Python
+        # SDK parses a typed params model). This is what avoids coupling the
+        # JSON-RPC params keys to a handler's Python signature, which made a
+        # client's `_meta` surface as -32602 "unexpected keyword argument".
         self._require_initialized()
+        name = params.get("name")
+        arguments = params.get("arguments")
         tool = self._tools.get(name)
         if tool is None:
             return self._finalize_result(
@@ -546,9 +549,12 @@ class MCPServer:
             "prompts": [self._prompts[n].definition() for n in self._prompt_order]
         }
 
-    async def _handle_prompts_get(self, name, arguments=None, **_meta):
-        # See _handle_tools_call: absorb the reserved MCP `_meta` field.
+    async def _handle_prompts_get(self, **params):
+        # Field extraction (see _handle_tools_call): read name/arguments,
+        # ignore `_meta` and unknown params.
         self._require_initialized()
+        name = params.get("name")
+        arguments = params.get("arguments")
         prompt = self._prompts.get(name)
         if prompt is None:
             raise InvalidParams("unknown prompt: %s" % name)
@@ -571,9 +577,11 @@ class MCPServer:
             ]
         }
 
-    async def _handle_resources_read(self, uri, **_meta):
-        # See _handle_tools_call: absorb the reserved MCP `_meta` field.
+    async def _handle_resources_read(self, **params):
+        # Field extraction (see _handle_tools_call): read uri, ignore
+        # `_meta` and unknown params.
         self._require_initialized()
+        uri = params.get("uri")
         resource = self._resources.get(uri)
         if resource is None:
             raise InvalidParams("unknown resource: %s" % uri)

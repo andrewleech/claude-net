@@ -495,7 +495,13 @@ class MCPServer:
         self._require_initialized()
         return {"tools": [self._tools[n].definition() for n in self._tool_order]}
 
-    async def _handle_tools_call(self, name, arguments=None):
+    async def _handle_tools_call(self, name, arguments=None, **_meta):
+        # `**_meta` absorbs the reserved `_meta` field (and any other
+        # extension params) MCP clients attach to request params — e.g.
+        # Claude Code sends a `_meta.progressToken` on tools/call. Handlers
+        # dispatched via `handler(**params)` would otherwise raise
+        # "unexpected keyword argument" and surface as -32602. Mirrors the
+        # `**_params`-tolerant list handlers.
         self._require_initialized()
         tool = self._tools.get(name)
         if tool is None:
@@ -540,7 +546,8 @@ class MCPServer:
             "prompts": [self._prompts[n].definition() for n in self._prompt_order]
         }
 
-    async def _handle_prompts_get(self, name, arguments=None):
+    async def _handle_prompts_get(self, name, arguments=None, **_meta):
+        # See _handle_tools_call: absorb the reserved MCP `_meta` field.
         self._require_initialized()
         prompt = self._prompts.get(name)
         if prompt is None:
@@ -564,7 +571,8 @@ class MCPServer:
             ]
         }
 
-    async def _handle_resources_read(self, uri):
+    async def _handle_resources_read(self, uri, **_meta):
+        # See _handle_tools_call: absorb the reserved MCP `_meta` field.
         self._require_initialized()
         resource = self._resources.get(uri)
         if resource is None:

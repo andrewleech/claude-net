@@ -287,6 +287,29 @@ def test_tools_call_success_returns_content_shape():
     assert parsed == {"sum": 5}, f"Expected {{'sum': 5}}, got {parsed}"
 
 
+def test_tools_call_tolerates_meta_param():
+    """Regression: MCP clients (e.g. Claude Code) attach a reserved `_meta`
+    field to request params. Since handlers are dispatched via
+    `handler(**params)`, a `_meta` sibling of `arguments` must not raise
+    "unexpected keyword argument" (-32602). Also covers prompts/get."""
+    client = _spawn_client(DEMO_SERVER, MPY_BIN)
+    client.request("initialize", {"protocolVersion": "2025-06-18"})
+
+    result = client.request(
+        "tools/call",
+        {"name": "add", "arguments": {"a": 2, "b": 3}, "_meta": {"progressToken": "t"}},
+    )
+    assert "content" in result and not result.get("isError"), result
+    assert json.loads(result["content"][0]["text"]) == {"sum": 5}
+
+    # prompts/get carries _meta too.
+    got = client.request(
+        "prompts/get",
+        {"name": "greet", "arguments": {"name": "x"}, "_meta": {"progressToken": "t"}},
+    )
+    assert "messages" in got, got
+
+
 def test_tools_call_validation_error_is_isError_not_rpc_error():
     """Test: validation error returns isError result, not JSON-RPC error."""
     client = _spawn_client(DEMO_SERVER, MPY_BIN)
@@ -954,6 +977,7 @@ def run_all_tests() -> Tuple[bool, List[Tuple[str, bool, str]]]:
         test_on_initialized_fires_and_client_capabilities_available,
         test_tools_list_golden_schema,
         test_tools_call_success_returns_content_shape,
+        test_tools_call_tolerates_meta_param,
         test_tools_call_validation_error_is_isError_not_rpc_error,
         test_tools_call_unknown_tool_is_isError,
         test_tools_call_handler_exception_is_isError,

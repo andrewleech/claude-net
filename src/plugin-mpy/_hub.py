@@ -89,12 +89,15 @@ class HubClient:
     plain callables — `plugin.py` supplies the closures.
     """
 
-    def __init__(self, hub_env_url, on_open, on_frame, on_close, log):
+    def __init__(self, hub_env_url, on_open, on_frame, on_close, log, error=None):
         self.ws_url = derive_ws_url(hub_env_url)
         self._on_open = on_open
         self._on_frame = on_frame
         self._on_close = on_close
         self._log = log
+        # Error-level sink; falls back to the info log if not supplied so the
+        # class stays usable standalone.
+        self._error = error or log
         self._ws = None
         self._pending = {}
         self._reconnect_delay_s = RECONNECT_INITIAL_S
@@ -138,7 +141,7 @@ class HubClient:
                     self.ws_url, cadata=cadata, handshake_timeout=15.0
                 )
             except Exception as exc:
-                self._log("Connect failed: %s" % exc)
+                self._error("Connect failed: %s" % exc)
                 await self._sleep_backoff()
                 continue
 
@@ -147,7 +150,7 @@ class HubClient:
             try:
                 self._on_open()
             except Exception as exc:
-                self._log("on_open callback failed: %s" % exc)
+                self._error("on_open callback failed: %s" % exc)
 
             watchdog_task = asyncio.create_task(self._watchdog(self._ws))
             try:
@@ -161,7 +164,7 @@ class HubClient:
             try:
                 self._on_close()
             except Exception as exc:
-                self._log("on_close callback failed: %s" % exc)
+                self._error("on_close callback failed: %s" % exc)
 
             if self._closing:
                 break
@@ -217,7 +220,7 @@ class HubClient:
         try:
             frame = json.loads(raw)
         except ValueError:
-            self._log("Invalid JSON from hub: %s" % raw)
+            self._error("Invalid JSON from hub: %s" % raw)
             return
         event = frame.get("event")
         if event == "response":
@@ -232,7 +235,7 @@ class HubClient:
         if event == "registered":
             self._log("Registered as %s" % frame.get("full_name"))
         elif event == "error":
-            self._log("Hub error: %s" % frame.get("message"))
+            self._error("Hub error: %s" % frame.get("message"))
         if self._on_frame:
             self._on_frame(frame)
 

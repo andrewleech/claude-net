@@ -522,6 +522,11 @@ class MCPServer:
             if type(raw).__name__ == "generator":
                 raw = await raw
         except Exception as exc:
+            # Surface to the client as an isError result, but ALSO log
+            # server-side: a swallowed handler exception (notably a
+            # MemoryError from a large payload) would otherwise leave no
+            # trace of hitting a limit. peer.log writes to stderr.
+            self.peer.log("tool %r raised: %s" % (name, exc))
             return self._finalize_result(name, error_result(str(exc)))
 
         return self._finalize_result(name, tool_result(raw))

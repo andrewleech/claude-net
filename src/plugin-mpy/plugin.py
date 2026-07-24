@@ -62,18 +62,41 @@ CHANNEL_SELF_TEST_DELAY_S = 2.0
 CHANNEL_SELF_TEST_TIMEOUT_S = 60.0
 RENAME_WATCH_INTERVAL_S = 5.0
 
-# Verbose tracing toggle. `CLAUDE_NET_DEBUG=1` turns on the `debug()`
-# breadcrumbs (frame-level and lifecycle detail); everything else logs at
-# the always-on info level. All logging goes to stderr (stdout is the MCP
-# JSON-RPC channel — writing anything else there corrupts it), which Claude
-# Code captures under ~/.cache/claude-cli-nodejs/<cwd>/mcp-logs-<server>/.
-_DEBUG = os.getenv("CLAUDE_NET_DEBUG") == "1"
+# Log level: error < info < debug. `CLAUDE_NET_LOG_LEVEL` selects the
+# threshold (default "info"); `CLAUDE_NET_DEBUG=1` forces "debug" (kept for
+# back-compat). At "error" ONLY errors are emitted — including any
+# MemoryError — so the log stays quiet enough that Claude Code's per-server
+# capture file (one growing file under
+# ~/.cache/claude-cli-nodejs/<cwd>/mcp-logs-<server>/) does not need
+# rotation. All output goes to stderr (stdout is the MCP JSON-RPC channel;
+# writing anything else there corrupts it).
+_LEVELS = {"error": 0, "info": 1, "debug": 2}
+if os.getenv("CLAUDE_NET_DEBUG") == "1":
+    _LEVEL = 2
+else:
+    _LEVEL = _LEVELS.get(os.getenv("CLAUDE_NET_LOG_LEVEL", "info"), 1)
+_DEBUG = _LEVEL >= 2
+
+
+def _emit(level, msg):
+    """Write `msg` to stderr iff its level is within the configured
+    threshold. level: 0=error, 1=info, 2=debug. Errors (0) always emit."""
+    if level <= _LEVEL:
+        prefix = "ERROR " if level == 0 else ("DEBUG " if level == 2 else "")
+        sys.stderr.write("[claude-net] %s%s\n" % (prefix, msg))
 
 
 def _stderr(msg):
-    """Write a prefixed line straight to stderr — usable before the MCP
-    server/peer exists (e.g. the startup breadcrumb in `main`)."""
-    sys.stderr.write("[claude-net] %s\n" % msg)
+    """Info-level stderr line — usable before the MCP server/peer exists
+    (startup breadcrumb, heap line)."""
+    _emit(1, msg)
+
+
+def _err(msg):
+    """Error-level stderr line — ALWAYS emitted, even at
+    CLAUDE_NET_LOG_LEVEL=error. Use for failures and any MemoryError so we
+    always know if the runtime hit its limits."""
+    _emit(0, msg)
 
 
 # Target total GC heap in MiB. The unix port's default is ~2 MiB
@@ -239,12 +262,16 @@ class ClaudeNetApp:
         self._register_hooks()
 
     def log(self, msg):
-        self.server.peer.log(msg)
+        """Info-level plugin log (suppressed at CLAUDE_NET_LOG_LEVEL=error)."""
+        _emit(1, msg)
+
+    def error(self, msg):
+        """Error-level plugin log — always emitted, at any log level."""
+        _emit(0, msg)
 
     def debug(self, msg):
-        """Verbose breadcrumb — emitted only when CLAUDE_NET_DEBUG=1."""
-        if _DEBUG:
-            self.server.peer.log("DEBUG " + msg)
+        """Verbose breadcrumb — emitted only at debug level."""
+        _emit(2, msg)
 
     # ── Tool / prompt registration ──────────────────────────────────
 
@@ -609,7 +636,7 @@ class ClaudeNetApp:
                 },
             )
         except Exception as exc:
-            self.log("Failed to emit system notification: %s" % exc)
+            self.error("Failed to emit system notification: %s" % exc)
 
     def _schedule_channel_self_test(self, registered_name):
         if self.channel_self_test_inflight:
@@ -650,7 +677,7 @@ class ClaudeNetApp:
                 {"action": "update_channel_capable", "channel_capable": True}
             )
         except HubError as exc:
-            self.log("update_channel_capable failed: %s" % exc)
+            self.error("update_channel_capable failed: %s" % exc)
 
     # ── Identity resolution / transcript discovery ──────────────────
 
@@ -735,7 +762,7 @@ class ClaudeNetApp:
                 try:
                     await self._auto_register_with_retry(next_name)
                 except Exception as exc:
-                    self.log("rename re-register failed: %s" % exc)
+                    self.error("rename re-register failed: %s" % exc)
 
         self.rename_watch_task = asyncio.create_task(_watch())
 
@@ -821,7 +848,7 @@ class ClaudeNetApp:
                 is_collision = "already registered" in message.lower()
                 if not is_collision or attempt == MAX_AUTO_REGISTER_ATTEMPTS - 1:
                     self.registered_name = ""
-                    self.log(
+                    self.error(
                         "Auto-registration failed after %d attempt(s): %s"
                         % (attempt + 1, message)
                     )
@@ -869,7 +896,7 @@ class ClaudeNetApp:
                 {"content": frame.get("content"), "meta": meta},
             )
         except Exception as exc:
-            self.log("Failed to emit notification: %s" % exc)
+            self.error("Failed to emit notification: %s" % exc)
 
     def on_ws_close(self):
         if self.registered_name:
@@ -883,7 +910,22 @@ class ClaudeNetApp:
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
+    def _loop_exception_handler(self, loop, context):
+        """Catch exceptions that escape background tasks (hub loop, channel
+        self-test, rename watch) so a MemoryError there is logged rather than
+        silently killing the task. Always at error level."""
+        exc = context.get("exception")
+        if isinstance(exc, MemoryError):
+            self.error("out of memory in a background task: %s" % exc)
+        elif exc is not None:
+            self.error("unhandled task exception: %s" % exc)
+        else:
+            self.error("event loop error: %s" % context.get("message"))
+
     async def start(self):
+        asyncio.get_event_loop().set_exception_handler(
+            self._loop_exception_handler
+        )
         if self.hub_env_url:
             self.hub = HubClient(
                 self.hub_env_url,
@@ -891,6 +933,7 @@ class ClaudeNetApp:
                 on_frame=self.on_hub_frame,
                 on_close=self.on_ws_close,
                 log=self.log,
+                error=self.error,
             )
             self.stored_name = self.resolve_initial_name()
             self.debug("initial name resolved: %s" % self.stored_name)
@@ -947,8 +990,15 @@ def run():
         _stderr("exited (clean)")
     except KeyboardInterrupt:
         _stderr("shutdown (SIGINT)")
+    except MemoryError as exc:
+        # Always logged (error level): the whole point is to know when the
+        # runtime hits its heap limit. Suggests the remedy.
+        _err(
+            "fatal: out of memory (%s) — raise CLAUDE_NET_HEAP_MB if this "
+            "recurs" % exc
+        )
     except Exception as exc:
-        _stderr("fatal: %s" % exc)
+        _err("fatal: %s" % exc)
 
 
 if __name__ == "__main__":

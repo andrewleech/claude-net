@@ -76,6 +76,37 @@ def _stderr(msg):
     sys.stderr.write("[claude-net] %s\n" % msg)
 
 
+# Target total GC heap in MiB. The unix port's default is ~2 MiB
+# (`heap_size = 1024*1024*(sizeof(mp_uint_t)/4)` in ports/unix/main.c),
+# which is tight for reading Claude Code transcripts and large hub_events /
+# message payloads — a single MB-scale allocation can fail against it (the
+# startup OOM behind the two-attempt reconnect). CC runs the binary with no
+# args so `-X heapsize=` is unavailable; grow the heap at startup instead.
+HEAP_TARGET_MB = 8
+
+
+def _ensure_heap_headroom():
+    """Grow the GC heap toward `CLAUDE_NET_HEAP_MB` (default HEAP_TARGET_MB)
+    via gc.add_heap() (picolet mbm branch pr/gc-add-heap). Best-effort: on
+    failure the base ~2 MiB heap still works. Anonymous pages are committed
+    lazily, so unused headroom costs little RSS until actually touched."""
+    try:
+        import gc
+
+        target = int(os.getenv("CLAUDE_NET_HEAP_MB", str(HEAP_TARGET_MB)))
+        target_bytes = target * 1024 * 1024
+        current = gc.mem_free() + gc.mem_alloc()
+        add = target_bytes - current
+        if add > 0:
+            gc.add_heap(add)
+        _stderr(
+            "heap: %.1f MiB (added %.1f MiB toward %d MiB target)"
+            % ((gc.mem_free() + gc.mem_alloc()) / 1048576, max(0, add) / 1048576, target)
+        )
+    except Exception as exc:
+        _stderr("heap headroom add failed (using base heap): %s" % exc)
+
+
 def _js_truthy(value):
     """JS truthiness for a JSON-decoded value: a JS object or array is
     truthy regardless of whether it's empty — only `null`/`false`/`0`/
@@ -910,6 +941,7 @@ def run():
             _DEBUG,
         )
     )
+    _ensure_heap_headroom()
     try:
         asyncio.run(main())
         _stderr("exited (clean)")

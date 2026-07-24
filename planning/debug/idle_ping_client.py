@@ -1,4 +1,4 @@
-import sys; sys.path.insert(0,"/home/anl/claude-net-mpy/src/plugin-mpy/lib")
+import sys; sys.path.insert(0,"/home/corona/claude-net-mpy/src/plugin-mpy/lib")
 import asyncio, time, mpyws
 URL=sys.argv[1]; MODE=sys.argv[2]
 async def main():

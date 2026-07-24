@@ -128,7 +128,7 @@ way; doc clarity only).
 - **`host-parity` job disabled (`if: false`).** `tests/parity_harness.py`
   and `tests/ceremony_tests.py` invoke the interpreter in source-tree form
   (`[MPY_BINARY, "plugin.py"]`) and hardcode
-  `NODE_PATH=/home/anl/claude-net/node_modules` (the sibling main-worktree
+  `NODE_PATH=/home/corona/claude-net/node_modules` (the sibling main-worktree
   bun deps). Both are host-path-coupled and don't hold on a generic runner.
   Retargeting them to drive the packaged single-file binary is a P7
   test-infra change, not packaging; the job is gated pending a self-hosted

@@ -1,10 +1,10 @@
-import sys; sys.path.insert(0,"/home/anl/claude-net-mpy/src/plugin-mpy/lib")
-sys.path.insert(0,"/home/anl/claude-net-mpy/src/plugin-mpy")
+import sys; sys.path.insert(0,"/home/corona/claude-net-mpy/src/plugin-mpy/lib")
+sys.path.insert(0,"/home/corona/claude-net-mpy/src/plugin-mpy")
 import asyncio, time, json, mpyws
 from mpyjsonrpc import JsonRpcPeer
 from _stdin_shim import StdinLineShim
 async def main():
-    with open("/home/anl/claude-net-mpy/src/plugin-mpy/isrg_root_x1.der","rb") as f: der=f.read()
+    with open("/home/corona/claude-net-mpy/src/plugin-mpy/isrg_root_x1.der","rb") as f: der=f.read()
     ws=await mpyws.connect("wss://telie.story-kettle.ts.net:4815/ws", cadata=der, server_hostname="telie.story-kettle.ts.net")
     await ws.send(json.dumps({"action":"register","name":"idle-probe2:anl@LAP-AU-PF65PM2K","channel_capable":False,"plugin_version":"0.2.0","cc_pid":99998,"cwd":"/tmp"}))
     async def hubrecv():

@@ -9,7 +9,7 @@ state (verified facts...)" section; each fact below was re-checked against
 source or the live binary on 2026-07-23 unless marked "spike-only" (measured
 during the spike and not independently re-verified for this write-up).
 
-## Bun plugin facts (`/home/anl/claude-net/src/plugin/plugin.ts`, 1607 lines)
+## Bun plugin facts (`/home/corona/claude-net/src/plugin/plugin.ts`, 1607 lines)
 
 - MCP stdio peer over newline-delimited JSON-RPC 2.0; handles `initialize`
   (+ `oninitialized` reading the client's `experimental["claude/channel"]`

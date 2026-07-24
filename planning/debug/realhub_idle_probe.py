@@ -1,8 +1,8 @@
-import sys; sys.path.insert(0,"/home/anl/claude-net-mpy/src/plugin-mpy/lib")
+import sys; sys.path.insert(0,"/home/corona/claude-net-mpy/src/plugin-mpy/lib")
 import asyncio, time, json, mpyws
 URL="wss://telie.story-kettle.ts.net:4815/ws"
 async def main():
-    with open("/home/anl/claude-net-mpy/src/plugin-mpy/isrg_root_x1.der","rb") as f: der=f.read()
+    with open("/home/corona/claude-net-mpy/src/plugin-mpy/isrg_root_x1.der","rb") as f: der=f.read()
     ws=await mpyws.connect(URL, cadata=der, server_hostname="telie.story-kettle.ts.net")
     # register as a throwaway probe so the hub treats us as a live agent + pings us
     await ws.send(json.dumps({"action":"register","name":"idle-probe:anl@LAP-AU-PF65PM2K",

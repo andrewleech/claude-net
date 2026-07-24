@@ -2002,8 +2002,8 @@ export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
 /**
  * Encode a cwd to the directory name Claude Code uses under
  * ~/.claude/projects/. Replaces every non-alphanumeric byte with '-'.
- * Verified against real on-disk layouts (e.g. /home/anl/claude-net →
- * -home-anl-claude-net, /home/anl/claude_marketplace/.claude/worktrees
+ * Verified against real on-disk layouts (e.g. /home/corona/claude-net →
+ * -home-anl-claude-net, /home/corona/claude_marketplace/.claude/worktrees
  * → -home-anl-claude-marketplace--claude-worktrees).
  */
 export function encodeProjectDirName(cwd: string): string {

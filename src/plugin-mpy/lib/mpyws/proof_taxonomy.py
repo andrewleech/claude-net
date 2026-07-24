@@ -27,7 +27,7 @@ import tempfile
 
 MPY_BIN = (
     sys.argv[1] if len(sys.argv) > 1 else
-    "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
+    "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
 )
 LIB_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 

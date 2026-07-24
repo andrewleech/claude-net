@@ -37,9 +37,9 @@ afterAll(() => {
 describe("extractPaths", () => {
   test("pulls absolute paths out of prose", () => {
     const got = extractPaths(
-      "I saved it to /home/anl/tokens/assets/slide8.png for you.",
+      "I saved it to /home/corona/tokens/assets/slide8.png for you.",
     );
-    expect(got).toContain("/home/anl/tokens/assets/slide8.png");
+    expect(got).toContain("/home/corona/tokens/assets/slide8.png");
   });
 
   test("trims trailing punctuation", () => {

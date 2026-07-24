@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEMO_SERVER = os.path.join(HERE, "demo_server.py")
 MPY_BIN = os.environ.get(
     "MPY_BIN",
-    "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
+    "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
 )
 
 pytestmark = pytest.mark.skipif(

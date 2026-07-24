@@ -8,7 +8,7 @@ execution plan. It is updated in place as phases complete, never forked.
 ## Goal
 
 Replace the bun/TypeScript claude-net MCP plugin
-(`/home/anl/claude-net/src/plugin/plugin.ts`, spawned per Claude Code session,
+(`/home/corona/claude-net/src/plugin/plugin.ts`, spawned per Claude Code session,
 ~90 MB RSS / ~8 threads each) with a functionally-equivalent plugin running on
 a picolet MicroPython binary (~3 MB RSS, single-threaded, <1 MB on disk).
 Deliverables:
@@ -38,7 +38,7 @@ A reusable HTTP/ASGI micro-framework is explicitly out of scope.
 Each fact re-checked against source or the live binary on 2026-07-23 unless
 marked "spike" (spike results were independently confirmed during the spike).
 
-**The bun plugin** (`/home/anl/claude-net/src/plugin/plugin.ts`, 1607 lines):
+**The bun plugin** (`/home/corona/claude-net/src/plugin/plugin.ts`, 1607 lines):
 
 - MCP stdio peer: newline-delimited JSON-RPC 2.0; handles initialize (+
   `oninitialized` reads client `experimental["claude/channel"]` capability),

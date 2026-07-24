@@ -113,7 +113,7 @@ async def run_all_tests():
     # Compute final flags
     parity_clean = parity_result.get("parityClean", False) if parity_result else False
     all_ceremony_pass = all(r.get("pass", False) for r in ceremony_results)
-    ran_on_binary = True  # We ran on /home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp
+    ran_on_binary = True  # We ran on /home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp
     bun_ran = True  # Bun successfully ran in parity harness
 
     # Prepare final output

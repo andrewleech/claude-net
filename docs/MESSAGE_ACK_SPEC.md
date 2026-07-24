@@ -3,7 +3,7 @@
 **Feature:** End-to-end acknowledgement and recovery for claude-net messages
 **Source brainstorm:** `docs/MESSAGE_ACK_BRAINSTORM.md`
 **Status:** Ready for implementation planning
-**Target codebase:** `/home/anl/claude-net` (TypeScript/Bun, existing plugin + hub)
+**Target codebase:** `/home/corona/claude-net` (TypeScript/Bun, existing plugin + hub)
 **Baseline:** `feature/message-ack` branched from `squash-plan` — the squashed PR-#1 (mirror-session / web TUI) is present in-tree. This spec assumes post-PR-#1 shapes: `Registry.register()` returns `renamedFrom`; dashboard is no longer a virtual agent in `registry.list()`; plugin auto-registers with `-N` suffix retry on collision. See FR2, FR7, FR9, FR12 for interaction points.
 
 ## Overview

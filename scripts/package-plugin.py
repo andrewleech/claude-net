@@ -46,7 +46,7 @@ PLUGIN_SRC = REPO_ROOT / "src" / "plugin-mpy"
 PACKAGE_JSON = REPO_ROOT / "package.json"
 
 DEFAULT_RUNTIME = Path(
-    "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
+    "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
 )
 DEFAULT_OUTPUT = REPO_ROOT / "build" / "claude-net-plugin-linux-x64"
 

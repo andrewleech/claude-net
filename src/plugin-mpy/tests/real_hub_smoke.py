@@ -46,7 +46,7 @@ async def test_real_hub():
 
     try:
         mpy_plugin = Path(__file__).parent.parent / "plugin.py"
-        mpy_binary = "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
+        mpy_binary = "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
 
         # Create a unique test name with timestamp
         test_name = f"p7-test-{int(time.time())}"

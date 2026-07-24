@@ -32,7 +32,7 @@ HERE = Path(__file__).parent.absolute()
 DEMO_SERVER = HERE / "demo_server.py"
 MPY_BIN = os.environ.get(
     "MPY_BIN",
-    "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
+    "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
 )
 
 
@@ -349,7 +349,7 @@ def test_tools_call_handler_exception_is_isError():
         f.write(
             """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 import asyncio
 from mpyfastmcp import MCPServer
 
@@ -700,7 +700,7 @@ def test_parity_with_bun_plugin_hubless():
         + "\n"
     )
     proc = subprocess.Popen(
-        ["bun", "run", "/home/anl/claude-net/src/plugin/plugin.ts"],
+        ["bun", "run", "/home/corona/claude-net/src/plugin/plugin.ts"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

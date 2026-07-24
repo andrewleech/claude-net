@@ -20,7 +20,7 @@ import time
 LIB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MPY_BIN = os.environ.get(
     "MPY_BIN",
-    "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
+    "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-cli",
 )
 
 # Server script to run inside MicroPython

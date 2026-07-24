@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PKG=/home/anl/picolet/packages/picolet-runtime
+PKG=/home/corona/picolet/packages/picolet-runtime
 SUB=$PKG/micropython
 UNIX=$SUB/ports/unix
 VARIANT_DIR=$PKG/variants/mcp/unix

@@ -60,7 +60,7 @@ class PluginRunner:
             env["CLAUDE_NET_HUB"] = self.hub_url
         else:
             env.pop("CLAUDE_NET_HUB", None)
-        env["NODE_PATH"] = "/home/anl/claude-net/node_modules"
+        env["NODE_PATH"] = "/home/corona/claude-net/node_modules"
         env.update(self.env_extra)
 
         cmd = []
@@ -482,7 +482,7 @@ async def _wait_for_registered(runner, timeout: float = 6.0):
     return None
 
 
-MPY_BINARY = "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
+MPY_BINARY = "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
 
 # Every scenario below wants a clean, reproducible starting environment
 # regardless of what's ambient in the driver's own shell — in particular
@@ -726,7 +726,7 @@ async def run_parity_test():
         # Create runner instances
         bun_plugin = Path(__file__).parent.parent.parent / "plugin" / "plugin.ts"
         mpy_plugin = Path(__file__).parent.parent / "plugin.py"
-        mpy_binary = "/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
+        mpy_binary = "/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp"
 
         bun = PluginRunner("BUN", "bun", str(bun_plugin), hub_url, env_extra=DETERMINISTIC_ENV)
         mpy = PluginRunner("MPY", mpy_binary, str(mpy_plugin), hub_url, env_extra=DETERMINISTIC_ENV)

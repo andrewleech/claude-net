@@ -34,7 +34,7 @@ import websockets.server
 
 # Paths (absolute)
 HERE = Path(__file__).parent
-MP_BIN = Path("/home/anl/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp")
+MP_BIN = Path("/home/corona/picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp")
 CERT_PEM = HERE / "localhost_cert.pem"
 KEY_PEM = HERE / "localhost_key.pem"
 LOCALHOST_CERT_DER = HERE / "localhost_cert.der"
@@ -141,7 +141,7 @@ def test_masking_correctness():
     """Verify client-side frame masking."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws._frame import encode_frame
 
 # Test masking: encode a simple text frame
@@ -176,7 +176,7 @@ def test_length_forms():
     """Verify all three length encoding forms."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws._frame import encode_frame
 import struct
 
@@ -207,7 +207,7 @@ def test_rsv_bits_rejected():
     """Verify RSV bits are validated."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws._frame import validate_header
 from mpyws._errors import WSProtocolError
 
@@ -228,7 +228,7 @@ def test_invalid_opcode_rejected():
     """Verify invalid opcodes are rejected."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws._frame import validate_header
 from mpyws._errors import WSProtocolError
 
@@ -261,7 +261,7 @@ def test_pong_send_failure_raises_typed():
     """
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 import asyncio
 from mpyws._client import WSClient
 from mpyws._frame import encode_frame, OP_PING
@@ -314,7 +314,7 @@ def test_send_failure_raises_typed():
     echo, in the public `send()` path)."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 import asyncio
 from mpyws._client import WSClient
 from mpyws._errors import WSConnectionAborted
@@ -358,7 +358,7 @@ def test_invalid_close_code_rejected():
     accepted as clean closes and echoed back verbatim)."""
     script = """
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws._client import _parse_close_payload
 from mpyws._errors import WSProtocolError
 import struct
@@ -394,7 +394,7 @@ def test_handshake_and_echo():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 
 async def main():
@@ -437,7 +437,7 @@ def test_ping_pong_transparent():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 
 async def main():
@@ -479,7 +479,7 @@ def test_clean_close_handshake():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 from mpyws._errors import WSClosedOK
 
@@ -520,7 +520,7 @@ def test_server_initiated_close():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 from mpyws._errors import WSClosedOK
 
@@ -570,7 +570,7 @@ def test_binary_frames():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 
 async def main():
@@ -613,12 +613,12 @@ def test_wss_with_cert_verification():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 
 async def main():
     try:
-        with open('/home/anl/claude-net-mpy/src/plugin-mpy/lib/mpyws/localhost_cert.der', 'rb') as f:
+        with open('/home/corona/claude-net-mpy/src/plugin-mpy/lib/mpyws/localhost_cert.der', 'rb') as f:
             cadata = f.read()
 
         ws = await connect("wss://127.0.0.1:{port}/", cadata=cadata, server_hostname="localhost")
@@ -659,7 +659,7 @@ def test_idle_rss():
         script = f"""
 import asyncio
 import sys
-sys.path.insert(0, '/home/anl/claude-net-mpy/src/plugin-mpy/lib')
+sys.path.insert(0, '/home/corona/claude-net-mpy/src/plugin-mpy/lib')
 from mpyws import connect
 
 async def main():

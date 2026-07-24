@@ -124,9 +124,9 @@ jobs:
     # plugin-behaviour gates; they are NOT re-authored here. Both hardcode
     # two host-specific absolute paths that only resolve on Andrew's
     # fleet:
-    #   - MPY_BINARY = /home/anl/picolet/packages/picolet-runtime/build/
+    #   - MPY_BINARY = /home/corona/picolet/packages/picolet-runtime/build/
     #     picolet-runtime-linux-x64-mcp (parity_harness.py)
-    #   - NODE_PATH = /home/anl/claude-net/node_modules, the bun
+    #   - NODE_PATH = /home/corona/claude-net/node_modules, the bun
     #     dependency tree of this worktree's *sibling* main-repo checkout
     #     (parity_harness.py's `PluginRunner.start`)
     # A generic GitHub-hosted runner has neither. This job therefore only

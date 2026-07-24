@@ -155,38 +155,41 @@ def find_active_session_for_cc_pid(cwd, home=None):
     return session_id, os.path.join(project_dir, best_name)
 
 
-def read_custom_title_from_transcript(transcript_path):
+def read_custom_title_from_transcript(transcript_path, start_offset=0):
     """Latest `{"type":"custom-title","customTitle":"..."}` line in a
-    Claude Code session JSONL, written by the `/rename` slash command.
+    Claude Code session JSONL, written by the `/rename` slash command,
+    scanning only the byte range `[start_offset, EOF]`.
+
+    `start_offset` MUST be used to bound the scan — a full scan is
+    synchronous, blocking I/O that freezes the asyncio event loop for its
+    whole duration, and live transcripts reach 50-120+ MB (a full scan
+    there takes minutes, starving the hub keepalive → the watchdog fires
+    and the connection reconnect-loops, and it burns CPU continuously).
+    Callers pass either the previously-seen file size (the rename watch —
+    delta only) or a bounded tail offset (startup). Reading in binary and
+    testing membership on `bytes` avoids decoding non-matching (possibly
+    huge) lines; only small `custom-title` lines are parsed.
 
     Returns `(title, ts)` or `None` when the file is missing, unreadable,
-    or has never been renamed. `ts` is the file's mtime in seconds — the
-    JSONL line itself carries no timestamp, but mtime is a good-enough
-    proxy for "when was this rename written" because `/rename` is the
-    most recent kind of write that touches the file when no other
-    activity is happening.
+    or has no `custom-title` in the scanned range. `ts` is the file mtime.
     """
     try:
         mtime = os.stat(transcript_path)[8]
     except OSError:
         return None
-    # Stream the transcript line by line, keeping the LAST matching
-    # custom-title. Do NOT slurp the whole file: a live Claude Code
-    # transcript grows to many MB, and reading it into one string needs a
-    # single allocation of that size — which fails the MicroPython heap at
-    # startup (observed as "memory allocation failed" right after a
-    # reconnect tears down the previous process). Peak memory here is one
-    # line, not the whole (and ever-growing) file, and the common
-    # never-renamed case no longer allocates the file at all.
+    if start_offset < 0:
+        start_offset = 0
     latest = None
     try:
-        with open(transcript_path, "r") as f:
+        with open(transcript_path, "rb") as f:
+            if start_offset:
+                f.seek(start_offset)
             for line in f:
-                if '"custom-title"' not in line:
+                if b'"custom-title"' not in line:
                     continue
                 try:
                     obj = json.loads(line)
-                except ValueError:
+                except (ValueError, UnicodeError):
                     continue
                 if (
                     isinstance(obj, dict)

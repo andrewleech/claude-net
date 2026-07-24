@@ -61,6 +61,12 @@ MAX_AUTO_REGISTER_ATTEMPTS = 9  # tries base, base-2, ..., base-9
 CHANNEL_SELF_TEST_DELAY_S = 2.0
 CHANNEL_SELF_TEST_TIMEOUT_S = 60.0
 RENAME_WATCH_INTERVAL_S = 5.0
+# Startup only scans the last this-many bytes of the transcript for a
+# custom-title. A live transcript reaches 50-120+ MB; a full synchronous
+# scan blocks the event loop for minutes (starves the hub keepalive, blows
+# the MCP init deadline). A /rename is near the end, so the tail suffices;
+# older names are covered by the persisted-name file.
+TRANSCRIPT_STARTUP_TAIL_BYTES = 512 * 1024
 
 # Log level: error < info < debug. `CLAUDE_NET_LOG_LEVEL` selects the
 # threshold (default "info"); `CLAUDE_NET_DEBUG=1` forces "debug" (kept for
@@ -691,7 +697,18 @@ class ClaudeNetApp:
         persisted = identity.read_persisted_agent_name(
             self.discovered_sid, self.discovered_cwd
         )
-        custom_title = identity.read_custom_title_from_transcript(self.transcript_path)
+        try:
+            _tsize = os.stat(self.transcript_path)[6]
+        except OSError:
+            _tsize = 0
+        _toff = (
+            _tsize - TRANSCRIPT_STARTUP_TAIL_BYTES
+            if _tsize > TRANSCRIPT_STARTUP_TAIL_BYTES
+            else 0
+        )
+        custom_title = identity.read_custom_title_from_transcript(
+            self.transcript_path, start_offset=_toff
+        )
         if custom_title:
             self.last_custom_title_seen = custom_title[0]
 
@@ -737,8 +754,16 @@ class ClaudeNetApp:
                     continue
                 if size == last_size:
                     continue
+                # Scan only the newly-appended bytes since the last check — a
+                # /rename appends its custom-title line there. Passing the old
+                # size as start_offset keeps this O(delta), not O(filesize):
+                # a full scan of a 50-120 MB transcript blocks the event loop
+                # for minutes, starving the hub keepalive → watchdog reconnect
+                # loop + steady CPU burn.
+                latest = identity.read_custom_title_from_transcript(
+                    self.transcript_path, start_offset=last_size
+                )
                 last_size = size
-                latest = identity.read_custom_title_from_transcript(self.transcript_path)
                 if not latest:
                     continue
                 title, _ts = latest

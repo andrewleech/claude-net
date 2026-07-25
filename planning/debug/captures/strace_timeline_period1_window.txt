@@ -1,0 +1,29 @@
+# period=1 steady-state idle: 2-call cycle repeating ~every 1.2ms.
+# fd=3 = TLS socket (SSL ioctl -> underlying poll(fd,0)); fd=0 = stdin (1ms-capped outer poll).
+# This is the spin: neither poll can block > IOCTL_CALL_PERIOD_MS because the TLS socket is non-fd.
+# Full capture: strace_timeline_period1_full.txt
+
+641489 11:31:10.506269 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001095>
+641489 11:31:10.507489 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000035>
+641489 11:31:10.507672 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001125>
+641489 11:31:10.510275 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000026>
+641489 11:31:10.510422 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001090>
+641489 11:31:10.511632 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000028>
+641489 11:31:10.511786 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001087>
+641489 11:31:10.512993 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000036>
+641489 11:31:10.513155 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001108>
+641489 11:31:10.514416 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000027>
+641489 11:31:10.514570 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001087>
+641489 11:31:10.515762 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000023>
+641489 11:31:10.515881 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001081>
+641489 11:31:10.517055 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000023>
+641489 11:31:10.517176 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001080>
+641489 11:31:10.518351 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000037>
+641489 11:31:10.518498 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001076>
+641489 11:31:10.519678 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000018>
+641489 11:31:10.519779 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001153>
+641489 11:31:10.521025 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000019>
+641489 11:31:10.521131 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001079>
+641489 11:31:10.522298 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000014>
+641489 11:31:10.522392 poll([{fd=0, events=POLLIN}], 1, 1) = 0 (Timeout) <0.001124>
+641489 11:31:10.523671 poll([{fd=3, events=POLLIN}], 1, 0) = 0 (Timeout) <0.000025>

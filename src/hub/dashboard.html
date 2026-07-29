@@ -6660,6 +6660,18 @@
         else renderUnknownToolResult(payload, el, { images: images });
         appendImageCard(el, images);
       } else if (kind === 'notification') {
+        // A Notification hook fires only at the top level — mirror.ts's
+        // nextActivityState() treats it as an unconditional return to
+        // awaiting_input regardless of subagent state. Mirror that here:
+        // it's the backstop against a dangling activeSubagents entry
+        // whose tool_call never got a matching tool_result in this
+        // session's own stream (e.g. a backgrounded fork dispatch, or a
+        // malformed/skipped tool_use the harness logged but never
+        // executed) — without this, inSubagent() would stay true for
+        // the rest of the session and every later reply would render
+        // as collapsed subagent noise instead of real conversation.
+        activeSubagents = Object.create(null);
+        postSubagentCover = false;
         var notifText = payload.text || '';
         // Suppress entirely when an active AskUserQuestion card is
         // already in the transcript — the augmented notification is

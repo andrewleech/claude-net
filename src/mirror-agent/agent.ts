@@ -121,6 +121,13 @@ const DEFAULT_IDLE_SHUTDOWN_MS = 0;
  * session marked "ended".
  */
 const DEFAULT_SESSION_IDLE_MS = 0;
+/**
+ * How long a ccPid-less session (pre-CC_PID hook wrapper) can sit
+ * quiet before the watchdog bothers checking pane liveness. Mirrors
+ * the hub's DEFAULT_ORPHAN_CLOSE_MS — this is the client-side half of
+ * the same backstop for "CC exits, daemon lives".
+ */
+const NULL_CCPID_ORPHAN_MS = 30 * 60 * 1000;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 // Cap the per-session dedup set. Dedup only needs recent uuids (hook vs
@@ -470,7 +477,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // process is gone. Guard with a 5s grace window after lastEventAt
     // so we don't race a hook arriving on a freshly-recorded ccPid.
     for (const s of sessions.values()) {
-      if (s.closed || s.ccPid === null) continue;
+      if (s.closed) continue;
+      if (s.ccPid === null) {
+        // Pre-CC_PID-rollout client: no pid to signal, so fall back to
+        // a pane-liveness check once the session has gone quiet for a
+        // long time. Fire-and-forget — the hub-side sweep is the
+        // ultimate backstop if this misses.
+        if (now - s.lastEventAt > NULL_CCPID_ORPHAN_MS) {
+          void checkNullCcPidLiveness(s);
+        }
+        continue;
+      }
       if (now - s.lastEventAt < 5_000) continue;
       try {
         process.kill(s.ccPid, 0);
@@ -1976,6 +1993,24 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     sessions.delete(session.sid);
   }
 
+  /**
+   * Liveness fallback for sessions with no recorded ccPid (pre-CC_PID
+   * hook wrapper). Without a pid to signal, the best available proxy
+   * is whether the session's tmux pane still exists — `capturePane`
+   * fails once the pane is gone (killed shell, closed terminal). When
+   * there's no pane either, the caller's own staleness check (long
+   * quiet period) is the only signal available, so close on that alone.
+   */
+  async function checkNullCcPidLiveness(session: SessionState): Promise<void> {
+    if (session.closed) return;
+    if (session.tmuxPane) {
+      const cap = await injector.capturePane(session.tmuxPane, 1);
+      if (!cap.ok) closeSession(session, "orphan");
+      return;
+    }
+    closeSession(session, "orphan");
+  }
+
   async function stop(): Promise<void> {
     clearInterval(idleTimer);
     hostChannel.stop();
@@ -2030,14 +2065,31 @@ function toWsUrl(hubUrl: string, sid: string, host: string): string {
  *      inject CC_PID (pre-rollout clients), or for sessions whose
  *      ccPid was never recorded.
  *
+ * The pane signal alone is weaker than ccPid: two distinct, both-live
+ * processes could in principle report the same pane (a launcher bug,
+ * a copy-pasted TMUX_PANE). So a pane-only match only counts as
+ * "replaced" when the old session's ccPid is unknown or confirmed
+ * dead — a live old process must never be evicted underneath itself.
+ *
  * Exported pure for unit-testability — the real handler iterates the
- * returned sids and calls closeSession on each.
+ * returned sids and calls closeSession on each. `isPidAlive` defaults
+ * to a real `process.kill(pid, 0)` probe; tests inject a fake for
+ * determinism.
  */
 export interface ClearReplaceCandidate {
   sid: string;
   ccPid: number | null;
   tmuxPane: string | null;
   closed: boolean;
+}
+
+function defaultIsPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 export function findReplacedByClear(
@@ -2047,6 +2099,7 @@ export function findReplacedByClear(
   incomingSid: string,
   incomingCcPid: number | undefined,
   incomingTmuxPane: string | null | undefined,
+  isPidAlive: (pid: number) => boolean = defaultIsPidAlive,
 ): string[] {
   const iter = sessions instanceof Map ? sessions.values() : sessions;
   const victims: string[] = [];
@@ -2056,8 +2109,12 @@ export function findReplacedByClear(
     if (s.closed) continue;
     if (s.sid === incomingSid) continue;
     const matchByPid = ccPidUsable && s.ccPid === incomingCcPid;
+    if (matchByPid) {
+      victims.push(s.sid);
+      continue;
+    }
     const matchByPane = !!incomingTmuxPane && s.tmuxPane === incomingTmuxPane;
-    if (matchByPid || matchByPane) {
+    if (matchByPane && (s.ccPid === null || !isPidAlive(s.ccPid))) {
       victims.push(s.sid);
     }
   }
@@ -2248,6 +2305,8 @@ export function findActiveSessionForCcPid(
   } catch {
     return null;
   }
+  const held = findHeldTranscript(ccPid, projectDir, procRoot);
+  if (held) return held;
   let best: { name: string; mtimeMs: number } | null = null;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
@@ -2270,6 +2329,42 @@ export function findActiveSessionForCcPid(
     sessionId,
     transcriptPath: path.join(projectDir, best.name),
   };
+}
+
+/**
+ * Scan `/proc/<ccPid>/fd` for an open file descriptor pointing at a
+ * `<projectDir>/<sid>.jsonl` transcript. Linux-only (procRoot is
+ * unreadable elsewhere, so this is a natural no-op on macOS/Windows).
+ * Returns null on any lookup failure (process gone, no permission, no
+ * matching fd) so the caller falls back to the mtime scan.
+ */
+function findHeldTranscript(
+  ccPid: number,
+  projectDir: string,
+  procRoot: string,
+): DiscoveredSession | null {
+  if (!Number.isFinite(ccPid) || ccPid <= 0) return null;
+  const fdDir = path.join(procRoot, String(ccPid), "fd");
+  let fdNames: string[];
+  try {
+    fdNames = fs.readdirSync(fdDir);
+  } catch {
+    return null;
+  }
+  const prefix = `${projectDir}${path.sep}`;
+  for (const fdName of fdNames) {
+    let target: string;
+    try {
+      target = fs.readlinkSync(path.join(fdDir, fdName));
+    } catch {
+      continue;
+    }
+    if (!target.startsWith(prefix) || !target.endsWith(".jsonl")) continue;
+    const sessionId = target.slice(prefix.length, -".jsonl".length);
+    if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) continue;
+    return { sessionId, transcriptPath: target };
+  }
+  return null;
 }
 
 /**
@@ -2346,7 +2441,7 @@ export function discoverRunningCcSessions(
     } catch {
       continue;
     }
-    const discovered = findActiveSessionForCcPid(pid, cwd, home);
+    const discovered = findActiveSessionForCcPid(pid, cwd, home, procRoot);
     if (!discovered) continue;
     // Two CC processes can share a sid only across hosts (impossible
     // on /proc) or via a fork that we'd resolve to one. Dedup defensively.

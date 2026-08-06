@@ -67,6 +67,19 @@ const DEFAULT_NEVER_ACTIVE_MS = 5 * 60 * 1000;
  * Set to 0 to disable.
  */
 const DEFAULT_ORPHAN_CLOSE_MS = 30 * 60 * 1000;
+/**
+ * Backstop for agent-bound entries that `sweepOrphans` / `sweepNeverActive`
+ * otherwise always skip (a bound WS normally means a live daemon still
+ * pinging it). The mirror-agent watchdog is the primary defense against
+ * "CC exits, daemon lives" — this catches what it misses (e.g. a
+ * ccPid-less pre-rollout client, or a daemon that itself died without
+ * cleanly closing its WS) so a stuck agent-bound entry can never live
+ * forever. Deliberately much longer than DEFAULT_ORPHAN_CLOSE_MS since
+ * an idle-but-alive bound session is a normal, common state.
+ *
+ * Set to 0 to disable.
+ */
+const DEFAULT_BOUND_ORPHAN_CLOSE_MS = 2 * 60 * 60 * 1000;
 const ORPHAN_SWEEP_INTERVAL_MS = 60 * 1000;
 
 // ── Entry types ───────────────────────────────────────────────────────────
@@ -184,6 +197,11 @@ export interface MirrorRegistryOptions {
    * this. 0 disables. Default 5 min. See `sweepNeverActive` for why.
    */
   neverActiveMs?: number;
+  /**
+   * Backstop cutoff for agent-bound entries otherwise exempt from the
+   * sweeps above. 0 disables. Default 2h. See `DEFAULT_BOUND_ORPHAN_CLOSE_MS`.
+   */
+  boundOrphanCloseMs?: number;
 }
 
 // ── MirrorRegistry ────────────────────────────────────────────────────────
@@ -244,6 +262,7 @@ export class MirrorRegistry {
   private retentionMs: number;
   private orphanCloseMs: number;
   private neverActiveMs: number;
+  private boundOrphanCloseMs: number;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
   /**
@@ -271,8 +290,14 @@ export class MirrorRegistry {
     this.retentionMs = options?.retentionMs ?? DEFAULT_RETENTION_MS;
     this.orphanCloseMs = options?.orphanCloseMs ?? DEFAULT_ORPHAN_CLOSE_MS;
     this.neverActiveMs = options?.neverActiveMs ?? DEFAULT_NEVER_ACTIVE_MS;
+    this.boundOrphanCloseMs =
+      options?.boundOrphanCloseMs ?? DEFAULT_BOUND_ORPHAN_CLOSE_MS;
     this.store = options?.store ?? new NullStore();
-    if (this.orphanCloseMs > 0 || this.neverActiveMs > 0) {
+    if (
+      this.orphanCloseMs > 0 ||
+      this.neverActiveMs > 0 ||
+      this.boundOrphanCloseMs > 0
+    ) {
       this.orphanSweepTimer = setInterval(() => {
         if (this.orphanCloseMs > 0) this.sweepOrphans();
         if (this.neverActiveMs > 0) this.sweepNeverActive();
@@ -298,22 +323,36 @@ export class MirrorRegistry {
    * session up. Sweeping bound sessions would prematurely kill
    * legitimate idle CC sessions whose user has stopped typing.
    *
-   * Uses closeSession (not closeAndDrop) so the session lingers as a
-   * closed gravestone for the retention window — it stays listed in the
-   * dashboard sidebar (dimmed, offline) and remains reconnectable until
-   * it ages out.
+   * Uses closeAndDrop so the gravestone doesn't linger for the
+   * retention window — orphan-swept entries are user-invisible and
+   * the dashboard sidebar should clear them immediately.
+   *
+   * Agent-bound entries get a much longer `boundOrphanCloseMs` backstop
+   * instead of an outright skip: the mirror-agent watchdog is the
+   * primary defense against "CC exits, daemon lives", but this catches
+   * what it misses (ccPid-less clients, a daemon that died without
+   * cleanly closing its WS) so a stuck bound entry can't live forever.
    */
   private sweepOrphans(): void {
     const cutoff = Date.now() - this.orphanCloseMs;
-    const victims: string[] = [];
+    const boundCutoff = Date.now() - this.boundOrphanCloseMs;
+    const victims: Array<{ sid: string; host: string }> = [];
     for (const entry of this.sessions.values()) {
       if (entry.closedAt) continue;
-      if (entry.agent) continue;
+      if (entry.agent) {
+        if (
+          this.boundOrphanCloseMs > 0 &&
+          entry.lastEventAt.getTime() <= boundCutoff
+        ) {
+          victims.push({ sid: entry.sid, host: entry.host });
+        }
+        continue;
+      }
       if (entry.lastEventAt.getTime() > cutoff) continue;
-      victims.push(entry.sid);
+      victims.push({ sid: entry.sid, host: entry.host });
     }
-    for (const sid of victims) {
-      this.closeSession(sid, "agent_timeout");
+    for (const { sid, host } of victims) {
+      this.closeAndDrop(sid, "agent_timeout", host);
     }
   }
 
@@ -328,20 +367,32 @@ export class MirrorRegistry {
    * Skips bound sessions for the same reason `sweepOrphans` does: an
    * idle but alive CC session has agent != null and (createdAt ==
    * lastEventAt) until the user types something. Sweeping those would
-   * tear down legitimate sessions visible in the dashboard sidebar.
+   * tear down legitimate sessions visible in the dashboard sidebar —
+   * except past `boundOrphanCloseMs`, the same long-window backstop
+   * `sweepOrphans` applies, so a bound zombie probe entry can't live
+   * forever either.
    */
   private sweepNeverActive(): void {
     const cutoff = Date.now() - this.neverActiveMs;
-    const victims: string[] = [];
+    const boundCutoff = Date.now() - this.boundOrphanCloseMs;
+    const victims: Array<{ sid: string; host: string }> = [];
     for (const entry of this.sessions.values()) {
       if (entry.closedAt) continue;
-      if (entry.agent) continue;
       if (entry.lastEventAt.getTime() !== entry.createdAt.getTime()) continue;
+      if (entry.agent) {
+        if (
+          this.boundOrphanCloseMs > 0 &&
+          entry.createdAt.getTime() <= boundCutoff
+        ) {
+          victims.push({ sid: entry.sid, host: entry.host });
+        }
+        continue;
+      }
       if (entry.createdAt.getTime() > cutoff) continue;
-      victims.push(entry.sid);
+      victims.push({ sid: entry.sid, host: entry.host });
     }
-    for (const sid of victims) {
-      this.closeAndDrop(sid, "agent_timeout");
+    for (const { sid, host } of victims) {
+      this.closeAndDrop(sid, "agent_timeout", host);
     }
   }
 
@@ -652,6 +703,23 @@ export class MirrorRegistry {
       // renamed session whose ccPid couldn't vouch for identity — the
       // session showed offline/no-mirror while Claude ran fine.)
       if (existing.closedAt) {
+        // A closed sid must not be handed back to a differently-
+        // identified process. `identityMatches` is also the guard the
+        // owner-mismatch check above trusts — reuse it here: known,
+        // differing ccPids means this re-POST is not the same process
+        // the close was for (e.g. it was deliberately dropped because
+        // the old ccPid died), so refuse to resurrect. `existing.ccPid
+        // === null` (pre-rollout) is the one case with no identity to
+        // check, so it keeps the old idempotent-reopen behaviour.
+        const ccPidMismatch =
+          existing.ccPid !== null && ccPid !== null && !identityMatches;
+        if (ccPidMismatch) {
+          return {
+            ok: false,
+            error:
+              "Session was closed and cannot be reclaimed by a different process.",
+          };
+        }
         // Re-open a closed session when the same owner comes back with
         // the same sid. Happens after mirror-agent restarts where the
         // old agent's shutdown sent a /close before the new agent had
@@ -891,9 +959,20 @@ export class MirrorRegistry {
   /**
    * Close a session. Emits a session_end event to watchers and schedules
    * retention cleanup. Idempotent.
+   *
+   * `host` is an optional resolution hint — pass it when the caller
+   * already knows which host's entry it means (e.g. a `/close?host=`
+   * query param), so this resolves via the unambiguous `entryByKey`
+   * instead of `entryBySid`, which returns null whenever the sid
+   * exists on more than one host and would otherwise make this a
+   * silent no-op for cross-host sid collisions.
    */
-  closeSession(sid: string, reason: "exit" | "agent_timeout" = "exit"): void {
-    const entry = this.entryBySid(sid);
+  closeSession(
+    sid: string,
+    reason: "exit" | "agent_timeout" = "exit",
+    host?: string,
+  ): void {
+    const entry = host ? this.entryByKey(host, sid) : this.entryBySid(sid);
     if (!entry || entry.closedAt) return;
     entry.closedAt = new Date();
 
@@ -983,14 +1062,15 @@ export class MirrorRegistry {
   closeAndDrop(
     sid: string,
     reason: "exit" | "agent_timeout" = "agent_timeout",
+    host?: string,
   ): void {
     // Capture agent.close BEFORE closeSession runs — closeSession may
     // null out entry.agent depending on retention timing, but
     // closeAndDrop must always disconnect any still-bound mirror-agent
     // so the per-session WS recovers via reconnect+recreate.
-    const entry = this.entryBySid(sid);
+    const entry = host ? this.entryByKey(host, sid) : this.entryBySid(sid);
     const agentClose = entry?.agent?.close;
-    this.closeSession(sid, reason);
+    this.closeSession(sid, reason, host);
     if (entry?.retentionTimerId) {
       clearTimeout(entry.retentionTimerId);
       entry.retentionTimerId = null;
@@ -1870,7 +1950,13 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = found.status;
           return { error: found.error };
         }
-        mirrorRegistry.closeSession(params.sid, "exit");
+        // closeAndDrop (not the soft closeSession) so an agent-bound
+        // entry is actually severed — otherwise the still-connected
+        // daemon re-opens it via createSession's next keepalive/hook
+        // re-POST and /close looks like a no-op. Resolve with the
+        // exact entry's own host so a cross-host sid collision can't
+        // make this silently target the wrong (or no) entry.
+        mirrorRegistry.closeAndDrop(params.sid, "exit", found.entry.host);
         return { closed: true };
       })
 

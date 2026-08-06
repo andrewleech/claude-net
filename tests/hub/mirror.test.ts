@@ -1559,6 +1559,213 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       quick.stop();
     }
   });
+
+  test("POST /:sid/close drops an agent-bound entry instead of leaving it soft-closed-and-resurrectable", async () => {
+    // Regression for the bug where /close called the soft closeSession,
+    // which left entry.agent bound — the still-connected daemon then
+    // re-opened it on its next keepalive/hook re-POST, so /close looked
+    // like a 200 success but never actually dropped the entry.
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 60_000 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    try {
+      const r = reg.createSession(
+        "bound:u@h",
+        "/bound",
+        "bound-sid",
+        "hostA",
+        4242,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      let agentClosed = false;
+      reg.setAgentConnection(
+        "bound-sid",
+        {
+          ws: { send: () => {} },
+          wsIdentity: {},
+          close: () => {
+            agentClosed = true;
+          },
+        },
+        "hostA",
+      );
+
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/bound-sid/close?host=hostA`,
+        { method: "POST" },
+      );
+      expect(res.status).toBe(200);
+      // Fully dropped — not just closedAt flipped, which the daemon's
+      // next re-POST would flip right back.
+      expect(reg.hasSession("bound-sid")).toBe(false);
+      expect(agentClosed).toBe(true);
+
+      // A re-POST from the SAME process (same ccPid) after the drop is
+      // a normal fresh create, not a resurrection of the old entry.
+      const recreate = reg.createSession(
+        "bound:u@h",
+        "/bound",
+        "bound-sid",
+        "hostA",
+        4242,
+      );
+      expect(recreate.ok).toBe(true);
+      if (!recreate.ok) return;
+      expect(recreate.restored).toBe(false);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("POST /:sid/close with a host hint closes only that host's entry on a cross-host sid collision", async () => {
+    // entryBySid returns null (ambiguous) when >1 host holds a sid —
+    // /close must resolve via the exact entry `getSession` already
+    // found (passing its host through) rather than re-resolving via
+    // entryBySid, or it silently no-ops on this exact case.
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 60_000 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    try {
+      reg.createSession("a:u@h", "/a", "dup-sid", "hostA", 111);
+      reg.createSession("b:u@h", "/b", "dup-sid", "hostB", 222);
+
+      const res = await fetch(
+        `http://localhost:${port}/api/mirror/dup-sid/close?host=hostA`,
+        { method: "POST" },
+      );
+      expect(res.status).toBe(200);
+
+      const onA = reg.getSession("dup-sid", "hostA");
+      expect(onA.ok).toBe(false);
+      const onB = reg.getSession("dup-sid", "hostB");
+      expect(onB.ok).toBe(true);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("createSession re-POST from a different, unrelated ccPid does not resurrect a closed sid", () => {
+    // A closed entry must not be handed back to a differently-
+    // identified process — e.g. it was deliberately dropped because
+    // the process that held it died, and the sid is now being reused
+    // (or reported) by something else entirely.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "closed-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      quick.closeSession("closed-sid", "exit", "hostA");
+      expect(quick.hasSession("closed-sid")).toBe(true); // soft close, still in map
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "closed-sid",
+        "hostA",
+        222, // different ccPid — not the same process
+      );
+      expect(reopen.ok).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession re-POST from the same ccPid still re-opens a closed sid", () => {
+    // The legitimate recovery path (mirror-agent restart re-claiming
+    // its own session) must keep working: same host + same ccPid.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "closed-sid-2",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      quick.closeSession("closed-sid-2", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "closed-sid-2",
+        "hostA",
+        111,
+      );
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("orphan sweep backstop reaps a long-idle agent-bound entry", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+      boundOrphanCloseMs: 20,
+    });
+    try {
+      const r = quick.createSession("bound:u@h", "/bound");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
+      r.entry.lastEventAt = new Date(Date.now() - 60_000);
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("never-active sweep backstop reaps a long-idle agent-bound zombie", () => {
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+      boundOrphanCloseMs: 20,
+    });
+    try {
+      const r = quick.createSession("bound:u@h", "/bound");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
+      const longAgo = new Date(Date.now() - 60_000);
+      r.entry.createdAt = longAgo;
+      r.entry.lastEventAt = longAgo;
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
 });
 
 describe("schedule-inject routes", () => {

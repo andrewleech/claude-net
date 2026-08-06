@@ -73,18 +73,32 @@ describe("findReplacedByClear", () => {
     ]);
   });
 
-  test("flags by either ccPid OR tmuxPane (OR semantics)", () => {
+  test("flags by either ccPid OR tmuxPane (OR semantics), when the pane match's old ccPid is dead", () => {
     // Two candidates: one matches by ccPid only, one matches by pane only.
-    // Both should be closed.
+    // Both should be closed — the pane-only match's old ccPid (9999) is
+    // asserted dead via the injected isPidAlive so the test is
+    // deterministic regardless of what's actually running on pid 9999.
     const sessions = [
       s("by_pid", { ccPid: 1234, tmuxPane: "%9" }),
       s("by_pane", { ccPid: 9999, tmuxPane: "%5" }),
       s("new", { ccPid: 1234, tmuxPane: "%5" }),
     ];
-    expect(findReplacedByClear(sessions, "new", 1234, "%5").sort()).toEqual([
-      "by_pane",
-      "by_pid",
-    ]);
+    expect(
+      findReplacedByClear(sessions, "new", 1234, "%5", () => false).sort(),
+    ).toEqual(["by_pane", "by_pid"]);
+  });
+
+  test("does not flag a same-pane sibling whose old ccPid is still alive", () => {
+    // A live old process must never be evicted just because a new
+    // session happens to report the same tmux pane (launcher bug,
+    // stale env var). Only ccPid or a confirmed-dead pane match count.
+    const sessions = [
+      s("old", { ccPid: 111, tmuxPane: "%5" }),
+      s("new", { ccPid: 222, tmuxPane: "%5" }),
+    ];
+    expect(findReplacedByClear(sessions, "new", 222, "%5", () => true)).toEqual(
+      [],
+    );
   });
 
   test("missing ccPid AND missing pane returns no victims", () => {

@@ -906,6 +906,36 @@
     margin-top: 3px;
     line-height: 1.4;
   }
+  .m-aq-opt-preview {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--text-muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    margin: 6px 0 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .m-aq-opt.selected .m-aq-opt-preview {
+    color: var(--text);
+  }
+  /* Checkbox marker for multiSelect questions. */
+  .m-aq-opt-mark {
+    font-family: var(--font-mono);
+    margin-right: 7px;
+    color: var(--text-muted);
+  }
+  .m-aq-opt-mark::before {
+    content: '[ ]';
+  }
+  .m-aq-opt.selected .m-aq-opt-mark {
+    color: var(--text-accent);
+  }
+  .m-aq-opt.selected .m-aq-opt-mark::before {
+    content: '[x]';
+  }
   .m-aq-text {
     margin-top: 10px;
     padding: 8px 10px;
@@ -6100,20 +6130,16 @@
     /**
      * Render the AskUserQuestion card.
      *
-     * Each question becomes a vertical section with radio-style
-     * option buttons plus a "type your own" textarea (Claude Code's
-     * built-in "Type something." modal slot). Per-question state is
-     * tracked locally; nothing is sent to the agent until the user
-     * hits Submit at the bottom.
-     *
-     * On Submit we POST a key sequence to /:sid/keys that walks
-     * Claude Code's terminal modal: for each question we press
-     * Down N times to land on the chosen option then Enter to
-     * advance to the next tab; for free-text we navigate to the
-     * "Type something." slot (always one past the supplied options
-     * in CC's modal), Enter to open the text input, then literal
-     * text + Enter. A final Enter accepts the default "Submit
-     * answers" choice on the review tab.
+     * Each question becomes a vertical section whose controls mirror the
+     * terminal modal Claude Code renders for it — see
+     * Parsers.askUserQuestionLayout for the three shapes:
+     *   standard — radio-style options plus a "type your own" textarea
+     *   preview  — options showing their ASCII preview, plus a notes
+     *              textarea that rides along with the chosen option
+     *   multi    — checkbox options plus an additive free-text textarea
+     * Per-question state is tracked locally; nothing is sent to the agent
+     * until the user hits Submit at the bottom, which POSTs one key
+     * sequence covering every question (Parsers.buildAskUserQuestionKeys).
      *
      * Cancel sends Escape to abort the modal.
      */
@@ -6122,8 +6148,8 @@
       card.className = 'm-evt m-evt-question m-evt-aq';
       card.setAttribute('data-tool-use-id', payload.tool_use_id || '');
       var qs = (payload.input && payload.input.questions) || [];
-      // answers[i] is { kind: 'option', index: number } or
-      //              { kind: 'text', value: string }
+      // answers[i] is the answer shape buildAskUserQuestionKeys expects,
+      // or null while the question is unanswered.
       var answers = new Array(qs.length).fill(null);
 
       var bannerEl = document.createElement('span');
@@ -6148,10 +6174,61 @@
         return n;
       }
 
+      function optionButton(o, layout) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'm-aq-opt';
+        var label = document.createElement('div');
+        label.className = 'm-aq-opt-label';
+        if (layout === 'multi') {
+          var mark = document.createElement('span');
+          mark.className = 'm-aq-opt-mark';
+          label.appendChild(mark);
+        }
+        label.appendChild(document.createTextNode(o.label || ''));
+        btn.appendChild(label);
+        if (o.description) {
+          var desc = document.createElement('div');
+          desc.className = 'm-aq-opt-desc';
+          desc.textContent = o.description;
+          btn.appendChild(desc);
+        }
+        if (o.preview) {
+          var pre = document.createElement('pre');
+          pre.className = 'm-aq-opt-preview';
+          pre.textContent = o.preview;
+          btn.appendChild(pre);
+        }
+        return btn;
+      }
+
+      function textField(headText, placeholder, onInput) {
+        var wrap = document.createElement('div');
+        wrap.className = 'm-aq-text';
+        var head = document.createElement('div');
+        head.className = 'm-aq-text-head';
+        head.textContent = headText;
+        wrap.appendChild(head);
+        var area = document.createElement('textarea');
+        area.className = 'm-aq-text-area';
+        area.rows = 2;
+        area.placeholder = placeholder;
+        area.addEventListener('input', function () { onInput(area.value, wrap, area); });
+        wrap.appendChild(area);
+        return { wrap: wrap, area: area };
+      }
+
       for (var qi = 0; qi < qs.length; qi++) {
         (function (i, q) {
+          var layout = window.Parsers.askUserQuestionLayout(q);
+          var opts = q.options || [];
+          // Assigned by the per-layout branch below, before any click can
+          // reach the option buttons wired up here.
+          var onOptionClick;
+          var sync;
+
           var section = document.createElement('div');
-          section.className = 'm-aq-q';
+          section.className = 'm-aq-q m-aq-' + layout;
           var header = document.createElement('div');
           header.className = 'm-aq-q-head';
           header.textContent = (qs.length > 1 ? 'Question ' + (i + 1) + '. ' : '') + (q.question || '');
@@ -6159,71 +6236,96 @@
 
           var optsList = document.createElement('div');
           optsList.className = 'm-aq-opts';
-          var opts = q.options || [];
           var optionButtons = [];
           for (var j = 0; j < opts.length; j++) {
             (function (jj, o) {
-              var btn = document.createElement('button');
-              btn.type = 'button';
-              btn.className = 'm-aq-opt';
-              var label = document.createElement('div');
-              label.className = 'm-aq-opt-label';
-              label.textContent = o.label || '';
-              btn.appendChild(label);
-              if (o.description) {
-                var desc = document.createElement('div');
-                desc.className = 'm-aq-opt-desc';
-                desc.textContent = o.description;
-                btn.appendChild(desc);
-              }
-              btn.addEventListener('click', function () {
-                answers[i] = { kind: 'option', index: jj };
-                for (var k = 0; k < optionButtons.length; k++) {
-                  optionButtons[k].classList.toggle('selected', k === jj);
-                }
-                textWrap.classList.remove('selected');
-                textArea.value = '';
-                updateSubmitEnabled();
-              });
+              var btn = optionButton(o, layout);
+              btn.addEventListener('click', function () { onOptionClick(jj); });
               optionButtons.push(btn);
               optsList.appendChild(btn);
             })(j, opts[j]);
           }
           section.appendChild(optsList);
 
-          // "Type your own" — mirrors Claude Code's "Type something." modal
-          // slot. Selecting it deselects the option buttons; typing updates
-          // the answer in place.
-          var textWrap = document.createElement('div');
-          textWrap.className = 'm-aq-text';
-          var textHeader = document.createElement('div');
-          textHeader.className = 'm-aq-text-head';
-          textHeader.textContent = 'Or type your own answer:';
-          textWrap.appendChild(textHeader);
-          var textArea = document.createElement('textarea');
-          textArea.className = 'm-aq-text-area';
-          textArea.rows = 2;
-          textArea.placeholder = 'Type something…';
-          textArea.addEventListener('input', function () {
-            var v = textArea.value;
-            if (v.length === 0) {
-              if (answers[i] && answers[i].kind === 'text') {
-                answers[i] = null;
-                textWrap.classList.remove('selected');
+          if (layout === 'multi') {
+            // Checkboxes plus additive free text: both feed the one answer,
+            // matching the modal where typing ticks its own row.
+            var picked = [];
+            var free = '';
+            var multiText = textField('Or add your own:', 'Type something…', function (v, wrap) {
+              free = v;
+              wrap.classList.toggle('selected', v.length > 0);
+              sync();
+            });
+            section.appendChild(multiText.wrap);
+            card.appendChild(section);
+            onOptionClick = function (jj) {
+              var at = picked.indexOf(jj);
+              if (at === -1) picked.push(jj); else picked.splice(at, 1);
+              optionButtons[jj].classList.toggle('selected', at === -1);
+              sync();
+            };
+            sync = function () {
+              answers[i] = (picked.length > 0 || free.length > 0)
+                ? { kind: 'multi', indices: picked.slice().sort(function (a, b) { return a - b; }), text: free }
+                : null;
+              updateSubmitEnabled();
+            };
+            return;
+          }
+
+          if (layout === 'preview') {
+            // Notes ride along with the chosen option; notes on their own
+            // are a valid answer (the modal submits them as notes-only).
+            var chosen = -1;
+            var notes = '';
+            var notesField = textField('Notes (sent with your choice):', 'Add notes on this design…', function (v, wrap) {
+              notes = v;
+              wrap.classList.toggle('selected', v.length > 0);
+              sync();
+            });
+            section.appendChild(notesField.wrap);
+            card.appendChild(section);
+            onOptionClick = function (jj) {
+              chosen = jj;
+              for (var k = 0; k < optionButtons.length; k++) {
+                optionButtons[k].classList.toggle('selected', k === jj);
               }
+              sync();
+            };
+            sync = function () {
+              if (chosen >= 0) answers[i] = { kind: 'option', index: chosen, notes: notes };
+              else if (notes.length > 0) answers[i] = { kind: 'text', value: notes };
+              else answers[i] = null;
+              updateSubmitEnabled();
+            };
+            return;
+          }
+
+          // standard — "type your own" mirrors the modal's "Type something."
+          // row, which replaces an option choice rather than adding to it.
+          var ownText = textField('Or type your own answer:', 'Type something…', function (v, wrap) {
+            if (v.length === 0) {
+              if (answers[i] && answers[i].kind === 'text') answers[i] = null;
+              wrap.classList.remove('selected');
             } else {
               answers[i] = { kind: 'text', value: v };
-              for (var k = 0; k < optionButtons.length; k++) {
-                optionButtons[k].classList.remove('selected');
-              }
-              textWrap.classList.add('selected');
+              for (var k = 0; k < optionButtons.length; k++) optionButtons[k].classList.remove('selected');
+              wrap.classList.add('selected');
             }
             updateSubmitEnabled();
           });
-          textWrap.appendChild(textArea);
-          section.appendChild(textWrap);
-
+          section.appendChild(ownText.wrap);
           card.appendChild(section);
+          onOptionClick = function (jj) {
+            answers[i] = { kind: 'option', index: jj };
+            for (var k = 0; k < optionButtons.length; k++) {
+              optionButtons[k].classList.toggle('selected', k === jj);
+            }
+            ownText.wrap.classList.remove('selected');
+            ownText.area.value = '';
+            updateSubmitEnabled();
+          };
         })(qi, qs[qi]);
       }
 
@@ -6266,8 +6368,19 @@
     }
 
     function submitAskUserQuestion(questions, answers) {
-      var parts = buildAskUserQuestionKeys(questions, answers);
       var errEl = document.getElementById('mirror-compose-err');
+      var parts;
+      try {
+        parts = buildAskUserQuestionKeys(questions, answers);
+      } catch (err) {
+        // An answer the modal can't express. Surfacing it beats sending
+        // keys that would land on "Chat about this" and decline the tool.
+        if (errEl) {
+          errEl.className = 'mirror-compose-err';
+          errEl.textContent = 'AskUserQuestion submit failed: ' + (err && err.message ? err.message : err);
+        }
+        return Promise.reject(err);
+      }
       return fetch('/api/mirror/' + encodeURIComponent(sid) + '/keys' + hostQueryFirst, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

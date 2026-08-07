@@ -476,39 +476,149 @@ export function parsePromptMenu(text) {
 }
 
 /**
- * Compose the tmux key-sequence that answers a multi-question
- * AskUserQuestion modal. Per question:
- *   - option j (0-based) → Down × j, Enter
- *   - free text          → Down × N (one past the supplied options,
- *                          landing on Claude Code's built-in "Type
- *                          something." slot), Enter, text, Enter
- * After the last question's Enter the modal lands on its review
- * tab; "Submit answers" is the default highlight, so one final
- * Enter accepts the batch.
+ * Which of Claude Code's three AskUserQuestion layouts a question gets.
+ * They navigate differently, so the key sequence depends on it.
+ *
+ *   "multi"    — multiSelect. Checkbox rows (Enter toggles), then a
+ *                free-text row, then a Submit row, then "Chat about this".
+ *   "preview"  — single-select where some option carries a `preview`.
+ *                Option rows only, no free-text row; free text lives in a
+ *                Notes field opened with `n`. "Chat about this" sits
+ *                directly below the last option.
+ *   "standard" — option rows, then a "Type something." row, then "Chat
+ *                about this".
+ */
+export function askUserQuestionLayout(question) {
+  if (question?.multiSelect) return "multi";
+  const opts = question?.options || [];
+  for (let i = 0; i < opts.length; i++) {
+    if (opts[i]?.preview) return "preview";
+  }
+  return "standard";
+}
+
+/** Trailing whitespace would be typed into the modal verbatim. */
+function aqText(value) {
+  return typeof value === "string" ? value.replace(/\s+$/, "") : "";
+}
+
+function aqOptionIndex(index, count, where) {
+  if (!Number.isInteger(index) || index < 0 || index >= count) {
+    throw new Error(`${where}: option index ${index} is out of range.`);
+  }
+  return index;
+}
+
+/** Ascending, de-duplicated, in-range — the sequence only walks Down. */
+function aqIndices(indices, count) {
+  const seen = new Set();
+  for (const idx of Array.isArray(indices) ? indices : []) {
+    if (Number.isInteger(idx) && idx >= 0 && idx < count) seen.add(idx);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+/**
+ * Compose the tmux key-sequence that answers an AskUserQuestion modal.
+ *
+ * `answers[i]` describes question `i`:
+ *   { kind: "option", index, notes? } — notes apply to a preview question
+ *   { kind: "text", value }           — free text / notes-only
+ *   { kind: "multi", indices, text? } — multiSelect
+ * Every question needs one. The modal only advances once the current
+ * question is answered, so a gap would apply later keys to the wrong
+ * question.
+ *
+ * Answering a question advances to the next, and after the last one to
+ * the review tab where "Submit answers" is pre-highlighted — hence the
+ * trailing Enter. A lone single-select question has no review tab and
+ * submits on its own Enter.
+ *
+ * Throws rather than emitting keys for an answer the modal cannot
+ * express: overshooting a list lands on "Chat about this", which
+ * declines the whole tool.
  */
 export function buildAskUserQuestionKeys(questions, answers) {
   const parts = [];
+  const key = (name) => parts.push({ type: "key", name });
+  const literal = (value) => parts.push({ type: "text", value });
+  const down = (n) => {
+    for (let i = 0; i < n; i++) key("Down");
+  };
+
   for (let i = 0; i < questions.length; i++) {
+    const question = questions[i] || {};
+    const opts = question.options || [];
     const answer = answers[i];
-    const opts = questions[i]?.options || [];
-    if (!answer) continue;
-    if (answer.kind === "option") {
-      for (let d = 0; d < answer.index; d++) {
-        parts.push({ type: "key", name: "Down" });
+    const where = `question ${i + 1}`;
+    if (!answer) throw new Error(`${where}: no answer.`);
+
+    switch (askUserQuestionLayout(question)) {
+      case "multi": {
+        const picked = aqIndices(answer.indices, opts.length);
+        const free = aqText(answer.text);
+        if (picked.length === 0 && !free) {
+          throw new Error(`${where}: nothing selected.`);
+        }
+        let cursor = 0;
+        for (const idx of picked) {
+          down(idx - cursor);
+          cursor = idx;
+          key("Enter");
+        }
+        if (free) {
+          // Typing into the free-text row ticks it; an Enter here would
+          // untick it again.
+          down(opts.length - cursor);
+          cursor = opts.length;
+          literal(free);
+        }
+        down(opts.length + 1 - cursor);
+        key("Enter");
+        break;
       }
-      parts.push({ type: "key", name: "Enter" });
-    } else if (answer.kind === "text") {
-      for (let dd = 0; dd < opts.length; dd++) {
-        parts.push({ type: "key", name: "Down" });
+
+      case "preview": {
+        const notes = aqText(
+          answer.kind === "text" ? answer.value : answer.notes,
+        );
+        const hasOption = answer.kind === "option";
+        if (!hasOption && !notes) throw new Error(`${where}: no answer.`);
+        if (notes) {
+          literal("n");
+          literal(notes);
+          if (!hasOption) {
+            // Enter in the notes field submits the question as notes-only.
+            key("Enter");
+            break;
+          }
+          // Escape keeps the notes and returns to the option list.
+          key("Escape");
+        }
+        down(aqOptionIndex(answer.index, opts.length, where));
+        key("Enter");
+        break;
       }
-      parts.push({ type: "key", name: "Enter" });
-      if (answer.value && answer.value.length > 0) {
-        parts.push({ type: "text", value: answer.value });
+
+      default: {
+        if (answer.kind === "text") {
+          const value = aqText(answer.value);
+          if (!value) throw new Error(`${where}: empty free-text answer.`);
+          // The "Type something." row is a live input as soon as it is
+          // highlighted — an Enter before the text submits it empty,
+          // which Claude Code reads as declining the questions.
+          down(opts.length);
+          literal(value);
+        } else {
+          down(aqOptionIndex(answer.index, opts.length, where));
+        }
+        key("Enter");
       }
-      parts.push({ type: "key", name: "Enter" });
     }
   }
-  parts.push({ type: "key", name: "Enter" });
+
+  const lone = questions.length === 1 && !questions[0]?.multiSelect;
+  if (!lone) key("Enter");
   return parts;
 }
 

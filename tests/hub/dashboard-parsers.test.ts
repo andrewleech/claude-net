@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  askUserQuestionLayout,
   buildAskUserQuestionKeys,
   extractCnList,
   extractFileRefs,
@@ -349,17 +350,44 @@ describe("parsePromptMenu", () => {
   });
 });
 
+describe("askUserQuestionLayout", () => {
+  test("plain single-select options are the standard layout", () => {
+    expect(
+      askUserQuestionLayout({ options: [{ label: "A" }, { label: "B" }] }),
+    ).toBe("standard");
+  });
+
+  test("any option carrying a preview switches to the preview layout", () => {
+    expect(
+      askUserQuestionLayout({
+        options: [{ label: "A" }, { label: "B", preview: "┌──┐" }],
+      }),
+    ).toBe("preview");
+  });
+
+  test("multiSelect wins over a preview", () => {
+    expect(
+      askUserQuestionLayout({
+        multiSelect: true,
+        options: [{ label: "A", preview: "┌──┐" }],
+      }),
+    ).toBe("multi");
+  });
+});
+
 describe("buildAskUserQuestionKeys", () => {
-  test("single question, first option → Enter, Enter (submit)", () => {
+  const key = (name: string) => ({ type: "key", name });
+  const text = (value: string) => ({ type: "text", value });
+
+  test("lone single-select question submits without a review-tab Enter", () => {
     const questions = [{ question: "Pick", options: [{ label: "A" }] }];
     const answers = [{ kind: "option", index: 0 }];
     expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
+      key("Enter"),
     ]);
   });
 
-  test("single question, third option → Down × 2, Enter, Enter", () => {
+  test("single question, third option → Down × 2, Enter", () => {
     const questions = [
       {
         question: "Pick",
@@ -368,14 +396,15 @@ describe("buildAskUserQuestionKeys", () => {
     ];
     const answers = [{ kind: "option", index: 2 }];
     expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
-      { type: "key", name: "Down" },
-      { type: "key", name: "Down" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
+      key("Down"),
+      key("Down"),
+      key("Enter"),
     ]);
   });
 
-  test("free-text answer navigates past supplied options", () => {
+  test("free text types straight into the highlighted row", () => {
+    // The "Type something." row is already a live input once highlighted;
+    // an Enter before the text submits it empty and declines the tool.
     const questions = [
       {
         question: "Pick",
@@ -384,17 +413,25 @@ describe("buildAskUserQuestionKeys", () => {
     ];
     const answers = [{ kind: "text", value: "hello" }];
     expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
-      { type: "key", name: "Down" },
-      { type: "key", name: "Down" },
-      { type: "key", name: "Down" },
-      { type: "key", name: "Enter" },
-      { type: "text", value: "hello" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
+      key("Down"),
+      key("Down"),
+      key("Down"),
+      text("hello"),
+      key("Enter"),
     ]);
   });
 
-  test("multi-question batches answers and ends on a single submit Enter", () => {
+  test("free text is trimmed of trailing whitespace", () => {
+    const questions = [{ question: "Q", options: [{ label: "A" }] }];
+    const answers = [{ kind: "text", value: "hello\n\n" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      key("Down"),
+      text("hello"),
+      key("Enter"),
+    ]);
+  });
+
+  test("multi-question batches answers and ends on a review-tab Enter", () => {
     const questions = [
       { question: "Q1", options: [{ label: "A" }, { label: "B" }] },
       {
@@ -404,27 +441,156 @@ describe("buildAskUserQuestionKeys", () => {
     ];
     const answers = [
       { kind: "option", index: 1 },
-      { kind: "option", index: 0 },
+      { kind: "text", value: "custom" },
     ];
     expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
-      { type: "key", name: "Down" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
+      key("Down"),
+      key("Enter"),
+      key("Down"),
+      key("Down"),
+      key("Down"),
+      text("custom"),
+      key("Enter"),
+      key("Enter"),
     ]);
   });
 
-  test("free text with empty value still navigates and confirms", () => {
-    // Defensive — the UI gates Submit on empty text, but the helper
-    // shouldn't choke if it gets here anyway.
-    const questions = [{ question: "Q", options: [{ label: "A" }] }];
-    const answers = [{ kind: "text", value: "" }];
+  test("preview question: an option alone never walks past the last row", () => {
+    // The preview layout has no "Type something." row — one Down too many
+    // lands on "Chat about this", which declines the whole tool.
+    const questions = [
+      {
+        question: "Layout",
+        options: [
+          { label: "Grid", preview: "┌──┐" },
+          { label: "List", preview: "└──┘" },
+        ],
+      },
+    ];
+    const answers = [{ kind: "option", index: 1 }];
     expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
-      { type: "key", name: "Down" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
-      { type: "key", name: "Enter" },
+      key("Down"),
+      key("Enter"),
     ]);
+  });
+
+  test("preview question: notes are typed then Escaped back to the options", () => {
+    const questions = [
+      {
+        question: "Layout",
+        options: [
+          { label: "Grid", preview: "┌──┐" },
+          { label: "List", preview: "└──┘" },
+        ],
+      },
+    ];
+    const answers = [{ kind: "option", index: 1, notes: "tighter rows" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      text("n"),
+      text("tighter rows"),
+      key("Escape"),
+      key("Down"),
+      key("Enter"),
+    ]);
+  });
+
+  test("preview question: free text submits as notes-only", () => {
+    const questions = [
+      { question: "Layout", options: [{ label: "Grid", preview: "┌──┐" }] },
+    ];
+    const answers = [{ kind: "text", value: "neither" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      text("n"),
+      text("neither"),
+      key("Enter"),
+    ]);
+  });
+
+  test("multiSelect toggles each pick in order then hits the Submit row", () => {
+    const questions = [
+      {
+        question: "Feat",
+        multiSelect: true,
+        options: [{ label: "Auth" }, { label: "Cache" }, { label: "Logs" }],
+      },
+    ];
+    const answers = [{ kind: "multi", indices: [2, 0] }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      key("Enter"), // tick Auth (row 0)
+      key("Down"),
+      key("Down"),
+      key("Enter"), // tick Logs (row 2)
+      key("Down"),
+      key("Down"), // past the free-text row onto Submit
+      key("Enter"),
+      key("Enter"), // review tab
+    ]);
+  });
+
+  test("multiSelect free text ticks its own row, so it takes no Enter", () => {
+    const questions = [
+      {
+        question: "Feat",
+        multiSelect: true,
+        options: [{ label: "Auth" }, { label: "Cache" }],
+      },
+    ];
+    const answers = [{ kind: "multi", indices: [0], text: "plus metrics" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      key("Enter"),
+      key("Down"),
+      key("Down"),
+      text("plus metrics"),
+      key("Down"),
+      key("Enter"),
+      key("Enter"),
+    ]);
+  });
+
+  test("multiSelect with only free text still reaches Submit", () => {
+    const questions = [
+      {
+        question: "Feat",
+        multiSelect: true,
+        options: [{ label: "Auth" }, { label: "Cache" }],
+      },
+    ];
+    const answers = [{ kind: "multi", indices: [], text: "something else" }];
+    expect(buildAskUserQuestionKeys(questions, answers)).toEqual([
+      key("Down"),
+      key("Down"),
+      text("something else"),
+      key("Down"),
+      key("Enter"),
+      key("Enter"),
+    ]);
+  });
+
+  test("throws rather than emitting keys for an unanswerable answer", () => {
+    const q = [{ question: "Q", options: [{ label: "A" }] }];
+    expect(() =>
+      buildAskUserQuestionKeys(q, [{ kind: "text", value: " " }]),
+    ).toThrow();
+    expect(() => buildAskUserQuestionKeys(q, [null])).toThrow();
+    expect(() =>
+      buildAskUserQuestionKeys(q, [{ kind: "option", index: 3 }]),
+    ).toThrow();
+    expect(() =>
+      buildAskUserQuestionKeys(
+        [{ question: "Q", multiSelect: true, options: [{ label: "A" }] }],
+        [{ kind: "multi", indices: [] }],
+      ),
+    ).toThrow();
+  });
+
+  test("throws on a gap, which would answer the wrong question", () => {
+    const questions = [
+      { question: "Q1", options: [{ label: "A" }] },
+      { question: "Q2", options: [{ label: "X" }] },
+    ];
+    expect(() =>
+      buildAskUserQuestionKeys(questions, [null, { kind: "option", index: 0 }]),
+    ).toThrow();
   });
 });
 

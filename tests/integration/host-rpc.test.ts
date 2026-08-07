@@ -131,17 +131,17 @@ describe("host RPC e2e", () => {
       onRpc: (frame) => ({
         action: "host_ls_done",
         request_id: frame.request_id,
-        error: "path is outside allowed roots",
+        error: "path must be absolute",
       }),
     });
     await waitForHost(hub.hostRegistry, "alice@a");
 
     const resp = await fetch(
-      `http://localhost:${hub.port}/api/host/alice@a/ls?path=/etc`,
+      `http://localhost:${hub.port}/api/host/alice@a/ls?path=relative/dir`,
     );
     expect(resp.status).toBe(403);
     const body = (await resp.json()) as { error: string };
-    expect(body.error).toContain("outside");
+    expect(body.error).toContain("absolute");
 
     daemon.close();
   });

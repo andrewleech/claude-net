@@ -165,13 +165,10 @@ for ev in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
     else:
         d["hooks"][ev] = [entry]
 
-# Seed claudeNet.workspaces + claudeNet.launch when absent so users
-# can discover + edit them from settings.json. Don't overwrite existing
-# user configuration.
+# Seed claudeNet.launch when absent so users can discover + edit it from
+# settings.json. Don't overwrite existing user configuration.
 d.setdefault("claudeNet", {})
 cn = d["claudeNet"]
-if "workspaces" not in cn:
-    cn["workspaces"] = {"roots": ["~/projects"]}
 if "launch" not in cn:
     cn["launch"] = {"allow_dangerous_skip": True}
 

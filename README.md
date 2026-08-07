@@ -228,21 +228,21 @@ Every host running `claude-channels` opens a long-lived control socket to the hu
 
 Picking Launch POSTs `/api/host/<id>/launch`. The daemon runs `tmux new-session -d -s claude-channels-<uuid> -c <cwd> -- claude-channels [--dangerously-skip-permissions]` as the current user. The new session's first hook registers a mirror with the hub and the dashboard replaces its "launching…" ghost row with the real session within a second or two.
 
-Config lives in `~/.claude/settings.json` under `claudeNet.workspaces` (which paths the daemon allows ls/mkdir/launch inside) and `claudeNet.launch` (whether web launches may include the dangerous skip flag):
+`ls` / `mkdir` / `launch` operate anywhere the daemon's user can reach — paths are `~`-expanded and must be absolute, but are not restricted to a configured set of roots. Paths are passed as argv to `tmux` (never shell-interpolated), so there's no command-injection surface through the cwd.
+
+Config lives in `~/.claude/settings.json` under `claudeNet.launch` (whether web launches may include the dangerous skip flag):
 
 ```json
 {
   "claudeNet": {
-    "workspaces": { "roots": ["~/projects"] },
-    "launch":     { "allow_dangerous_skip": true }
+    "launch": { "allow_dangerous_skip": true }
   }
 }
 ```
 
-- `workspaces.roots` defaults to `["~/projects"]` when unset. Every roots-path is realpath'd on load; `ls` / `mkdir` / `launch` reject any request whose resolved path isn't inside one of the realpath-roots. Symlink escape is blocked by realpath containment; `..` escape is blocked by `path.resolve`. Paths are passed as argv to `tmux` (never shell-interpolated), so there's no command-injection surface through the cwd.
 - `launch.allow_dangerous_skip` defaults to `true`. Setting it to `false` makes the daemon strip `--dangerously-skip-permissions` from web-launched sessions and reject launch requests that asked for it. The dashboard hides the checkbox for hosts advertising `false` during `host_register`.
 
-**Trust-model note.** Launching from the web is a larger capability than streaming transcripts — the hub can cause new processes on your machine. Two gates keep this tractable under the existing trusted-network assumption: (1) the allowlist prevents launches anywhere outside your configured roots, and (2) launch requests are rate-limited to 1 per 5 s + 10 per hour per host. The hub itself must remain behind IP-whitelisted Traefik / LAN-only exposure / Tailscale — a public hub would let anyone reach `/api/host/<id>/launch`.
+**Trust-model note.** Launching from the web is a larger capability than streaming transcripts — the hub can cause new processes on your machine, in any directory that user can write. The only gate is rate-limiting (1 per 5 s + 10 per hour per host). The hub must remain behind IP-whitelisted Traefik / LAN-only exposure / Tailscale — a public hub would let anyone reach `/api/host/<id>/launch`.
 
 ## How it works
 

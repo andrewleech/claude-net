@@ -947,6 +947,21 @@
     border-color: var(--text-accent);
     background: var(--accent-ink);
   }
+  /* In the standard layout the box is a choice like the options above:
+     clicking anywhere on it selects the typed answer. */
+  .m-aq-standard .m-aq-text {
+    cursor: pointer;
+  }
+  .m-aq-standard .m-aq-text:hover {
+    border-color: var(--text-accent);
+  }
+  /* Only the standard layout's head carries the "use this answer" button. */
+  .m-aq-standard .m-aq-text-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
   .m-aq-text-head {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -955,7 +970,25 @@
     text-transform: uppercase;
     margin-bottom: 6px;
   }
+  .m-aq-text-pick {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    padding: 3px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .m-aq-text-pick:hover,
+  .m-aq-text-pick[aria-pressed='true'] {
+    border-color: var(--text-accent);
+    color: var(--text-accent);
+  }
   .m-aq-text-area {
+    cursor: text;
     width: 100%;
     background: var(--bg);
     color: var(--text);
@@ -6178,6 +6211,9 @@
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'm-aq-opt';
+        // In the standard layout the options and the free-text box are one
+        // set of mutually exclusive choices, so both carry their state.
+        if (layout === 'standard') btn.setAttribute('aria-pressed', 'false');
         var label = document.createElement('div');
         label.className = 'm-aq-opt-label';
         if (layout === 'multi') {
@@ -6202,7 +6238,12 @@
         return btn;
       }
 
-      function textField(headText, placeholder, onInput) {
+      // onActivate, when given, turns the box into a choice alongside the
+      // option buttons: clicking anywhere in it picks it, and a "Use this
+      // answer" button in the head gives keyboard and touch users the same
+      // action. Fields without it are plain inputs that feed the answer as
+      // the caller sees fit.
+      function textField(headText, placeholder, onInput, onActivate) {
         var wrap = document.createElement('div');
         wrap.className = 'm-aq-text';
         var head = document.createElement('div');
@@ -6215,7 +6256,24 @@
         area.placeholder = placeholder;
         area.addEventListener('input', function () { onInput(area.value, wrap, area); });
         wrap.appendChild(area);
-        return { wrap: wrap, area: area };
+        var pick = null;
+        if (onActivate) {
+          pick = document.createElement('button');
+          pick.type = 'button';
+          pick.className = 'm-aq-text-pick';
+          pick.textContent = 'Use this answer';
+          pick.setAttribute('aria-pressed', 'false');
+          head.appendChild(pick);
+          wrap.addEventListener('click', function () { onActivate(); });
+        }
+        return {
+          wrap: wrap,
+          area: area,
+          setSelected: function (on) {
+            wrap.classList.toggle('selected', on);
+            if (pick) pick.setAttribute('aria-pressed', on ? 'true' : 'false');
+          },
+        };
       }
 
       for (var qi = 0; qi < qs.length; qi++) {
@@ -6304,27 +6362,41 @@
 
           // standard — "type your own" mirrors the modal's "Type something."
           // row, which replaces an option choice rather than adding to it.
-          var ownText = textField('Or type your own answer:', 'Type something…', function (v, wrap) {
-            if (v.length === 0) {
-              if (answers[i] && answers[i].kind === 'text') answers[i] = null;
-              wrap.classList.remove('selected');
-            } else {
-              answers[i] = { kind: 'text', value: v };
-              for (var k = 0; k < optionButtons.length; k++) optionButtons[k].classList.remove('selected');
-              wrap.classList.add('selected');
+          // The box is a choice in its own right: picking an option only
+          // deselects it, keeping the typed text so it can be selected
+          // again. Parsers.standardAnswerState holds the rules; this layer
+          // only forwards events and paints the result.
+          var state = window.Parsers.standardAnswerState();
+          var ownText;
+          function renderStandard() {
+            for (var k = 0; k < optionButtons.length; k++) {
+              var on = k === state.optionIndex();
+              optionButtons[k].classList.toggle('selected', on);
+              optionButtons[k].setAttribute('aria-pressed', on ? 'true' : 'false');
             }
+            ownText.setSelected(state.textSelected());
+            answers[i] = state.answer();
             updateSubmitEnabled();
-          });
+          }
+          ownText = textField(
+            'Or type your own answer:',
+            'Type something…',
+            function (v) {
+              state.setText(v);
+              renderStandard();
+            },
+            function () {
+              // Nothing to select while the box is blank — put the caret
+              // in it instead so the click still does the obvious thing.
+              if (!state.selectText()) ownText.area.focus();
+              renderStandard();
+            }
+          );
           section.appendChild(ownText.wrap);
           card.appendChild(section);
           onOptionClick = function (jj) {
-            answers[i] = { kind: 'option', index: jj };
-            for (var k = 0; k < optionButtons.length; k++) {
-              optionButtons[k].classList.toggle('selected', k === jj);
-            }
-            ownText.wrap.classList.remove('selected');
-            ownText.area.value = '';
-            updateSubmitEnabled();
+            state.selectOption(jj);
+            renderStandard();
           };
         })(qi, qs[qi]);
       }

@@ -502,6 +502,55 @@ function aqText(value) {
   return typeof value === "string" ? value.replace(/\s+$/, "") : "";
 }
 
+/**
+ * Selection state for one standard-layout question, where the option list
+ * and the free-text box are mutually exclusive answers.
+ *
+ * The typed text outlives its selection: picking an option deselects the
+ * box but keeps what was typed, so `selectText()` can make it the answer
+ * again. Blank text is not selectable — buildAskUserQuestionKeys rejects an
+ * empty free-text answer, so the box must not look chosen when it holds
+ * only whitespace.
+ */
+export function standardAnswerState() {
+  let option = -1;
+  let text = "";
+  let chosen = false;
+  const blank = () => text.trim().length === 0;
+  return {
+    /** Highlighted option, or -1 when none is. */
+    optionIndex: () => option,
+    /** Whether the free-text box is the current answer. */
+    textSelected: () => chosen,
+    selectOption(index) {
+      option = index;
+      chosen = false;
+    },
+    /** Returns false when the box is blank and so cannot be the answer. */
+    selectText() {
+      if (blank()) return false;
+      option = -1;
+      chosen = true;
+      return true;
+    },
+    /** Typing selects the box; blanking it deselects without restoring an option. */
+    setText(value) {
+      text = typeof value === "string" ? value : "";
+      if (blank()) {
+        chosen = false;
+        return;
+      }
+      option = -1;
+      chosen = true;
+    },
+    answer() {
+      if (chosen) return { kind: "text", value: text };
+      if (option >= 0) return { kind: "option", index: option };
+      return null;
+    },
+  };
+}
+
 function aqOptionIndex(index, count, where) {
   if (!Number.isInteger(index) || index < 0 || index >= count) {
     throw new Error(`${where}: option index ${index} is out of range.`);

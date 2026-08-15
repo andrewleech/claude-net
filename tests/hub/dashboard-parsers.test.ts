@@ -21,6 +21,7 @@ import {
   parsePromptMenu,
   parseReadContent,
   splitTextPaths,
+  standardAnswerState,
   toWebSearchText,
   unwrapMcpText,
 } from "@/hub/dashboard/parsers.js";
@@ -372,6 +373,90 @@ describe("askUserQuestionLayout", () => {
         options: [{ label: "A", preview: "┌──┐" }],
       }),
     ).toBe("multi");
+  });
+});
+
+describe("standardAnswerState", () => {
+  test("starts unanswered", () => {
+    const st = standardAnswerState();
+    expect(st.answer()).toBe(null);
+    expect(st.optionIndex()).toBe(-1);
+    expect(st.textSelected()).toBe(false);
+  });
+
+  test("typing selects the box and drops the chosen option", () => {
+    const st = standardAnswerState();
+    st.selectOption(1);
+    st.setText("my own words");
+    expect(st.answer()).toEqual({ kind: "text", value: "my own words" });
+    expect(st.optionIndex()).toBe(-1);
+    expect(st.textSelected()).toBe(true);
+  });
+
+  test("picking an option deselects the box but keeps the text", () => {
+    const st = standardAnswerState();
+    st.setText("a long draft");
+    st.selectOption(2);
+    expect(st.answer()).toEqual({ kind: "option", index: 2 });
+    expect(st.textSelected()).toBe(false);
+    expect(st.selectText()).toBe(true);
+    expect(st.answer()).toEqual({ kind: "text", value: "a long draft" });
+  });
+
+  test("a blank box cannot be selected", () => {
+    const st = standardAnswerState();
+    expect(st.selectText()).toBe(false);
+    st.setText("   \n ");
+    expect(st.selectText()).toBe(false);
+    expect(st.textSelected()).toBe(false);
+    expect(st.answer()).toBe(null);
+  });
+
+  test("clicking a blank box leaves the chosen option alone", () => {
+    const st = standardAnswerState();
+    st.selectOption(1);
+    expect(st.selectText()).toBe(false);
+    expect(st.answer()).toEqual({ kind: "option", index: 1 });
+  });
+
+  test("whitespace-only text is not an answer", () => {
+    const st = standardAnswerState();
+    st.setText("draft");
+    st.setText("  ");
+    expect(st.textSelected()).toBe(false);
+    expect(st.answer()).toBe(null);
+  });
+
+  test("clearing the selected box does not restore an earlier option", () => {
+    const st = standardAnswerState();
+    st.selectOption(0);
+    st.setText("draft");
+    st.setText("");
+    expect(st.answer()).toBe(null);
+  });
+
+  test("clearing an unselected box leaves the chosen option alone", () => {
+    const st = standardAnswerState();
+    st.setText("draft");
+    st.selectOption(1);
+    st.setText("");
+    expect(st.answer()).toEqual({ kind: "option", index: 1 });
+  });
+
+  test("answers feed buildAskUserQuestionKeys", () => {
+    const st = standardAnswerState();
+    st.setText("free form");
+    expect(
+      buildAskUserQuestionKeys(
+        [{ question: "q", options: [{ label: "A" }, { label: "B" }] }],
+        [st.answer()],
+      ),
+    ).toEqual([
+      { type: "key", name: "Down" },
+      { type: "key", name: "Down" },
+      { type: "text", value: "free form" },
+      { type: "key", name: "Enter" },
+    ]);
   });
 });
 

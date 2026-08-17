@@ -2290,15 +2290,27 @@ function findOpenJsonlForPid(
  * same sid the CC will fire its hooks with (rather than minting a
  * fresh UUID that's guaranteed to disagree).
  *
- * Returns null when the projects dir is absent, empty, or unreadable
- * — the probe falls back to its old "fresh UUID" path in that case so
- * the broader behaviour is unchanged.
+ * Two or more Claude Code processes can share a cwd - most commonly
+ * `--fork-session` siblings - so this tries progressively weaker
+ * signals and abstains rather than guess once the cwd is genuinely
+ * ambiguous and no stronger signal resolved it:
  *
- * Resolution order: first try `/proc/<pid>/fd` for a transcript the
- * process actually holds open — that pins the sid to THIS pid, so two CC
- * processes sharing one cwd don't both resolve to the same (mtime-latest)
- * file and thrash a single session between them. Fall back to the mtime
- * scan (covers macOS, and Linux when CC isn't currently holding the fd).
+ *   1. The session id named explicitly on the process's own command
+ *      line (`--resume <uuid>` / `--session-id <uuid>`), when that
+ *      transcript exists on disk. Authoritative.
+ *   2. The transcript `ccPid` actually holds open, via `/proc/<ccPid>/fd`
+ *      (Linux only). Opportunistic - some Claude Code versions open and
+ *      close the transcript per write, in which case this never finds
+ *      anything and falls through.
+ *   3. Newest-mtime file in the project dir, when there's only one
+ *      candidate transcript, or when this pid is the sole live Claude
+ *      Code for the cwd - either way there's only one plausible owner.
+ *   4. Abstain (null) when multiple transcripts exist AND the cwd is
+ *      shared by two or more live Claude Code processes: the newest
+ *      file's owner is genuinely undecidable from here, and a wrong
+ *      guess would misattribute one process's session to another's.
+ *
+ * Returns null when the projects dir is absent, empty, or unreadable.
  */
 export function findActiveSessionForCcPid(
   ccPid: number,
@@ -2314,21 +2326,31 @@ export function findActiveSessionForCcPid(
     encodeProjectDirName(cwd),
   );
 
-  // Preferred: a JSONL under this project dir that pid `ccPid` has open.
-  const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
-  if (held) return held;
-
   let entries: string[];
   try {
     entries = fs.readdirSync(projectDir);
   } catch {
     return null;
   }
-  const held = findHeldTranscript(ccPid, projectDir, procRoot);
+
+  const cmdlineSid = readSidFromCmdline(ccPid, procRoot);
+  if (cmdlineSid && entries.includes(`${cmdlineSid}.jsonl`)) {
+    return {
+      sessionId: cmdlineSid,
+      transcriptPath: path.join(projectDir, `${cmdlineSid}.jsonl`),
+    };
+  }
+
+  const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
   if (held) return held;
+
+  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
+  if (jsonlNames.length > 1 && countLiveCcProcessesForCwd(cwd, procRoot) >= 2) {
+    return null;
+  }
+
   let best: { name: string; mtimeMs: number } | null = null;
-  for (const name of entries) {
-    if (!name.endsWith(".jsonl")) continue;
+  for (const name of jsonlNames) {
     try {
       const stat = fs.statSync(path.join(projectDir, name));
       if (best === null || stat.mtimeMs > best.mtimeMs) {
@@ -2351,39 +2373,87 @@ export function findActiveSessionForCcPid(
 }
 
 /**
- * Scan `/proc/<ccPid>/fd` for an open file descriptor pointing at a
- * `<projectDir>/<sid>.jsonl` transcript. Linux-only (procRoot is
- * unreadable elsewhere, so this is a natural no-op on macOS/Windows).
- * Returns null on any lookup failure (process gone, no permission, no
- * matching fd) so the caller falls back to the mtime scan.
+ * Extract an explicit session id from a process's command line, for the
+ * flags that take a uuid argument (`--resume`/`-r`, `--session-id`).
+ * NUL (\x00) is the field separator in /proc/PID/cmdline on Linux -
+ * argv[0] ends in NUL, not whitespace. Returns null when the cmdline
+ * is unreadable (process gone, no permission, non-Linux) or names no
+ * such flag.
  */
-function findHeldTranscript(
-  ccPid: number,
-  projectDir: string,
-  procRoot: string,
-): DiscoveredSession | null {
-  if (!Number.isFinite(ccPid) || ccPid <= 0) return null;
-  const fdDir = path.join(procRoot, String(ccPid), "fd");
-  let fdNames: string[];
+function readSidFromCmdline(pid: number, procRoot: string): string | null {
+  let raw: string;
   try {
-    fdNames = fs.readdirSync(fdDir);
+    raw = fs.readFileSync(path.join(procRoot, String(pid), "cmdline"), "utf8");
   } catch {
     return null;
   }
-  const prefix = `${projectDir}${path.sep}`;
-  for (const fdName of fdNames) {
-    let target: string;
+  const args = raw.split("\0").filter((a) => a.length > 0);
+  // --fork-session resumes a transcript under a freshly generated session
+  // id, so the id on the command line belongs to the session being forked
+  // from, not to this process. Treating it as authoritative would bind a
+  // fork to its original's sid.
+  if (args.includes("--fork-session")) return null;
+  for (let i = 0; i < args.length - 1; i++) {
+    const flag = args[i];
+    if (flag === "--resume" || flag === "-r" || flag === "--session-id") {
+      const candidate = args[i + 1];
+      if (candidate && /^[0-9a-f-]{32,40}$/i.test(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * True when `exe` (the target of /proc/<pid>/exe) looks like a Claude
+ * Code binary: Anthropic's native install layout
+ * (`.../claude/versions/<ver>/claude`), a plain `.../claude`, or
+ * bin/claude-channels' same-length-patched binary
+ * (`.../claude-channels/claude-patched-<hash>`).
+ */
+function isClaudeCodeExe(exe: string): boolean {
+  return (
+    /\/claude\/versions\//.test(exe) ||
+    /\/claude$/.test(exe) ||
+    /\/cc-patcher\/claude-patched/.test(exe) ||
+    /\/claude-channels\/claude-patched/.test(exe)
+  );
+}
+
+/**
+ * Count live Claude Code processes whose cwd is exactly `cwd`. Used to
+ * decide whether a newest-mtime transcript pick is unambiguous (see
+ * `findActiveSessionForCcPid`). Linux-only, like the rest of the
+ * /proc-based discovery in this file - returns 0 when procRoot can't
+ * be listed, which callers treat as "can't tell, don't block on it".
+ */
+function countLiveCcProcessesForCwd(cwd: string, procRoot: string): number {
+  let pidDirs: string[];
+  try {
+    pidDirs = fs.readdirSync(procRoot);
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const dirName of pidDirs) {
+    if (!/^\d+$/.test(dirName)) continue;
+    let exe: string;
     try {
-      target = fs.readlinkSync(path.join(fdDir, fdName));
+      exe = fs.readlinkSync(path.join(procRoot, dirName, "exe"));
     } catch {
       continue;
     }
-    if (!target.startsWith(prefix) || !target.endsWith(".jsonl")) continue;
-    const sessionId = target.slice(prefix.length, -".jsonl".length);
-    if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) continue;
-    return { sessionId, transcriptPath: target };
+    if (!isClaudeCodeExe(exe)) continue;
+    let pcwd: string;
+    try {
+      pcwd = fs.readlinkSync(path.join(procRoot, dirName, "cwd"));
+    } catch {
+      continue;
+    }
+    if (pcwd === cwd) count++;
   }
-  return null;
+  return count;
 }
 
 /**
@@ -2446,14 +2516,7 @@ export function discoverRunningCcSessions(
     } catch {
       continue;
     }
-    if (
-      !/\/claude\/versions\//.test(exe) &&
-      !/\/claude$/.test(exe) &&
-      !/\/cc-patcher\/claude-patched/.test(exe) &&
-      !/\/claude-channels\/claude-patched/.test(exe)
-    ) {
-      continue;
-    }
+    if (!isClaudeCodeExe(exe)) continue;
     let cwd: string;
     try {
       cwd = fs.readlinkSync(`${procRoot}/${pid}/cwd`);

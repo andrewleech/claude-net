@@ -1560,11 +1560,13 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("POST /:sid/close drops an agent-bound entry instead of leaving it soft-closed-and-resurrectable", async () => {
+  test("POST /:sid/close severs an agent-bound entry but keeps it browsable for the retention window", async () => {
     // Regression for the bug where /close called the soft closeSession,
     // which left entry.agent bound — the still-connected daemon then
     // re-opened it on its next keepalive/hook re-POST, so /close looked
-    // like a 200 success but never actually dropped the entry.
+    // like a 200 success but never actually severed the entry. And for
+    // the follow-up bug where the fix (closeAndDrop) deleted the entry
+    // immediately, making the retention window unreachable from /close.
     const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 60_000 });
     const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
     app.listen(0);
@@ -1598,13 +1600,19 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
         { method: "POST" },
       );
       expect(res.status).toBe(200);
-      // Fully dropped — not just closedAt flipped, which the daemon's
-      // next re-POST would flip right back.
-      expect(reg.hasSession("bound-sid")).toBe(false);
+      // Still in the registry (browsable) - not immediately dropped.
+      expect(reg.hasSession("bound-sid")).toBe(true);
+      const after = reg.getSession("bound-sid", "hostA");
+      expect(after.ok).toBe(true);
+      if (after.ok) {
+        expect(after.entry.closedAt).not.toBe(null);
+        expect(after.entry.agent).toBe(null);
+      }
+      // The bound WS was actually disconnected, not just left dangling.
       expect(agentClosed).toBe(true);
 
-      // A re-POST from the SAME process (same ccPid) after the drop is
-      // a normal fresh create, not a resurrection of the old entry.
+      // A re-POST from the SAME process (same ccPid) after the close
+      // must not resurrect it - that's the whole point of severing.
       const recreate = reg.createSession(
         "bound:u@h",
         "/bound",
@@ -1612,9 +1620,44 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
         "hostA",
         4242,
       );
-      expect(recreate.ok).toBe(true);
-      if (!recreate.ok) return;
-      expect(recreate.restored).toBe(false);
+      expect(recreate.ok).toBe(false);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("POST /:sid/close leaves the transcript reachable via GET until retention expires", async () => {
+    const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 60_000 });
+    const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
+    app.listen(0);
+    // biome-ignore lint/style/noNonNullAssertion: listen guarantees server
+    const port = app.server!.port;
+    try {
+      reg.createSession("browsable:u@h", "/browsable", "browsable-sid");
+      reg.recordEvent(
+        "browsable-sid",
+        makeFrame("browsable-sid", "evt-1", {
+          payload: { kind: "user_prompt", prompt: "hi", cwd: "/browsable" },
+        }),
+      );
+
+      const closeRes = await fetch(
+        `http://localhost:${port}/api/mirror/browsable-sid/close`,
+        { method: "POST" },
+      );
+      expect(closeRes.status).toBe(200);
+
+      const transcriptRes = await fetch(
+        `http://localhost:${port}/api/mirror/browsable-sid/transcript`,
+      );
+      expect(transcriptRes.status).toBe(200);
+      const payload = (await transcriptRes.json()) as {
+        closed_at: string | null;
+        transcript: unknown[];
+      };
+      expect(payload.closed_at).not.toBe(null);
+      // Original event plus the synthesized session_end.
+      expect(payload.transcript.length).toBeGreaterThanOrEqual(2);
     } finally {
       app.stop();
     }
@@ -1640,10 +1683,14 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       );
       expect(res.status).toBe(200);
 
+      // hostA's entry is closed (but still browsable - see the
+      // retention-window test above); hostB's is untouched.
       const onA = reg.getSession("dup-sid", "hostA");
-      expect(onA.ok).toBe(false);
+      expect(onA.ok).toBe(true);
+      if (onA.ok) expect(onA.entry.closedAt).not.toBe(null);
       const onB = reg.getSession("dup-sid", "hostB");
       expect(onB.ok).toBe(true);
+      if (onB.ok) expect(onB.entry.closedAt).toBe(null);
     } finally {
       app.stop();
     }
@@ -1723,6 +1770,43 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
+  test("createSession re-POST from the same ccPid does NOT re-open a severed sid", () => {
+    // closeAndSever (the explicit-close path) is stricter than the
+    // plain soft closeSession above: once severed, no re-POST - same
+    // ccPid or not - brings the entry back. It stays around (browsable)
+    // only until the retention window drops it.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "severed-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      quick.closeAndSever("severed-sid", "exit", "hostA");
+      expect(quick.hasSession("severed-sid")).toBe(true); // still browsable
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "severed-sid",
+        "hostA",
+        111,
+      );
+      expect(reopen.ok).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
   test("orphan sweep backstop reaps a long-idle agent-bound entry", () => {
     const quick = new MirrorRegistry({
       transcriptRing: 10,
@@ -1762,6 +1846,53 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       r.entry.lastEventAt = longAgo;
       (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
       expect(quick.hasSession(sid)).toBe(false);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("bound entry with recent activity survives the sweep under the default backstop", () => {
+    // Safety direction check for the backstop itself: an idle-but-alive
+    // bound session (agent connected, user hasn't typed in a while but
+    // well within boundOrphanCloseMs) must not be reaped just because
+    // a sweep ran.
+    const quick = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    try {
+      const r = quick.createSession("bound:u@h", "/bound");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
+      // lastEventAt/createdAt default to "now" - recent by construction.
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(true);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("boundOrphanCloseMs: 0 disables the bound-entry backstop", () => {
+    // An entry old enough that the DEFAULT backstop would reap it must
+    // survive both sweeps once boundOrphanCloseMs is explicitly 0.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+      boundOrphanCloseMs: 0,
+    });
+    try {
+      const r = quick.createSession("bound:u@h", "/bound");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
+      const longAgo = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago
+      r.entry.createdAt = longAgo;
+      r.entry.lastEventAt = longAgo;
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      expect(quick.hasSession(sid)).toBe(true);
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(true);
     } finally {
       quick.stop();
     }

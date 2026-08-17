@@ -81,7 +81,7 @@ When reverse-engineering a new gate or check:
 | `?.accessToken` (property access pattern) | Exact function signatures |
 | `{action:"skip",kind:"allowlist"` (return value shape) | Line numbers or byte offsets |
 
-## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159, v2.1.229)
+## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159, v2.1.222, v2.1.226, v2.1.229, v2.1.231, v2.1.233)
 
 Implementation: `patcher-ext/claude_net_patcher/channels.py`, a `cc_patcher.patches` entry-point provider consumed by the `cc-patcher` engine (`~/cc-patcher`).
 

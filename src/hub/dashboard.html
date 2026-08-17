@@ -1323,6 +1323,45 @@
     box-shadow: none;
   }
 
+  /* Resize grip: drag the top edge of the compose bar upward to give a
+     long prompt more room. The dragged height is a floor: content still
+     auto-grows past it, and the box never goes below the two-row
+     default. Pointer devices only. */
+  .mirror-compose-grip {
+    position: absolute;
+    top: -4px;
+    left: 0;
+    right: 0;
+    height: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    /* Above the compose frame's border, below the slash popover. */
+    z-index: 19;
+    touch-action: none;
+  }
+  .mirror-compose-grip::before {
+    content: "";
+    width: 54px;
+    height: 2px;
+    background: var(--border);
+    transition: background 0.1s, width 0.1s;
+  }
+  .mirror-compose-grip:hover::before,
+  .mirror-compose.is-resizing .mirror-compose-grip::before {
+    background: var(--text-accent);
+    width: 96px;
+  }
+  /* No grip on touch devices: the software keyboard already governs how
+     much room the box gets, and the strip would sit under a thumb. */
+  .mirror-compose.is-touch .mirror-compose-grip { display: none; }
+  /* Suppress text selection everywhere while a drag is in flight. */
+  body.cn-compose-resizing {
+    user-select: none;
+    cursor: ns-resize;
+  }
+
   /* Trailing cluster: keyboard hint + Send button, stacked so the
      hint reads 'Enter to send · Shift+Enter for newline' without
      bloating the button text itself. */
@@ -3081,6 +3120,9 @@
         </div>
         <div class="mirror-queued" id="mirror-queued" hidden></div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
+          <div class="mirror-compose-grip" id="mirror-compose-grip"
+               title="Drag to resize, double-click to reset"
+               aria-hidden="true"></div>
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
           <div class="mirror-schedule-pop" id="mirror-schedule-pop" hidden>
             <div class="msp-title">Send after</div>
@@ -5041,7 +5083,10 @@
       agentTabsEl.classList.toggle('d-none', Object.keys(agentTabs).length <= 1);
     }
 
-    function selectAgentTab(aid) {
+    // `fromUser` marks a click on a tab (or on a Task card linking to one)
+    // as opposed to an internal switch such as falling back to Main when
+    // the active pane is pruned. Only the former re-snaps the scroll.
+    function selectAgentTab(aid, fromUser) {
       if (!agentPanes[aid]) return;
       activeAgentTab = aid;
       Object.keys(agentPanes).forEach(function(k) {
@@ -5055,9 +5100,14 @@
           t.tabEl.classList.remove('has-unread');
         }
       });
-      requestAnimationFrame(function() {
-        transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      });
+      if (!fromUser) return;
+      // Selecting a tab lands on that pane's latest event. Toggling pane
+      // visibility rewrites the transcript's scroll geometry, so snap
+      // across several frames with virtualization off instead of a single
+      // rAF, which can land short and read as "it scrolled up".
+      setScrolledUp(false);
+      deferVirtualization(400);
+      startTailObserver();
     }
 
     function setAgentTabStatus(aid, status) {
@@ -5127,7 +5177,7 @@
         '<span class="m-agent-tab-dot running"></span>' +
         '<span class="m-agent-tab-label"></span>';
       tab.querySelector('.m-agent-tab-label').textContent = label;
-      tab.addEventListener('click', function() { selectAgentTab(aid); }, { signal: attachSig });
+      tab.addEventListener('click', function() { selectAgentTab(aid, true); }, { signal: attachSig });
       if (agentTabsEl) agentTabsEl.appendChild(tab);
       var rec = { type: agentType || '', label: label, status: 'running', tabEl: tab, unread: false };
       agentTabs[aid] = rec;
@@ -5172,7 +5222,7 @@
         mainTab.className = 'm-agent-tab active';
         mainTab.setAttribute('data-agent', 'main');
         mainTab.innerHTML = '<span class="m-agent-tab-label">Main</span>';
-        mainTab.addEventListener('click', function() { selectAgentTab('main'); }, { signal: attachSig });
+        mainTab.addEventListener('click', function() { selectAgentTab('main', true); }, { signal: attachSig });
         agentTabsEl.appendChild(mainTab);
         agentTabs.main = { type: 'main', label: 'Main', status: '', tabEl: mainTab, unread: false };
       }
@@ -5182,6 +5232,27 @@
 
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
+    // True until this attach has rendered its first init frame. Selecting
+    // a session always lands on the latest message; the saved scroll-back
+    // position is only restored when a reconnect re-inits a session the
+    // user is already reading.
+    var initSnapToTail = true;
+    // Row virtualization (content-visibility) makes scrollHeight an
+    // estimate, so it stays off while a scroll target is being applied
+    // and comes back once the position has settled. Switching it back on
+    // resizes every skipped row to its intrinsic estimate, which grows
+    // scrollHeight and leaves a tailed transcript sitting above the
+    // bottom, so re-snap afterwards unless the user has scrolled up.
+    var virtualizeTimer = null;
+    function deferVirtualization(ms) {
+      transcriptEl.classList.remove('is-virtualized');
+      if (virtualizeTimer) clearTimeout(virtualizeTimer);
+      virtualizeTimer = setTimeout(function() {
+        virtualizeTimer = null;
+        transcriptEl.classList.add('is-virtualized');
+        if (!userScrolledUp) startTailObserver();
+      }, ms);
+    }
     // Anchor for "load earlier history" requests — the timestamp of
     // the oldest frame currently rendered. Set on first renderEvent
     // (live or backfilled) and lowered as older frames are prepended.
@@ -5257,7 +5328,7 @@
       var linked = e.target.closest && e.target.closest('[data-linked-agent]');
       if (!linked) return;
       var targetAgent = linked.getAttribute('data-linked-agent');
-      if (targetAgent) selectAgentTab(targetAgent);
+      if (targetAgent) selectAgentTab(targetAgent, true);
     }, { signal: attachSig });
 
     // Initial-replay tail-snap loop. scrollHeight is real so a couple
@@ -8137,6 +8208,13 @@
       firstRenderedTs = null;
       historyDivider = null;
       updateHistoryBtn();
+      // Turn virtualization OFF during initial replay so scrollHeight
+      // is accurate (content-visibility's estimated heights make
+      // "scroll to end" land on the wrong place — especially on
+      // mobile). 800ms is generous enough for the rAF snap loop below
+      // (≤4 frames) plus mobile paint settling, well under typical
+      // session-switch reaction time.
+      deferVirtualization(800);
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       activeSubagents = Object.create(null);
@@ -8145,10 +8223,12 @@
       // rather than accumulating stale tabs from the previous attach.
       resetAgentTabsUi();
       disconnectTailObserver();
-      // Restore per-session scroll-back state. If the user previously
-      // scrolled up in this session, preserve that and restore their
-      // position; otherwise snap to the tail.
-      var scrollState = sessionScrollState.get(sid);
+      // Restore per-session scroll-back state on a reconnect re-init: if
+      // the user was scrolled up mid-read, preserve that and restore their
+      // position. The first init after selecting a session ignores the
+      // saved state and snaps to the tail.
+      var scrollState = initSnapToTail ? null : sessionScrollState.get(sid);
+      initSnapToTail = false;
       // Set userScrolledUp before the render loop so that scrollToBottom()
       // calls inside renderEvent no-op when we intend to restore position.
       setScrolledUp(!!(scrollState && scrollState.scrolledUp));
@@ -8276,6 +8356,7 @@
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       closeImageLightbox();
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
+      if (virtualizeTimer) { clearTimeout(virtualizeTimer); virtualizeTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       // Delayed-send: stop the countdown ticker and wipe the per-session
       // queued strip / popover so the next session starts clean.
@@ -8414,13 +8495,36 @@
       autoresizeCompose();
     }
 
+    // Two-row default floor for the compose textarea; mirrors the
+    // stylesheet's min-height.
+    var COMPOSE_MIN_HEIGHT_PX = 46;
+    // Transcript rows always left visible above a resized compose box.
+    var COMPOSE_MIN_TRANSCRIPT_PX = 120;
+    // Height (px) the user dragged the resize grip to; 0 = automatic.
+    var composeManualHeight = 0;
+
+    function composeMaxHeight() {
+      // Everything the textarea could claim is its own height plus the
+      // transcript's slack. Measuring the transcript rather than the
+      // window keeps the header, tabs and status rows accounted for.
+      var taH = composeText
+        ? composeText.getBoundingClientRect().height
+        : COMPOSE_MIN_HEIGHT_PX;
+      var slack = transcriptEl
+        ? transcriptEl.clientHeight - COMPOSE_MIN_TRANSCRIPT_PX
+        : 0;
+      return Math.max(COMPOSE_MIN_HEIGHT_PX, Math.floor(taH + slack));
+    }
+
     function autoresizeCompose() {
       // Compose textarea has rows=2; on history load with long entries
       // it would otherwise scroll internally without growing. Match the
       // behaviour the user expects from typing.
       if (!composeText) return;
       composeText.style.height = 'auto';
-      var max = Math.floor(window.innerHeight * 0.5);
+      var max = composeManualHeight
+        ? composeMaxHeight()
+        : Math.floor(window.innerHeight * 0.5);
       composeText.style.height = Math.min(composeText.scrollHeight, max) + 'px';
     }
 
@@ -9096,6 +9200,95 @@
     if (composeEl) {
       if (isTouchPrimary) composeEl.classList.add('is-touch');
     }
+
+    // ── Compose resize grip ───────────────────────────────────────
+    // Dragging the grip above the compose frame sets a floor height for
+    // the textarea: content still auto-grows past it, and it never goes
+    // below the two-row default. The chosen height persists across
+    // sessions; double-clicking the grip restores automatic sizing.
+    var composeGrip = document.getElementById('mirror-compose-grip');
+    var COMPOSE_HEIGHT_KEY = 'cn-compose-height';
+
+    function applyComposeHeight(px) {
+      if (!composeText) return;
+      if (!px) {
+        composeManualHeight = 0;
+        composeText.style.minHeight = '';
+        composeText.style.maxHeight = '';
+        autoresizeCompose();
+        return;
+      }
+      composeManualHeight = Math.max(Math.round(px), COMPOSE_MIN_HEIGHT_PX);
+      composeText.style.minHeight =
+        Math.min(composeManualHeight, composeMaxHeight()) + 'px';
+      // The stylesheet caps growth at 50vh; a deliberately tall box
+      // needs that raised or the extra rows are clipped.
+      composeText.style.maxHeight = composeMaxHeight() + 'px';
+    }
+
+    if (composeGrip && composeText && !isTouchPrimary) {
+      var storedHeight = 0;
+      try {
+        storedHeight = parseInt(localStorage.getItem(COMPOSE_HEIGHT_KEY), 10);
+      } catch (e) { /* storage disabled */ }
+      if (storedHeight > COMPOSE_MIN_HEIGHT_PX) applyComposeHeight(storedHeight);
+
+      var gripDragging = false;
+      var gripStartY = 0;
+      var gripStartH = 0;
+      var gripPinned = false;
+
+      composeGrip.addEventListener('pointerdown', function(e) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        gripDragging = true;
+        gripStartY = e.clientY;
+        gripStartH = composeText.getBoundingClientRect().height;
+        // Growing the box shrinks the transcript, which would otherwise
+        // drift off the tail. Re-pin during the drag if it was pinned.
+        gripPinned = !!transcriptEl && (
+          transcriptEl.scrollHeight - transcriptEl.scrollTop -
+            transcriptEl.clientHeight
+        ) <= SCROLL_LOCK_THRESHOLD;
+        composeEl.classList.add('is-resizing');
+        document.body.classList.add('cn-compose-resizing');
+        try { composeGrip.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+        e.preventDefault();
+      }, { signal: attachSig });
+
+      composeGrip.addEventListener('pointermove', function(e) {
+        if (!gripDragging) return;
+        applyComposeHeight(
+          Math.min(gripStartH + (gripStartY - e.clientY), composeMaxHeight()),
+        );
+        if (gripPinned && transcriptEl) {
+          transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      }, { signal: attachSig });
+
+      function endGripDrag() {
+        if (!gripDragging) return;
+        gripDragging = false;
+        composeEl.classList.remove('is-resizing');
+        document.body.classList.remove('cn-compose-resizing');
+        try {
+          localStorage.setItem(COMPOSE_HEIGHT_KEY, String(composeManualHeight));
+        } catch (e) { /* storage disabled */ }
+      }
+      composeGrip.addEventListener('pointerup', endGripDrag, { signal: attachSig });
+      composeGrip.addEventListener('pointercancel', endGripDrag, { signal: attachSig });
+
+      composeGrip.addEventListener('dblclick', function() {
+        applyComposeHeight(0);
+        try { localStorage.removeItem(COMPOSE_HEIGHT_KEY); }
+        catch (e) { /* storage disabled */ }
+      }, { signal: attachSig });
+
+      // A shorter viewport must not leave the box taller than the window.
+      window.addEventListener('resize', function() {
+        if (composeManualHeight) applyComposeHeight(composeManualHeight);
+      }, { signal: attachSig });
+    }
+
     var DOUBLE_ENTER_MS = 500;
     var lastEnterAt = 0;
 

@@ -17,6 +17,7 @@ import { wsHostPlugin } from "@/hub/ws-host";
 import type { HostChannelHandle } from "@/mirror-agent/host-channel";
 import { startHostChannel } from "@/mirror-agent/host-channel";
 import { encodeProjectDirName } from "@/mirror-agent/recoverable";
+import type { HostRestoreDoneFrame } from "@/shared/types";
 import { Elysia } from "elysia";
 
 const SID = "cccccccc-1111-2222-3333-444444444444";
@@ -61,6 +62,7 @@ describe("host restore end-to-end", () => {
   let app: Elysia;
   let port: number;
   let channel: HostChannelHandle | null = null;
+  let hostRegistry: HostRegistry;
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
@@ -127,7 +129,7 @@ describe("host restore end-to-end", () => {
     delete process.env.TMUX;
     process.env.PATH = `${bin}:${process.env.PATH}`;
 
-    const hostRegistry = new HostRegistry();
+    hostRegistry = new HostRegistry();
     hostRegistry.setDashboardBroadcast(broadcastToDashboards);
     const registry = new Registry();
     const teams = new Teams(registry);
@@ -194,18 +196,35 @@ describe("host restore end-to-end", () => {
     expect(body.results).toHaveLength(1);
     expect(body.results[0].ok).toBe(true);
     expect(body.results[0].tmux_session).toBe("widget");
-    expect(body.results[0].trust_answered).toBe(true);
+    // The daemon replies as soon as the tmux spawn is done, before the
+    // trust prompt is even visible, so the response can only report that
+    // trust is still outstanding, not whether it has been answered yet.
+    expect(body.results[0].needs_trust).toBe(true);
 
     // The session is alive under the expected name.
     expect(tmux(tmuxTmp, ["list-sessions", "-F", "#{session_name}"])).toBe(
       "widget",
     );
-    // The launcher was told to resume that exact transcript.
+    // The launcher was told to resume that exact transcript. The stub
+    // writes this file asynchronously, so poll rather than reading it
+    // the instant the HTTP response comes back.
+    await waitFor(
+      () =>
+        fs.existsSync(`${trustLog}.args`) &&
+        fs.readFileSync(`${trustLog}.args`, "utf8"),
+      "launcher args file",
+    );
     expect(fs.readFileSync(`${trustLog}.args`, "utf8")).toContain(
       `--resume ${SID}`,
     );
-    // And the trust prompt was answered with option 1.
-    expect(fs.readFileSync(trustLog, "utf8").trim()).toBe("1");
+    // The trust watch runs detached in the background; give it time to
+    // see the prompt and answer it with option 1.
+    await waitFor(
+      () =>
+        fs.existsSync(trustLog) &&
+        fs.readFileSync(trustLog, "utf8").trim() === "1",
+      "trust prompt answered",
+    );
   }, 40_000);
 
   // Regression for tmux's prefix matching: a bare -t target resolves
@@ -254,11 +273,18 @@ describe("host restore end-to-end", () => {
     const body = (await res.json()) as {
       results: Array<Record<string, unknown>>;
     };
-    // The scan reports the directory as already owned, so restore declines
-    // rather than opening a second Claude on the same transcript.
-    expect(body.results[0].ok).toBe(false);
-    expect(String(body.results[0].error)).toContain("already owns");
-  });
+    // A pre-existing "widget" tmux session merely sharing the directory's
+    // basename is not evidence the directory is in use - liveness is
+    // already enforced upstream by the /proc-derived liveCwds/liveSessionIds
+    // sets. Restore proceeds and lands on the next free name in the series.
+    expect(body.results[0].ok).toBe(true);
+    expect(body.results[0].tmux_session).toBe("widget-2");
+
+    const names = tmux(tmuxTmp, ["list-sessions", "-F", "#{session_name}"])
+      .split("\n")
+      .sort();
+    expect(names).toEqual(["widget", "widget-2"]);
+  }, 40_000);
 
   test("rejects a session id that is not recoverable", async () => {
     const res = await app.handle(
@@ -276,4 +302,167 @@ describe("host restore end-to-end", () => {
     expect(body.results[0].error).toBe("no longer recoverable");
     expect(tmux(tmuxTmp, ["list-sessions", "-F", "#{session_name}"])).toBe("");
   });
+
+  test("restores a session older than the listing window", async () => {
+    const staleSid = "dddddddd-1111-2222-3333-444444444444";
+    const staleCwd = path.join(home, "projects", "stale");
+    fs.mkdirSync(staleCwd, { recursive: true });
+
+    const cfgPath = path.join(home, ".claude.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    cfg.projects[staleCwd] = {
+      lastGracefulShutdown: false,
+      hasTrustDialogAccepted: true,
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+
+    const tDir = path.join(
+      home,
+      ".claude",
+      "projects",
+      encodeProjectDirName(staleCwd),
+    );
+    fs.mkdirSync(tDir, { recursive: true });
+    const file = path.join(tDir, `${staleSid}.jsonl`);
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({ type: "user", message: { content: "old work" } })}\n`,
+    );
+    const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(file, fiveDaysAgo, fiveDaysAgo);
+
+    // A 24h-windowed listing does not surface it - the window is a
+    // listing convenience, not evidence the session stopped being
+    // recoverable.
+    const list = await app.handle(
+      new Request(
+        `http://localhost/api/host/${HOST_ID}/recoverable?within_hours=24`,
+      ),
+    );
+    const listBody = (await list.json()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(listBody.sessions.some((s) => s.session_id === staleSid)).toBe(
+      false,
+    );
+
+    // Restore still succeeds: the restore validation rescan applies no
+    // time window at all.
+    const res = await app.handle(
+      new Request(`http://localhost/api/host/${HOST_ID}/restore`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_ids: [staleSid] }),
+      }),
+    );
+    const body = (await res.json()) as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(body.results[0].ok).toBe(true);
+    expect(body.results[0].tmux_session).toBe("stale");
+  }, 40_000);
+
+  test("sanitizes a dotted directory basename to the tmux session name", async () => {
+    const dotSid = "eeeeeeee-1111-2222-3333-444444444444";
+    const dotCwd = path.join(home, "projects", "v1.2");
+    fs.mkdirSync(dotCwd, { recursive: true });
+
+    const cfgPath = path.join(home, ".claude.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    cfg.projects[dotCwd] = {
+      lastGracefulShutdown: false,
+      hasTrustDialogAccepted: true,
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+
+    const tDir = path.join(
+      home,
+      ".claude",
+      "projects",
+      encodeProjectDirName(dotCwd),
+    );
+    fs.mkdirSync(tDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tDir, `${dotSid}.jsonl`),
+      `${JSON.stringify({ type: "user", message: { content: "dotted" } })}\n`,
+    );
+
+    const res = await app.handle(
+      new Request(`http://localhost/api/host/${HOST_ID}/restore`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_ids: [dotSid] }),
+      }),
+    );
+    const body = (await res.json()) as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(body.results[0].ok).toBe(true);
+    // tmux itself would have rewritten a literal "v1.2" -s argument to
+    // "v1_2"; the daemon must agree up front or later target-pane lookups
+    // (trust-prompt polling, launch reuse) address a session that was
+    // never actually created.
+    expect(body.results[0].tmux_session).toBe("v1_2");
+
+    // The name tmux actually created resolves - an unsanitized "=v1.2:"
+    // target would fail here.
+    expect(tmux(tmuxTmp, ["capture-pane", "-t", "=v1_2:", "-p"])).toContain(
+      "Yes, I trust this folder",
+    );
+  }, 40_000);
+
+  test("the daemon dedups session_ids on its own, independent of the hub", async () => {
+    // Goes straight through the registry rather than the HTTP route: the
+    // hub also dedups before dispatching, so exercising the daemon's own
+    // dedup means bypassing that and sending the raw duplicates.
+    const resp = (await hostRegistry.sendRpc(
+      HOST_ID,
+      "host_restore",
+      { session_ids: [SID, SID, SID] },
+      20_000,
+    )) as HostRestoreDoneFrame;
+    expect(resp.results).toHaveLength(1);
+    expect(resp.results?.[0].ok).toBe(true);
+
+    const names = tmux(tmuxTmp, ["list-sessions", "-F", "#{session_name}"])
+      .split("\n")
+      .filter((n) => n.length > 0);
+    expect(names).toEqual(["widget"]);
+  }, 40_000);
+
+  // Regression for the shell injection in handleHostLaunch's session-reuse
+  // path: a cwd containing shell metacharacters must not execute anything
+  // when interpolated into the "cd ... && claude-channels" line typed into
+  // the reused pane. Mirrors a real report: a directory basename doesn't
+  // need the metacharacters at all - an EARLIER path component carries
+  // them, the basename used for the tmux session stays an innocuous name.
+  test("a cwd containing shell metacharacters cannot break out via host_launch", async () => {
+    const canaryFile = path.join(tmpRoot, "canary-marker");
+    // Contains ", ;, a backtick, and $ - none of which should reach a
+    // live shell unescaped.
+    const evilMid = 'x"; touch canary-marker; `date`; echo $HOME; #';
+    const evilCwd = path.join(home, "projects", evilMid, "myapp");
+    fs.mkdirSync(evilCwd, { recursive: true });
+
+    // A pre-existing idle session named for the (safe) final basename -
+    // this is what makes handleHostLaunch take the "reuse this pane"
+    // branch instead of spawning a fresh, argv-array new-session.
+    tmux(tmuxTmp, ["new-session", "-d", "-s", "myapp", "-c", tmpRoot]);
+
+    const res = await app.handle(
+      new Request(`http://localhost/api/host/${HOST_ID}/launch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cwd: evilCwd }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.tmux_session).toBe("myapp");
+
+    // Give the injected send-keys line time to run if it were going to.
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(fs.existsSync(canaryFile)).toBe(false);
+  }, 40_000);
 });

@@ -55,6 +55,7 @@
     --green: #55c27a;
     --red: #ff4d2e;       /* alias of --accent so existing error styles keep working */
     --text-accent: #ff6535; /* accent hue shifted orange for text — more legible in low light */
+    --text-warn: #d98b3a;  /* attention text: trust-prompt flags, restore badge */
     --blue: #6fb0d4;      /* desaturated, not the 'main' colour any more */
     --cyan: #6fc3d9;
     --orange: #ff9e64;
@@ -97,6 +98,7 @@
     --green: #3f8f52;
     --red: #c53518;
     --text-accent: var(--accent); /* light theme accent is already legible as text */
+    --text-warn: #96600f;  /* attention text: trust-prompt flags, restore badge */
     --blue: #3a7594;
     --cyan: #3a7594;
     --orange: #c55a18;
@@ -3150,7 +3152,7 @@
   <div class="cn-launch-panel">
     <div class="cn-launch-head">
       <span class="cn-launch-title" id="restore-title">Restore</span>
-      <button type="button" class="cn-launch-close" data-restore-close title="Close">×</button>
+      <button type="button" class="cn-launch-close" id="restore-close" data-restore-close title="Close">×</button>
     </div>
     <div class="cn-launch-body">
       <div class="cn-restore-toolbar">
@@ -3726,7 +3728,7 @@
     // is how the user finds out a shutdown ate their sessions.
     var recoverable = recoverableCounts.get(host.host_id) || 0;
     var restoreBtn = (host.online && recoverable > 0)
-      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + recoverable + ' session(s) on this host exited without a clean shutdown">↻ restore ' + recoverable + '</button>'
+      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + escapeAttr(String(recoverable)) + ' session(s) on this host exited without a clean shutdown">↻ restore ' + escapeHtml(String(recoverable)) + '</button>'
       : '';
     return (
       '<div class="cn-host-row' + offlineCls + '">'
@@ -3783,16 +3785,24 @@
     );
   }
 
+  // Bucket a duration given in seconds into the short form shared by
+  // relativeTime (event ages) and ghost-launch rows (time since launch),
+  // so a long-lived row reads "14m" rather than raw seconds.
+  function formatElapsed(dt) {
+    if (dt < 10) return 'just now';
+    if (dt < 60) return dt + 's';
+    if (dt < 3600) return Math.floor(dt / 60) + 'm';
+    if (dt < 86400) return Math.floor(dt / 3600) + 'h';
+    return Math.floor(dt / 86400) + 'd';
+  }
+
   function relativeTime(iso) {
     if (!iso) return '';
     var t = new Date(iso).getTime();
     if (!isFinite(t)) return '';
     var dt = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (dt < 10) return 'just now';
-    if (dt < 60) return dt + 's ago';
-    if (dt < 3600) return Math.floor(dt / 60) + 'm ago';
-    if (dt < 86400) return Math.floor(dt / 3600) + 'h ago';
-    return Math.floor(dt / 86400) + 'd ago';
+    var elapsed = formatElapsed(dt);
+    return elapsed === 'just now' ? elapsed : elapsed + ' ago';
   }
 
   // Row for an MCP agent that has no live mirror session — messaging-
@@ -3821,8 +3831,8 @@
   }
 
   // Drop the ghost row once its session actually shows up. Ghosts also
-  // carry their own expiry, but a session waiting on the trust prompt has
-  // no useful deadline — it appears whenever a human answers.
+  // carry their own expiry, so a row still clears even if the session
+  // never appears (dies, or sits unanswered at a trust prompt).
   function clearGhostForCwd(cwd) {
     if (!cwd) return;
     var i = pendingLaunches.findIndex(function(p) { return p.cwd === cwd; });
@@ -3835,7 +3845,7 @@
       '<div class="list-group-item cn-host-child cn-ghost-launch">'
       + '<span class="agent-dot no-mirror"></span>'
       + '<span class="agent-name">' + escapeHtml(entry.verb || 'launching') + ' — ' + escapeHtml(entry.cwdShort) + '</span>'
-      + '<span class="row-hint">' + ageSec + 's</span>'
+      + '<span class="row-hint">' + escapeHtml(formatElapsed(ageSec)) + '</span>'
       + '</div>'
     );
   }
@@ -4491,6 +4501,7 @@
   // come back. Ids only travel back to the host, never paths.
   var RESTORE_DEFAULT_WINDOW_HOURS = 24;
   var restoreModal = document.getElementById('restore-modal');
+  var restoreCloseBtn = document.getElementById('restore-close');
   var restoreListEl = document.getElementById('restore-list');
   var restoreCountEl = document.getElementById('restore-count');
   var restoreAllChk = document.getElementById('restore-all');
@@ -4502,7 +4513,7 @@
   var restoreTitleEl = document.getElementById('restore-title');
   var restoreErrorEl = document.getElementById('restore-error');
   var restoreResultsEl = document.getElementById('restore-results');
-  var restoreState = { hostId: null, sessions: [], selected: null };
+  var restoreState = { hostId: null, sessions: [], selected: null, requestToken: 0, triggerEl: null };
 
   function fetchRecoverable(hostId, withinHours) {
     var url = '/api/host/' + encodeURIComponent(hostId)
@@ -4517,8 +4528,9 @@
       });
   }
 
-  // Badge-only refresh. Failures are silent: a host that can't answer
-  // just shows no badge, which is the same as having nothing to restore.
+  // Badge-only refresh. Failures (rate-limited or a network blip) leave
+  // the previous count untouched rather than clearing the badge: a
+  // transient error is not evidence that nothing is recoverable any more.
   function refreshRecoverableCount(hostId) {
     fetchRecoverable(hostId, RESTORE_DEFAULT_WINDOW_HOURS)
       .then(function(sessions) {
@@ -4526,12 +4538,7 @@
         recoverableCounts.set(hostId, sessions.length);
         if (sessions.length !== prev) renderAgentsDebounced();
       })
-      .catch(function() {
-        if (recoverableCounts.has(hostId)) {
-          recoverableCounts.delete(hostId);
-          renderAgentsDebounced();
-        }
-      });
+      .catch(function() {});
   }
 
   function refreshAllRecoverableCounts() {
@@ -4540,16 +4547,29 @@
     });
   }
 
+  // Alt-tabbing fires repeated focus events; the /recoverable endpoint is
+  // rate-limited, so only the first focus in a quiet window triggers a
+  // re-check rather than one fetch per host per event.
+  var RECOVERABLE_FOCUS_THROTTLE_MS = 3000;
+  var recoverableFocusThrottledUntil = 0;
+  function refreshAllRecoverableCountsOnFocus() {
+    var now = Date.now();
+    if (now < recoverableFocusThrottledUntil) return;
+    recoverableFocusThrottledUntil = now + RECOVERABLE_FOCUS_THROTTLE_MS;
+    refreshAllRecoverableCounts();
+  }
+
   // A shutdown can happen while the tab sits in the background, so
   // re-check whenever the user comes back to it.
-  window.addEventListener('focus', refreshAllRecoverableCounts);
+  window.addEventListener('focus', refreshAllRecoverableCountsOnFocus);
 
-  function openRestoreModal(hostId) {
+  function openRestoreModal(hostId, triggerEl) {
     var host = hosts.get(hostId);
     if (!host || !host.online) return;
     restoreState.hostId = hostId;
     restoreState.sessions = [];
     restoreState.selected = null;
+    restoreState.triggerEl = triggerEl || null;
     restoreTitleEl.textContent = 'Restore on ' + host.user + '@' + host.hostname;
     restoreErrorEl.textContent = '';
     restoreResultsEl.innerHTML = '';
@@ -4564,11 +4584,19 @@
     restoreTrustChk.checked = true;
     restoreModal.classList.add('is-open');
     loadRestoreList();
+    // The dialog sits late in the DOM, so without this Tab would walk the
+    // whole page before reaching it.
+    setTimeout(function() { restoreCloseBtn.focus(); }, 0);
   }
 
   function closeRestoreModal() {
     restoreModal.classList.remove('is-open');
     restoreState.hostId = null;
+    var triggerEl = restoreState.triggerEl;
+    restoreState.triggerEl = null;
+    if (triggerEl && document.body.contains(triggerEl)) {
+      setTimeout(function() { triggerEl.focus(); }, 0);
+    }
   }
 
   function loadRestoreList() {
@@ -4578,9 +4606,12 @@
     restoreSubmitBtn.disabled = true;
     var hostId = restoreState.hostId;
     var hours = Number(restoreWindowSel.value) || RESTORE_DEFAULT_WINDOW_HOURS;
+    // Captured per-request so a slower, older response (overlapping window
+    // changes, or a reopen of the same host) can never clobber a newer one.
+    var token = ++restoreState.requestToken;
     fetchRecoverable(hostId, hours)
       .then(function(sessions) {
-        if (restoreState.hostId !== hostId) return;
+        if (restoreState.requestToken !== token) return;
         restoreState.sessions = sessions;
         // Everything ticked by default: after a crash the usual intent is
         // "all of it", and unticking a couple beats ticking the rest.
@@ -4591,9 +4622,14 @@
         renderRestoreList();
       })
       .catch(function(err) {
-        if (restoreState.hostId !== hostId) return;
+        if (restoreState.requestToken !== token) return;
+        // The list shown is now an error, so the selection state must not
+        // still describe a previous window's sessions.
+        restoreState.sessions = [];
+        restoreState.selected = null;
         restoreListEl.innerHTML = '<div class="cn-restore-empty">Could not scan this host.</div>';
         restoreErrorEl.textContent = err && err.message ? err.message : String(err);
+        syncRestoreSelectionUi();
       });
   }
 
@@ -4648,6 +4684,7 @@
     var ids = Array.from(restoreState.selected);
     var byId = {};
     restoreState.sessions.forEach(function(s) { byId[s.session_id] = s; });
+    var autoTrust = restoreTrustChk.checked;
 
     restoreSubmitBtn.disabled = true;
     restoreErrorEl.textContent = '';
@@ -4658,7 +4695,7 @@
       body: JSON.stringify({
         session_ids: ids,
         skip_permissions: restoreSkipChk.checked && host.allow_dangerous_skip,
-        auto_trust: restoreTrustChk.checked,
+        auto_trust: autoTrust,
       }),
     })
       .then(function(r) {
@@ -4674,7 +4711,7 @@
         var failures = results.filter(function(r) { return !r.ok; });
         results.filter(function(r) { return r.ok; }).forEach(function(r) {
           var s = byId[r.session_id];
-          addRestoreGhost(hostId, s ? s.cwd : r.session_id, r);
+          addRestoreGhost(hostId, s ? s.cwd : r.session_id, r, autoTrust);
         });
         recoverableCounts.set(hostId, Math.max(0, (recoverableCounts.get(hostId) || 0) - (results.length - failures.length)));
         renderAgents();
@@ -4697,12 +4734,14 @@
       });
   }
 
-  function addRestoreGhost(hostId, cwd, result) {
+  function addRestoreGhost(hostId, cwd, result, autoTrust) {
     var launchKey = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
     var parts = String(cwd).split('/');
-    // A session waiting on the trust prompt legitimately won't register
-    // until it is answered, so it gets its own label and no expiry.
-    var waitingOnTrust = result && result.trust_answered === false;
+    // needs_trust means the project has never accepted Claude Code's
+    // folder-trust dialog. If auto-trust was ticked the daemon answers it
+    // itself, so the session comes up regardless; only a human declining
+    // auto-trust on a needs_trust project actually leaves it sitting there.
+    var waitingOnTrust = !autoTrust && !!(result && result.needs_trust);
     pendingLaunches.push({
       hostId: hostId,
       launchKey: launchKey,
@@ -4711,12 +4750,14 @@
       cwdShort: parts.slice(-2).join('/') || cwd,
       verb: waitingOnTrust ? 'waiting on trust prompt' : 'restoring',
     });
-    if (!waitingOnTrust) {
-      setTimeout(function() {
-        var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
-        if (i >= 0) { pendingLaunches.splice(i, 1); renderAgents(); }
-      }, 60_000);
-    }
+    // A row waiting on a human answering the trust prompt gets a long
+    // leash, but every ghost must eventually clear even if its session
+    // never shows up and never sends a matching mirror event.
+    var expiryMs = waitingOnTrust ? 600_000 : 60_000;
+    setTimeout(function() {
+      var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
+      if (i >= 0) { pendingLaunches.splice(i, 1); renderAgents(); }
+    }, expiryMs);
   }
 
   restoreSubmitBtn.addEventListener('click', restoreSubmit);
@@ -4760,7 +4801,7 @@
     if (restoreBtn) {
       e.preventDefault();
       dismissMobileSidebar();
-      openRestoreModal(restoreBtn.getAttribute('data-restore-host'));
+      openRestoreModal(restoreBtn.getAttribute('data-restore-host'), restoreBtn);
       return;
     }
     if (e.target.closest && e.target.closest('[data-restore-close]')) {

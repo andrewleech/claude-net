@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   encodeProjectDirName,
+  sanitizeTmuxName,
   scanRecoverable,
 } from "@/mirror-agent/recoverable";
 
@@ -84,6 +85,12 @@ describe("scanRecoverable", () => {
     expect(scanRecoverable({ home, withinHours: 72 })).toHaveLength(1);
   });
 
+  test("withinHours: null applies no window at all", () => {
+    seed({ name: "alpha", sid: SID_A, ageMs: 400 * 24 * 60 * 60 * 1000 });
+    expect(scanRecoverable({ home, withinHours: 24 })).toHaveLength(0);
+    expect(scanRecoverable({ home, withinHours: null })).toHaveLength(1);
+  });
+
   test("skips a project whose directory no longer exists", () => {
     seed({ name: "gone", sid: SID_A, missingDir: true });
     expect(scanRecoverable({ home })).toHaveLength(0);
@@ -125,6 +132,17 @@ describe("scanRecoverable", () => {
       tmuxSessionExists: (name) => name === "alpha-two",
     });
     expect(found[0].tmux_conflict).toBeNull();
+  });
+
+  test("reports a dotted directory basename's sanitized tmux name as a conflict", () => {
+    seed({ name: "v1.2", sid: SID_A });
+    const found = scanRecoverable({
+      home,
+      // The probe only ever sees names tmux would actually create, i.e.
+      // with "." rewritten to "_" already.
+      tmuxSessionExists: (name) => name === "v1_2",
+    });
+    expect(found[0].tmux_conflict).toBe("v1_2");
   });
 
   test("preview uses the last real user turn and ignores tool results", () => {
@@ -212,5 +230,36 @@ describe("scanRecoverable", () => {
     seed({ name: "newer", sid: SID_B });
     const found = scanRecoverable({ home });
     expect(found.map((s) => s.label)).toEqual(["newer", "older"]);
+  });
+
+  test("metadataOnly skips the transcript body: basename label, null turns, empty preview", () => {
+    seed({
+      name: "alpha",
+      sid: SID_A,
+      lines: [
+        JSON.stringify({ type: "user", message: { content: "hello there" } }),
+        JSON.stringify({ type: "custom-title", customTitle: "renamed" }),
+      ],
+    });
+    const found = scanRecoverable({ home, metadataOnly: true });
+    expect(found).toHaveLength(1);
+    expect(found[0].label).toBe("alpha");
+    expect(found[0].turns).toBeNull();
+    expect(found[0].preview).toBe("");
+    expect(found[0].session_id).toBe(SID_A);
+    expect(found[0].needs_trust).toBe(false);
+  });
+});
+
+describe("sanitizeTmuxName", () => {
+  test("rewrites the tmux target-syntax delimiters . and : to _", () => {
+    expect(sanitizeTmuxName("v1.2")).toBe("v1_2");
+    expect(sanitizeTmuxName("a:b")).toBe("a_b");
+    expect(sanitizeTmuxName("a.b:c.d")).toBe("a_b_c_d");
+  });
+
+  test("leaves names without those characters untouched", () => {
+    expect(sanitizeTmuxName("widget")).toBe("widget");
+    expect(sanitizeTmuxName("my-project_2")).toBe("my-project_2");
   });
 });

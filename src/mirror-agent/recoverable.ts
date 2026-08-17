@@ -22,8 +22,13 @@ const PREVIEW_CHARS = 140;
 
 export interface ScanOptions {
   home?: string;
-  /** Only surface transcripts written within this window. */
-  withinHours?: number;
+  /**
+   * Only surface transcripts written within this window. `null` means no
+   * window at all: every matching transcript is returned regardless of
+   * age. Omitted defaults to 24h, which is a listing convenience only,
+   * not a correctness or security control.
+   */
+  withinHours?: number | null;
   now?: number;
   /** Session ids the daemon already knows are live. */
   liveSessionIds?: Set<string>;
@@ -33,6 +38,13 @@ export interface ScanOptions {
   tmuxSessionExists?: (name: string) => boolean;
   /** Applied to the preview before it leaves the host. */
   redact?: (text: string) => string;
+  /**
+   * Skip parsing the transcript body entirely. `label` falls back to the
+   * directory basename, `turns` is null, and `preview` is empty. For
+   * callers that only need session_id/cwd/needs_trust and want to avoid
+   * reading transcript files that can be tens of megabytes each.
+   */
+  metadataOnly?: boolean;
 }
 
 interface ProjectMeta {
@@ -49,10 +61,25 @@ export function encodeProjectDirName(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
+/**
+ * tmux silently rewrites "." and ":" to "_" in a `-s` session name (both
+ * are target-syntax delimiters: "session:window.pane"), so a name derived
+ * from a directory basename must apply the same substitution before it is
+ * compared against or used to create a tmux session - otherwise a
+ * dotted or colon-bearing directory name never matches what tmux actually
+ * named the session.
+ */
+export function sanitizeTmuxName(name: string): string {
+  return name.replace(/[.:]/g, "_");
+}
+
 export function scanRecoverable(opts: ScanOptions = {}): RecoverableSession[] {
   const home = opts.home ?? os.homedir();
   const now = opts.now ?? Date.now();
-  const withinMs = (opts.withinHours ?? 24) * 60 * 60 * 1000;
+  const withinMs =
+    opts.withinHours === null
+      ? null
+      : (opts.withinHours ?? 24) * 60 * 60 * 1000;
   const liveSessionIds = opts.liveSessionIds ?? new Set<string>();
   const liveCwds = opts.liveCwds ?? new Set<string>();
   const redact = opts.redact ?? ((s: string) => s);
@@ -70,14 +97,17 @@ export function scanRecoverable(opts: ScanOptions = {}): RecoverableSession[] {
       path.join(home, ".claude", "projects", encodeProjectDirName(cwd)),
     );
     if (!transcript) continue;
-    if (now - transcript.mtimeMs > withinMs) continue;
+    if (withinMs !== null && now - transcript.mtimeMs > withinMs) continue;
 
     const sessionId = path.basename(transcript.file, ".jsonl");
     if (liveSessionIds.has(sessionId)) continue;
 
-    const parsed = parseTranscript(transcript.file, transcript.size);
+    const parsed = opts.metadataOnly
+      ? { turns: null, preview: "", title: null }
+      : parseTranscript(transcript.file, transcript.size);
     const base = path.basename(cwd) || cwd;
-    const conflict = opts.tmuxSessionExists?.(base) ? base : null;
+    const tmuxName = sanitizeTmuxName(base);
+    const conflict = opts.tmuxSessionExists?.(tmuxName) ? tmuxName : null;
 
     out.push({
       session_id: sessionId,

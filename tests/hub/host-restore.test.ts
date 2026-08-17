@@ -102,12 +102,66 @@ describe("GET /api/host/:id/recoverable", () => {
     expect(res.status).toBe(400);
   });
 
+  test("rejects a within_hours above the dashboard's cap", async () => {
+    const { app } = harness(() => null);
+    const res = await app.handle(
+      new Request(
+        `http://localhost/api/host/${HOST_ID}/recoverable?within_hours=1e308`,
+      ),
+    );
+    expect(res.status).toBe(400);
+  });
+
   test("404s for a host that isn't connected", async () => {
     const { app } = harness(() => null);
     const res = await app.handle(
       new Request("http://localhost/api/host/nobody@nowhere/recoverable"),
     );
     expect(res.status).toBe(404);
+  });
+
+  test("an invalid within_hours doesn't consume rate-limit budget", async () => {
+    const { app } = harness((frame) => ({
+      action: "host_recoverable_done",
+      request_id: frame.request_id,
+      sessions: [],
+    }));
+    // The limiter allows 10 per 10s; if invalid requests burned budget this
+    // loop would start 429ing well before the 20th call.
+    for (let i = 0; i < 20; i++) {
+      const res = await app.handle(
+        new Request(
+          `http://localhost/api/host/${HOST_ID}/recoverable?within_hours=-1`,
+        ),
+      );
+      expect(res.status).toBe(400);
+    }
+    const res = await app.handle(
+      new Request(`http://localhost/api/host/${HOST_ID}/recoverable`),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  test("retry-after on 429 is derived from the limiter, not hardcoded", async () => {
+    const { app } = harness((frame) => ({
+      action: "host_recoverable_done",
+      request_id: frame.request_id,
+      sessions: [],
+    }));
+    let limited: Response | undefined;
+    for (let i = 0; i < 11; i++) {
+      const res = await app.handle(
+        new Request(`http://localhost/api/host/${HOST_ID}/recoverable`),
+      );
+      if (res.status === 429) {
+        limited = res;
+        break;
+      }
+    }
+    expect(limited?.status).toBe(429);
+    const retryAfter = Number(limited?.headers.get("retry-after"));
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(10);
   });
 });
 
@@ -171,6 +225,32 @@ describe("POST /api/host/:id/restore", () => {
       session_ids: Array.from({ length: 21 }, (_, i) => `sid-${i}`),
     });
     expect(res.status).toBe(400);
+  });
+
+  test("collapses duplicate ids to one before relaying", async () => {
+    const { app, received } = harness((frame) => ({
+      action: "host_restore_done",
+      request_id: frame.request_id,
+      results: [{ session_id: "sid-1", ok: true, tmux_session: "foo" }],
+    }));
+    const res = await post(app, `/api/host/${HOST_ID}/restore`, {
+      session_ids: ["sid-1", "sid-2", "sid-1", "sid-2"],
+    });
+    expect(res.status).toBe(200);
+    expect(received[0].session_ids).toEqual(["sid-1", "sid-2"]);
+  });
+
+  test("does not reject 20 duplicates of the same id as an oversized batch", async () => {
+    const { app, received } = harness((frame) => ({
+      action: "host_restore_done",
+      request_id: frame.request_id,
+      results: [{ session_id: "sid-1", ok: true, tmux_session: "foo" }],
+    }));
+    const res = await post(app, `/api/host/${HOST_ID}/restore`, {
+      session_ids: Array.from({ length: 20 }, () => "sid-1"),
+    });
+    expect(res.status).toBe(200);
+    expect(received[0].session_ids).toEqual(["sid-1"]);
   });
 
   test("403s skip_permissions when the host forbids it", async () => {

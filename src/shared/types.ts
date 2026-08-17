@@ -715,8 +715,8 @@ export interface HostRestoreResult {
   session_id: string;
   ok: boolean;
   tmux_session?: string;
-  /** Trust prompt was detected and answered by the daemon. */
-  trust_answered?: boolean;
+  /** Project had never accepted Claude Code's folder-trust dialog. */
+  needs_trust?: boolean;
   error?: string;
 }
 

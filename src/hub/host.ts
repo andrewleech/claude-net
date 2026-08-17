@@ -25,8 +25,12 @@ const LS_TIMEOUT_MS = 5_000;
 const MKDIR_TIMEOUT_MS = 5_000;
 const LAUNCH_TIMEOUT_MS = 10_000;
 const RECOVERABLE_TIMEOUT_MS = 15_000;
-const RESTORE_BASE_TIMEOUT_MS = 15_000;
-const RESTORE_PER_SESSION_TIMEOUT_MS = 5_000;
+// The daemon replies once every tmux session has been spawned, staggering
+// spawns ~400ms apart and never blocking on trust-prompt detection. The
+// ceiling is a fixed floor for RPC dispatch overhead plus a per-session
+// slice covering stagger delay and tmux spawn latency.
+const RESTORE_BASE_TIMEOUT_MS = 5_000;
+const RESTORE_PER_SESSION_TIMEOUT_MS = 1_000;
 
 /** Mirrors the daemon-side ceiling so oversized batches fail before the RPC. */
 const MAX_RESTORE_BATCH = 20;
@@ -121,6 +125,9 @@ export async function launchOnHost(
     return { status: 504, body: { error: (err as Error).message } };
   }
 }
+
+/** Matches the dashboard's own upper bound on the recoverable-scan window. */
+const MAX_RECOVERABLE_WITHIN_HOURS = 8760;
 
 export function hostPlugin(deps: HostPluginDeps): Elysia {
   const { hostRegistry } = deps;
@@ -236,6 +243,20 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
 
     .get("/:id/recoverable", async ({ params, query, set }) => {
       const hostId = params.id;
+      const rawHours = (query as Record<string, string | undefined>)
+        .within_hours;
+      const withinHours = rawHours === undefined ? undefined : Number(rawHours);
+      if (
+        withinHours !== undefined &&
+        (!Number.isFinite(withinHours) ||
+          withinHours <= 0 ||
+          withinHours > MAX_RECOVERABLE_WITHIN_HOURS)
+      ) {
+        set.status = 400;
+        return {
+          error: `within_hours must be a positive number up to ${MAX_RECOVERABLE_WITHIN_HOURS}`,
+        };
+      }
       const host = hostRegistry.get(hostId);
       if (!host) {
         set.status = 404;
@@ -243,18 +264,11 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
       }
       if (!recoverableLimiter.allow(hostId)) {
         set.status = 429;
-        set.headers["retry-after"] = "2";
+        const waitMs = recoverableLimiter.retryAfterMs(hostId);
+        set.headers["retry-after"] = String(
+          Math.max(1, Math.ceil(waitMs / 1000)),
+        );
         return { error: "Rate limit: recoverable (10 per 10s)" };
-      }
-      const rawHours = (query as Record<string, string | undefined>)
-        .within_hours;
-      const withinHours = rawHours === undefined ? undefined : Number(rawHours);
-      if (
-        withinHours !== undefined &&
-        (!Number.isFinite(withinHours) || withinHours <= 0)
-      ) {
-        set.status = 400;
-        return { error: "within_hours must be a positive number" };
       }
       try {
         const resp = await hostRegistry.sendRpc(
@@ -285,15 +299,18 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
         skip_permissions?: boolean;
         auto_trust?: boolean;
       };
-      const ids = payload.session_ids;
-      if (!Array.isArray(ids) || ids.length === 0) {
+      const rawIds = payload.session_ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0) {
         set.status = 400;
         return { error: "Missing required field: session_ids" };
       }
-      if (!ids.every((id) => typeof id === "string" && id.length > 0)) {
+      if (!rawIds.every((id) => typeof id === "string" && id.length > 0)) {
         set.status = 400;
         return { error: "session_ids must be non-empty strings" };
       }
+      // Preserve first-seen order; a client resubmitting the same id
+      // repeatedly should resume it once, not spawn one process per copy.
+      const ids = Array.from(new Set(rawIds as string[]));
       if (ids.length > MAX_RESTORE_BATCH) {
         set.status = 400;
         return { error: `at most ${MAX_RESTORE_BATCH} sessions per restore` };
@@ -322,10 +339,13 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
           {
             session_ids: ids,
             skip_permissions: payload.skip_permissions === true,
-            auto_trust: payload.auto_trust !== false,
+            // Defaults on when omitted, but an explicit value must be a real
+            // boolean: a JSON string is not consent to answer a trust prompt.
+            auto_trust:
+              payload.auto_trust === undefined
+                ? true
+                : payload.auto_trust === true,
           },
-          // The daemon staggers spawns and then waits on any trust prompts,
-          // so the ceiling scales with the batch rather than being fixed.
           RESTORE_BASE_TIMEOUT_MS + ids.length * RESTORE_PER_SESSION_TIMEOUT_MS,
         );
         if (resp.action !== "host_restore_done") {

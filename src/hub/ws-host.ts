@@ -136,7 +136,9 @@ export function wsHostPlugin(
       if (
         frame.action === "host_ls_done" ||
         frame.action === "host_mkdir_done" ||
-        frame.action === "host_launch_done"
+        frame.action === "host_launch_done" ||
+        frame.action === "host_recoverable_done" ||
+        frame.action === "host_restore_done"
       ) {
         const meta = connMeta.get(ws.raw);
         if (meta && typeof frame.request_id === "string") {

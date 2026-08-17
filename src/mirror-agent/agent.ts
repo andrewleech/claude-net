@@ -26,6 +26,7 @@ import { type TailHandle, tailJsonl } from "./jsonl-tail";
 import { jsonlRecordToHistoryFrame } from "./jsonl-to-frame";
 import { PathObserver } from "./path-observer";
 import { ProbeAttemptTracker } from "./probe-tracker";
+import { encodeProjectDirName } from "./recoverable";
 import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
 
@@ -364,6 +365,26 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .filter((s) => s.cwd)
         .sort((a, b) => b.lastEventAt - a.lastEventAt)
         .map((s) => s.cwd),
+    // Crash recovery must not offer up sessions that are actually alive.
+    // The daemon's own map covers sessions it has seen; the /proc scan
+    // covers Claude Codes running without having fired a hook yet.
+    getLiveSessionIds: () => {
+      const ids = new Set<string>();
+      for (const s of sessions.values()) {
+        if (!s.closed) ids.add(s.sid);
+      }
+      for (const d of discoverRunningCcSessions()) ids.add(d.sessionId);
+      return ids;
+    },
+    getLiveCwds: () => {
+      const cwds = new Set<string>();
+      for (const s of sessions.values()) {
+        if (!s.closed && s.cwd) cwds.add(s.cwd);
+      }
+      for (const d of discoverRunningCcSessions()) cwds.add(d.cwd);
+      return cwds;
+    },
+    redact: (text) => redactor.redactText(text),
     onSessionProbe: (ccPid, cwd) => {
       // Skip if an active session for this ccPid already exists.
       for (const s of sessions.values()) {
@@ -2196,9 +2217,7 @@ export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
  * -home-anl-claude-net, /home/anl/claude_marketplace/.claude/worktrees
  * → -home-anl-claude-marketplace--claude-worktrees).
  */
-export function encodeProjectDirName(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9]/g, "-");
-}
+export { encodeProjectDirName };
 
 export interface DiscoveredSession {
   sessionId: string;

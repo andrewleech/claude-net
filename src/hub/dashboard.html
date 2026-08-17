@@ -2588,6 +2588,23 @@
   }
   .cn-launch-btn:hover { background: var(--accent-ink); }
   .cn-launch-btn:disabled { opacity: 0.4; cursor: default; }
+  /* Restore button only renders when a host has crashed sessions, so it
+     carries the count that makes the sidebar the place you find out. */
+  .cn-restore-btn {
+    background: transparent;
+    color: var(--text-warn, #d98b3a);
+    border: 1px solid var(--text-warn, #d98b3a);
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    margin-right: 4px;
+  }
+  .cn-restore-btn:hover { background: var(--accent-ink); }
   .cn-host-child { padding-left: 22px !important; }
   .cn-session-row {
     align-items: flex-start !important;
@@ -2720,10 +2737,65 @@
   }
   .cn-launch-submit:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
   .cn-launch-error { color: var(--text-accent); font-size: 11px; min-height: 1em; }
+
+  /* Restore picker - reuses the launch modal shell, swapping the path
+     input for a checklist of crashed sessions. */
+  .cn-restore-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    border: 1px solid var(--border-dim);
+  }
+  .cn-restore-empty { padding: 14px; color: var(--text-muted); font-size: 11px; }
+  .cn-restore-item {
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-dim);
+    cursor: pointer;
+    font-size: 11px;
+    align-items: flex-start;
+  }
+  .cn-restore-item:last-child { border-bottom: none; }
+  .cn-restore-item:hover { background: var(--accent-ink); }
+  .cn-restore-item.is-blocked { opacity: 0.45; cursor: default; }
+  .cn-restore-item.is-blocked:hover { background: transparent; }
+  .cn-restore-item input { margin-top: 2px; flex: 0 0 auto; }
+  .cn-restore-body { flex: 1; min-width: 0; line-height: 1.4; }
+  .cn-restore-head { display: flex; gap: 8px; align-items: baseline; }
+  .cn-restore-label { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-restore-meta { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; margin-left: auto; white-space: nowrap; }
+  .cn-restore-cwd { color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-restore-preview { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+  .cn-restore-flag {
+    color: var(--text-warn, #d98b3a);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .cn-restore-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .cn-restore-toolbar select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 4px;
+  }
+  .cn-restore-count { margin-left: auto; font-family: var(--font-mono); }
+  .cn-restore-results { font-size: 10px; font-family: var(--font-mono); color: var(--text-accent); }
+  .cn-restore-results div { padding: 1px 0; }
   @media (max-width: 767.98px) {
     .cn-launch-panel { width: 100vw; max-height: 90vh; }
     .cn-launch-modal { padding-top: 4vh; }
     .cn-launch-sugg-item { padding: 12px; min-height: 44px; }
+    .cn-restore-item { padding: 12px 10px; min-height: 44px; }
   }
 
   /* Mirror view inside #main-view. */
@@ -3072,6 +3144,46 @@
   </div>
 </div>
 
+<!-- Restore modal - opened by a host's "↻ restore" button, which only
+     appears when that host has sessions that died without a clean exit. -->
+<div class="cn-launch-modal" id="restore-modal" role="dialog" aria-modal="true" aria-label="Restore crashed Claude sessions">
+  <div class="cn-launch-panel">
+    <div class="cn-launch-head">
+      <span class="cn-launch-title" id="restore-title">Restore</span>
+      <button type="button" class="cn-launch-close" data-restore-close title="Close">×</button>
+    </div>
+    <div class="cn-launch-body">
+      <div class="cn-restore-toolbar">
+        <label class="cn-launch-chk">
+          <input type="checkbox" id="restore-all" checked>
+          <span>All</span>
+        </label>
+        <select id="restore-window" aria-label="How far back to look">
+          <option value="24">last 24h</option>
+          <option value="72">last 3 days</option>
+          <option value="168">last week</option>
+          <option value="8760">everything</option>
+        </select>
+        <span class="cn-restore-count" id="restore-count"></span>
+      </div>
+      <div class="cn-restore-list" id="restore-list"></div>
+      <div class="cn-launch-controls">
+        <label class="cn-launch-chk" id="restore-skip-wrap">
+          <input type="checkbox" id="restore-skip" checked>
+          <span>Skip permission prompts</span>
+        </label>
+        <label class="cn-launch-chk" title="Answer Claude Code's folder-trust prompt for directories that have not accepted it. These directories already hosted the session being resumed.">
+          <input type="checkbox" id="restore-trust" checked>
+          <span>Auto-answer trust prompt</span>
+        </label>
+        <button type="button" class="cn-launch-submit" id="restore-submit" disabled>Restore</button>
+      </div>
+      <div class="cn-launch-error" id="restore-error"></div>
+      <div class="cn-restore-results" id="restore-results"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -3157,6 +3269,7 @@
     return match;
   }
   const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at }
+  const recoverableCounts = new Map(); // host_id -> number of crashed sessions in the default window
   const pendingLaunches = []; // { hostId, launchKey, startedAt } — ghost rows replaced by real sessions
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
@@ -3334,12 +3447,14 @@
           connected_at: event.connected_at,
         });
         renderAgentsDebounced();
+        refreshRecoverableCount(event.host_id);
         break;
       }
 
       case 'host:disconnected': {
         var h = hosts.get(event.host_id);
         if (h) { h.online = false; renderAgentsDebounced(); }
+        recoverableCounts.delete(event.host_id);
         break;
       }
 
@@ -3444,6 +3559,7 @@
           var e = list[i];
           mirrorBySid.set(mirrorCompositeKey(e.host, e.sid), e);
           if (e.closed_at) continue;
+          clearGhostForCwd(e.cwd);
           if (!agents.has(e.owner_agent)) {
             upsertAgent({
               name: e.owner_agent,
@@ -3606,10 +3722,17 @@
     var launchBtn = host.online
       ? '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" type="button" title="Launch a new claude-channels session on this host">+ launch</button>'
       : '<span class="row-hint">offline</span>';
+    // Only rendered when there is something to recover, so its presence
+    // is how the user finds out a shutdown ate their sessions.
+    var recoverable = recoverableCounts.get(host.host_id) || 0;
+    var restoreBtn = (host.online && recoverable > 0)
+      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + recoverable + ' session(s) on this host exited without a clean shutdown">↻ restore ' + recoverable + '</button>'
+      : '';
     return (
       '<div class="cn-host-row' + offlineCls + '">'
       + '<span class="agent-dot ' + (host.online ? 'online' : 'offline') + '"></span>'
       + '<span class="cn-host-name">' + escapeHtml(host.user + '@' + host.hostname) + '</span>'
+      + restoreBtn
       + launchBtn
       + '</div>'
     );
@@ -3697,12 +3820,21 @@
     );
   }
 
+  // Drop the ghost row once its session actually shows up. Ghosts also
+  // carry their own expiry, but a session waiting on the trust prompt has
+  // no useful deadline — it appears whenever a human answers.
+  function clearGhostForCwd(cwd) {
+    if (!cwd) return;
+    var i = pendingLaunches.findIndex(function(p) { return p.cwd === cwd; });
+    if (i >= 0) pendingLaunches.splice(i, 1);
+  }
+
   function renderGhostLaunch(entry) {
     var ageSec = Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000));
     return (
       '<div class="list-group-item cn-host-child cn-ghost-launch">'
       + '<span class="agent-dot no-mirror"></span>'
-      + '<span class="agent-name">launching — ' + escapeHtml(entry.cwdShort) + '</span>'
+      + '<span class="agent-name">' + escapeHtml(entry.verb || 'launching') + ' — ' + escapeHtml(entry.cwdShort) + '</span>'
       + '<span class="row-hint">' + ageSec + 's</span>'
       + '</div>'
     );
@@ -4337,6 +4469,7 @@
           hostId: hostId,
           launchKey: launchKey,
           startedAt: Date.now(),
+          cwd: cwd,
           cwdShort: cwdParts.slice(-2).join('/') || cwd,
         });
         setTimeout(function() {
@@ -4352,8 +4485,292 @@
       });
   }
 
+  // --- Restore picker ---
+  // A session whose project still reads lastGracefulShutdown: false was
+  // killed rather than exited. The daemon finds them; this picks which
+  // come back. Ids only travel back to the host, never paths.
+  var RESTORE_DEFAULT_WINDOW_HOURS = 24;
+  var restoreModal = document.getElementById('restore-modal');
+  var restoreListEl = document.getElementById('restore-list');
+  var restoreCountEl = document.getElementById('restore-count');
+  var restoreAllChk = document.getElementById('restore-all');
+  var restoreWindowSel = document.getElementById('restore-window');
+  var restoreSkipChk = document.getElementById('restore-skip');
+  var restoreSkipWrap = document.getElementById('restore-skip-wrap');
+  var restoreTrustChk = document.getElementById('restore-trust');
+  var restoreSubmitBtn = document.getElementById('restore-submit');
+  var restoreTitleEl = document.getElementById('restore-title');
+  var restoreErrorEl = document.getElementById('restore-error');
+  var restoreResultsEl = document.getElementById('restore-results');
+  var restoreState = { hostId: null, sessions: [], selected: null };
+
+  function fetchRecoverable(hostId, withinHours) {
+    var url = '/api/host/' + encodeURIComponent(hostId)
+      + '/recoverable?within_hours=' + encodeURIComponent(withinHours);
+    return fetch(url)
+      .then(function(r) {
+        return r.json().then(function(body) { return { status: r.status, body: body }; });
+      })
+      .then(function(res) {
+        if (res.status >= 400) throw new Error((res.body && res.body.error) || ('HTTP ' + res.status));
+        return (res.body && res.body.sessions) || [];
+      });
+  }
+
+  // Badge-only refresh. Failures are silent: a host that can't answer
+  // just shows no badge, which is the same as having nothing to restore.
+  function refreshRecoverableCount(hostId) {
+    fetchRecoverable(hostId, RESTORE_DEFAULT_WINDOW_HOURS)
+      .then(function(sessions) {
+        var prev = recoverableCounts.get(hostId) || 0;
+        recoverableCounts.set(hostId, sessions.length);
+        if (sessions.length !== prev) renderAgentsDebounced();
+      })
+      .catch(function() {
+        if (recoverableCounts.has(hostId)) {
+          recoverableCounts.delete(hostId);
+          renderAgentsDebounced();
+        }
+      });
+  }
+
+  function refreshAllRecoverableCounts() {
+    hosts.forEach(function(host, hostId) {
+      if (host.online) refreshRecoverableCount(hostId);
+    });
+  }
+
+  // A shutdown can happen while the tab sits in the background, so
+  // re-check whenever the user comes back to it.
+  window.addEventListener('focus', refreshAllRecoverableCounts);
+
+  function openRestoreModal(hostId) {
+    var host = hosts.get(hostId);
+    if (!host || !host.online) return;
+    restoreState.hostId = hostId;
+    restoreState.sessions = [];
+    restoreState.selected = null;
+    restoreTitleEl.textContent = 'Restore on ' + host.user + '@' + host.hostname;
+    restoreErrorEl.textContent = '';
+    restoreResultsEl.innerHTML = '';
+    restoreWindowSel.value = String(RESTORE_DEFAULT_WINDOW_HOURS);
+    if (host.allow_dangerous_skip) {
+      restoreSkipWrap.style.display = '';
+      restoreSkipChk.checked = true;
+    } else {
+      restoreSkipWrap.style.display = 'none';
+      restoreSkipChk.checked = false;
+    }
+    restoreTrustChk.checked = true;
+    restoreModal.classList.add('is-open');
+    loadRestoreList();
+  }
+
+  function closeRestoreModal() {
+    restoreModal.classList.remove('is-open');
+    restoreState.hostId = null;
+  }
+
+  function loadRestoreList() {
+    if (!restoreState.hostId) return;
+    restoreListEl.innerHTML = '<div class="cn-restore-empty">Scanning…</div>';
+    restoreCountEl.textContent = '';
+    restoreSubmitBtn.disabled = true;
+    var hostId = restoreState.hostId;
+    var hours = Number(restoreWindowSel.value) || RESTORE_DEFAULT_WINDOW_HOURS;
+    fetchRecoverable(hostId, hours)
+      .then(function(sessions) {
+        if (restoreState.hostId !== hostId) return;
+        restoreState.sessions = sessions;
+        // Everything ticked by default: after a crash the usual intent is
+        // "all of it", and unticking a couple beats ticking the rest.
+        restoreState.selected = new Set(
+          sessions.filter(function(s) { return !s.tmux_conflict; })
+                  .map(function(s) { return s.session_id; })
+        );
+        renderRestoreList();
+      })
+      .catch(function(err) {
+        if (restoreState.hostId !== hostId) return;
+        restoreListEl.innerHTML = '<div class="cn-restore-empty">Could not scan this host.</div>';
+        restoreErrorEl.textContent = err && err.message ? err.message : String(err);
+      });
+  }
+
+  function renderRestoreList() {
+    var sessions = restoreState.sessions;
+    if (!sessions.length) {
+      restoreListEl.innerHTML = '<div class="cn-restore-empty">Nothing to restore in this window.</div>';
+      restoreCountEl.textContent = '';
+      restoreSubmitBtn.disabled = true;
+      restoreSubmitBtn.textContent = 'Restore';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i];
+      var blocked = !!s.tmux_conflict;
+      var checked = restoreState.selected.has(s.session_id);
+      var flags = '';
+      if (s.needs_trust) flags += ' <span class="cn-restore-flag" title="Claude Code will ask whether you trust this folder">⚠ trust</span>';
+      if (blocked) flags += ' <span class="cn-restore-flag" title="tmux session ' + escapeAttr(s.tmux_conflict) + ' already owns this directory">busy</span>';
+      var turns = s.turns === null || s.turns === undefined ? '? turns' : (s.turns + (s.turns === 1 ? ' turn' : ' turns'));
+      html += '<label class="cn-restore-item' + (blocked ? ' is-blocked' : '') + '">'
+        + '<input type="checkbox" data-restore-pick="' + escapeAttr(s.session_id) + '"'
+        + (checked ? ' checked' : '') + (blocked ? ' disabled' : '') + '>'
+        + '<span class="cn-restore-body">'
+        +   '<span class="cn-restore-head">'
+        +     '<span class="cn-restore-label">' + escapeHtml(s.label) + '</span>' + flags
+        +     '<span class="cn-restore-meta">' + escapeHtml(relativeTime(s.last_active)) + ' · ' + escapeHtml(turns) + '</span>'
+        +   '</span>'
+        +   '<span class="cn-restore-cwd">' + escapeHtml(s.cwd) + '</span>'
+        +   (s.preview ? '<span class="cn-restore-preview">' + escapeHtml(s.preview) + '</span>' : '')
+        + '</span>'
+        + '</label>';
+    }
+    restoreListEl.innerHTML = html;
+    syncRestoreSelectionUi();
+  }
+
+  function syncRestoreSelectionUi() {
+    var n = restoreState.selected ? restoreState.selected.size : 0;
+    var selectable = restoreState.sessions.filter(function(s) { return !s.tmux_conflict; }).length;
+    restoreCountEl.textContent = n + ' selected';
+    restoreAllChk.checked = selectable > 0 && n === selectable;
+    restoreSubmitBtn.disabled = n === 0;
+    restoreSubmitBtn.textContent = n > 0 ? 'Restore ' + n : 'Restore';
+  }
+
+  function restoreSubmit() {
+    if (!restoreState.hostId || !restoreState.selected || !restoreState.selected.size) return;
+    var hostId = restoreState.hostId;
+    var host = hosts.get(hostId);
+    var ids = Array.from(restoreState.selected);
+    var byId = {};
+    restoreState.sessions.forEach(function(s) { byId[s.session_id] = s; });
+
+    restoreSubmitBtn.disabled = true;
+    restoreErrorEl.textContent = '';
+    restoreResultsEl.innerHTML = '';
+    fetch('/api/host/' + encodeURIComponent(hostId) + '/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_ids: ids,
+        skip_permissions: restoreSkipChk.checked && host.allow_dangerous_skip,
+        auto_trust: restoreTrustChk.checked,
+      }),
+    })
+      .then(function(r) {
+        return r.json().then(function(body) { return { status: r.status, body: body }; });
+      })
+      .then(function(res) {
+        restoreSubmitBtn.disabled = false;
+        if (res.status >= 400) {
+          restoreErrorEl.textContent = (res.body && res.body.error) || ('HTTP ' + res.status);
+          return;
+        }
+        var results = (res.body && res.body.results) || [];
+        var failures = results.filter(function(r) { return !r.ok; });
+        results.filter(function(r) { return r.ok; }).forEach(function(r) {
+          var s = byId[r.session_id];
+          addRestoreGhost(hostId, s ? s.cwd : r.session_id, r);
+        });
+        recoverableCounts.set(hostId, Math.max(0, (recoverableCounts.get(hostId) || 0) - (results.length - failures.length)));
+        renderAgents();
+        if (failures.length) {
+          // Keep the modal open on partial failure; closing it would hide
+          // which sessions did not come back.
+          restoreResultsEl.innerHTML = failures.map(function(r) {
+            var s = byId[r.session_id];
+            return '<div>' + escapeHtml((s ? s.label : r.session_id) + ': ' + (r.error || 'failed')) + '</div>';
+          }).join('');
+          loadRestoreList();
+          return;
+        }
+        closeRestoreModal();
+        refreshRecoverableCount(hostId);
+      })
+      .catch(function(err) {
+        restoreSubmitBtn.disabled = false;
+        restoreErrorEl.textContent = 'Restore failed: ' + (err && err.message ? err.message : err);
+      });
+  }
+
+  function addRestoreGhost(hostId, cwd, result) {
+    var launchKey = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+    var parts = String(cwd).split('/');
+    // A session waiting on the trust prompt legitimately won't register
+    // until it is answered, so it gets its own label and no expiry.
+    var waitingOnTrust = result && result.trust_answered === false;
+    pendingLaunches.push({
+      hostId: hostId,
+      launchKey: launchKey,
+      startedAt: Date.now(),
+      cwd: cwd,
+      cwdShort: parts.slice(-2).join('/') || cwd,
+      verb: waitingOnTrust ? 'waiting on trust prompt' : 'restoring',
+    });
+    if (!waitingOnTrust) {
+      setTimeout(function() {
+        var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
+        if (i >= 0) { pendingLaunches.splice(i, 1); renderAgents(); }
+      }, 60_000);
+    }
+  }
+
+  restoreSubmitBtn.addEventListener('click', restoreSubmit);
+  restoreWindowSel.addEventListener('change', loadRestoreList);
+  // The restore modal has no text input to hang Escape off, unlike the
+  // launch modal's path field.
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && restoreModal.classList.contains('is-open')) {
+      e.preventDefault();
+      closeRestoreModal();
+    }
+  });
+
+  restoreAllChk.addEventListener('change', function() {
+    if (!restoreState.selected) return;
+    restoreState.selected.clear();
+    if (restoreAllChk.checked) {
+      restoreState.sessions.forEach(function(s) {
+        if (!s.tmux_conflict) restoreState.selected.add(s.session_id);
+      });
+    }
+    var boxes = restoreListEl.querySelectorAll('[data-restore-pick]');
+    for (var i = 0; i < boxes.length; i++) {
+      if (!boxes[i].disabled) boxes[i].checked = restoreAllChk.checked;
+    }
+    syncRestoreSelectionUi();
+  });
+
+  restoreListEl.addEventListener('change', function(e) {
+    var box = e.target.closest && e.target.closest('[data-restore-pick]');
+    if (!box || !restoreState.selected) return;
+    var id = box.getAttribute('data-restore-pick');
+    if (box.checked) restoreState.selected.add(id);
+    else restoreState.selected.delete(id);
+    syncRestoreSelectionUi();
+  });
+
   // Wire sidebar click → open modal, modal controls.
   document.addEventListener('click', function(e) {
+    var restoreBtn = e.target.closest && e.target.closest('[data-restore-host]');
+    if (restoreBtn) {
+      e.preventDefault();
+      dismissMobileSidebar();
+      openRestoreModal(restoreBtn.getAttribute('data-restore-host'));
+      return;
+    }
+    if (e.target.closest && e.target.closest('[data-restore-close]')) {
+      closeRestoreModal();
+      return;
+    }
+    if (e.target === restoreModal) {
+      closeRestoreModal();
+      return;
+    }
     var launchBtn = e.target.closest && e.target.closest('[data-launch-host]');
     if (launchBtn) {
       e.preventDefault();

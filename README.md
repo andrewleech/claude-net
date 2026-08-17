@@ -244,6 +244,20 @@ Config lives in `~/.claude/settings.json` under `claudeNet.launch` (whether web 
 
 **Trust-model note.** Launching from the web is a larger capability than streaming transcripts — the hub can cause new processes on your machine, in any directory that user can write. The only gate is rate-limiting (1 per 5 s + 10 per hour per host). The hub must remain behind IP-whitelisted Traefik / LAN-only exposure / Tailscale — a public hub would let anyone reach `/api/host/<id>/launch`.
 
+## Restoring sessions after a crash
+
+A reboot, an OOM kill, or a closed terminal takes down every Claude Code session on the machine at once. Claude Code writes `lastGracefulShutdown: false` against a project in `~/.claude.json` while a session is live and only sets it to `true` on a clean exit, so afterwards you can tell which sessions were killed rather than closed.
+
+When a host has some, its sidebar row gets a **`↻ restore N`** button. It only appears when N is above zero, so seeing it is usually how you find out a shutdown ate your work. Clicking it opens a checklist with one row per crashed session: the name (its `/rename` title if it has one, otherwise the directory basename), how long ago it was last active, the user-turn count, the cwd, and the last thing you typed into it. The turn count is the useful signal, since it's how you spot the two-turn scratch session you don't want back.
+
+Everything is ticked by default, because after a crash you usually do want all of it. A `⚠ trust` badge marks projects that have never accepted Claude Code's folder-trust dialog, and a row whose directory already has a live tmux session is disabled and marked `busy`. A window selector (24 h by default, up to everything) sets how far back the scan looks, so projects you abandoned months ago don't show up next to this morning's crash.
+
+Picking Restore POSTs `/api/host/<id>/restore` with the chosen session ids. The daemon relaunches each one as `tmux new-session -d -s <name> -c <cwd> -- claude-channels [--dangerously-skip-permissions] --resume <sid>`, staggered 400 ms apart. Each session comes back on its original transcript with its context intact. It uses `--resume <sid>` rather than `--continue` because `--continue` picks whatever transcript is newest for that directory, which need not be the one you ticked.
+
+The dashboard sends back session ids and nothing else; the daemon re-derives each cwd from its own fresh scan, so no caller-supplied path reaches the launcher. Restore therefore has no path-traversal surface, and unlike launch it isn't constrained by `workspaces.roots` (you already ran Claude Code in that directory, which is intent enough). Rescanning on every request also means a dashboard left open overnight can't resurrect a session that has since come back by other means, because any id missing from the fresh scan is rejected. Restore is rate-limited to 3 batches per 5 minutes per host, 20 sessions per batch.
+
+**Auto-answered trust prompt.** A restored session in a directory that never accepted the trust dialog otherwise sits wedged at "do you trust this folder?" and never reconnects to the hub. The daemon watches the new pane and answers it once the prompt's own text appears. That is defensible here specifically because the directory already hosted the session being resumed, which is not true of `+ launch` into a fresh directory. Untick `Auto-answer trust prompt` to leave it for a human; the session then shows as `waiting on trust prompt` in the sidebar until you attach to it.
+
 ## How it works
 
 The hub is a single Bun process running Elysia. It holds an in-memory registry of connected agents and team memberships, resolves names, and forwards messages. Each Claude Code session runs a plugin (`src/plugin/plugin.ts`) as an MCP stdio subprocess — it opens a WebSocket to the hub, exposes messaging tools to Claude, and pushes inbound messages in as `<channel>` notifications.

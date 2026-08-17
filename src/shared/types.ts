@@ -662,6 +662,72 @@ export interface HostLaunchDoneFrame {
 }
 
 /**
+ * A Claude Code session that exited without a graceful shutdown and can
+ * be resumed. Built by the daemon from its own read of ~/.claude.json and
+ * the on-disk transcripts; the dashboard never supplies any of these
+ * fields back, only `session_id`.
+ */
+export interface RecoverableSession {
+  session_id: string;
+  cwd: string;
+  /** CC custom-title when the session was renamed, else basename(cwd). */
+  label: string;
+  /** ISO timestamp of the transcript's last write. */
+  last_active: string;
+  /** User turns in the transcript, or null when it was too large to count. */
+  turns: number | null;
+  /** Redacted tail of the last real user turn, for "was this worth reviving". */
+  preview: string;
+  /** Project has never had Claude Code's trust dialog accepted. */
+  needs_trust: boolean;
+  /** Name of an existing tmux session that already owns this directory. */
+  tmux_conflict: string | null;
+}
+
+export interface HostRecoverableRequest {
+  action: "host_recoverable";
+  request_id: string;
+  /** Only surface sessions whose transcript was written within this window. */
+  within_hours?: number;
+}
+
+export interface HostRecoverableDoneFrame {
+  action: "host_recoverable_done";
+  request_id: string;
+  sessions?: RecoverableSession[];
+  error?: string;
+}
+
+export interface HostRestoreRequest {
+  action: "host_restore";
+  request_id: string;
+  session_ids: string[];
+  skip_permissions?: boolean;
+  /**
+   * Answer Claude Code's "do you trust this folder" prompt on the restored
+   * session's behalf. Sound for restore specifically: the directory
+   * already hosted the session being resumed. Defaults to true.
+   */
+  auto_trust?: boolean;
+}
+
+export interface HostRestoreResult {
+  session_id: string;
+  ok: boolean;
+  tmux_session?: string;
+  /** Trust prompt was detected and answered by the daemon. */
+  trust_answered?: boolean;
+  error?: string;
+}
+
+export interface HostRestoreDoneFrame {
+  action: "host_restore_done";
+  request_id: string;
+  results?: HostRestoreResult[];
+  error?: string;
+}
+
+/**
  * Hub → daemon: a Claude Code process identified by (cc_pid, cwd) has
  * a registered plugin but no mirror session on the hub. The daemon should
  * create a session for it so the dashboard shows the live session without

@@ -15,10 +15,17 @@ import type {
   HostLsRequest,
   HostMkdirDoneFrame,
   HostMkdirRequest,
+  HostRecoverableDoneFrame,
+  HostRecoverableRequest,
   HostRegisterFrame,
+  HostRestoreDoneFrame,
+  HostRestoreRequest,
+  HostRestoreResult,
   HostSessionProbeFrame,
+  RecoverableSession,
 } from "@/shared/types";
 import { HubClient } from "./hub-client";
+import { scanRecoverable } from "./recoverable";
 
 export interface HostChannelOptions {
   hubUrl: string;
@@ -41,6 +48,21 @@ export interface HostChannelOptions {
    * should download the new bundle and restart.
    */
   onVersionMismatch?: (hubVersion: string) => void;
+  /**
+   * Session ids the daemon currently holds open. Recovery skips these:
+   * a live session is not a crashed one.
+   */
+  getLiveSessionIds?: () => Set<string>;
+  /** Working directories the daemon currently holds open. */
+  getLiveCwds?: () => Set<string>;
+  /**
+   * Applied to recoverable-session previews before they leave the host.
+   * Transcript prose crossing the network gets the same treatment as
+   * mirrored events.
+   */
+  redact?: (text: string) => string;
+  /** Overrides the home directory the recovery scan reads. Defaults to os.homedir(). */
+  home?: string;
 }
 
 /**
@@ -90,6 +112,12 @@ export interface HostChannelHandle {
 export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
   const { allowDangerousSkip } = loadHostConfig();
   const hostId = deriveHostId();
+  const recoverableDeps: RecoverableDeps = {
+    getLiveSessionIds: opts.getLiveSessionIds,
+    getLiveCwds: opts.getLiveCwds,
+    redact: opts.redact,
+    home: opts.home,
+  };
   const wsBase = opts.hubUrl
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:")
@@ -148,6 +176,19 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
         const response = await handleHostLaunch(
           frame as HostLaunchRequest,
           allowDangerousSkip,
+        );
+        client.send(JSON.stringify(response));
+      } else if (frame.action === "host_recoverable") {
+        const response = await handleHostRecoverable(
+          frame as HostRecoverableRequest,
+          recoverableDeps,
+        );
+        client.send(JSON.stringify(response));
+      } else if (frame.action === "host_restore") {
+        const response = await handleHostRestore(
+          frame as HostRestoreRequest,
+          allowDangerousSkip,
+          recoverableDeps,
         );
         client.send(JSON.stringify(response));
       } else if (frame.action === "host_session_probe") {
@@ -259,6 +300,55 @@ function tmuxCapture(args: string[]): Promise<string> {
   });
 }
 
+/**
+ * tmux resolves a -t target by exact name, then fnmatch, then unique
+ * prefix, so a bare "claude" matches an existing "claude-net" session.
+ * Targets must be anchored with "=" to mean exactly this session.
+ *
+ * The anchor works directly for target-session arguments (has-session,
+ * kill-session). Commands taking a target-pane need the trailing colon so
+ * the anchored name is parsed as the session component.
+ */
+function exactSession(name: string): string {
+  return `=${name}`;
+}
+
+function exactPane(name: string): string {
+  return `=${name}:`;
+}
+
+/** Names of every current tmux session. Empty when tmux isn't running. */
+async function tmuxSessionNames(): Promise<Set<string>> {
+  const out = await tmuxCapture(["list-sessions", "-F", "#{session_name}"]);
+  return new Set(out.split("\n").filter((n) => n.length > 0));
+}
+
+/**
+ * First unused name in the series base, base-2, base-3, … matching the
+ * scheme in bin/claude-channels so a restore and a manual launch in the
+ * same directory agree on what to call themselves.
+ */
+function freeSessionName(base: string, taken: Set<string>): string {
+  let n = 1;
+  let name = base;
+  while (taken.has(name)) {
+    n += 1;
+    name = `${base}-${n}`;
+  }
+  return name;
+}
+
+const IDLE_SHELLS = new Set([
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "dash",
+  "ksh",
+  "csh",
+  "tcsh",
+]);
+
 async function handleHostLaunch(
   req: HostLaunchRequest,
   allowDangerousSkip: boolean,
@@ -299,28 +389,9 @@ async function handleHostLaunch(
       };
     }
   }
-  const tmuxSession = path.basename(v.absolute);
+  const base = path.basename(v.absolute);
+  const taken = await tmuxSessionNames();
 
-  // Check if the session already exists with an idle shell (claude-channels
-  // exited). If so, cd to the requested cwd and re-launch rather than
-  // silently no-oping via -A.
-  const IDLE_SHELLS = new Set([
-    "bash",
-    "sh",
-    "zsh",
-    "fish",
-    "dash",
-    "ksh",
-    "csh",
-    "tcsh",
-  ]);
-  const paneCmd = await tmuxCapture([
-    "display-message",
-    "-t",
-    tmuxSession,
-    "-p",
-    "#{pane_current_command}",
-  ]);
   // --resume <sid> targets a specific dead session and takes precedence
   // over --continue. Neither applies to a freshly-created dir (nothing to
   // resume/continue). resume_sid is validated here before it is
@@ -342,21 +413,43 @@ async function handleHostLaunch(
     : req.continue_session && !dirWasCreated
       ? " --continue"
       : "";
-  if (IDLE_SHELLS.has(paneCmd)) {
-    const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${sessionArg}`;
-    await tmuxCapture(["send-keys", "-t", tmuxSession, relaunch, "Enter"]);
-    return {
-      action: "host_launch_done",
-      request_id: req.request_id,
-      ok: true,
-      tmux_session: tmuxSession,
-    };
+
+  // An existing session for this directory sitting at an idle shell means
+  // claude-channels exited there. Reuse it: cd to the requested cwd and
+  // relaunch in place rather than stranding it and opening a second one.
+  let tmuxSession = base;
+  if (taken.has(base)) {
+    const paneCmd = await tmuxCapture([
+      "display-message",
+      "-t",
+      exactPane(base),
+      "-p",
+      "#{pane_current_command}",
+    ]);
+    if (IDLE_SHELLS.has(paneCmd)) {
+      const relaunch = `cd "${v.absolute}" && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${sessionArg}`;
+      await tmuxCapture([
+        "send-keys",
+        "-t",
+        exactPane(base),
+        relaunch,
+        "Enter",
+      ]);
+      return {
+        action: "host_launch_done",
+        request_id: req.request_id,
+        ok: true,
+        tmux_session: base,
+      };
+    }
+    // Busy with something else: take the next free name in the series
+    // rather than -A'ing onto an unrelated same-basename session.
+    tmuxSession = freeSessionName(base, taken);
   }
 
   const args = [
     "new-session",
     "-d",
-    "-A",
     "-s",
     tmuxSession,
     "-c",
@@ -400,4 +493,235 @@ async function handleHostLaunch(
       error: `launch failed: ${(err as Error).message}`,
     };
   }
+}
+
+// ── Crash recovery ───────────────────────────────────────────────────────
+
+/** Batch ceiling so one request can't fork an unbounded number of Claudes. */
+const MAX_RESTORE_BATCH = 20;
+/** Gap between spawns; ten simultaneous starts all rewrite ~/.claude.json. */
+const RESTORE_STAGGER_MS = 400;
+
+const TRUST_PROMPT_MARKER = "Yes, I trust this folder";
+const TRUST_POLL_INTERVAL_MS = 500;
+const TRUST_POLL_TIMEOUT_MS = 30_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface RecoverableDeps {
+  getLiveSessionIds?: () => Set<string>;
+  getLiveCwds?: () => Set<string>;
+  redact?: (text: string) => string;
+  home?: string;
+}
+
+async function collectRecoverable(
+  withinHours: number | undefined,
+  deps: RecoverableDeps,
+): Promise<RecoverableSession[]> {
+  const taken = await tmuxSessionNames();
+  return scanRecoverable({
+    home: deps.home,
+    withinHours,
+    liveSessionIds: deps.getLiveSessionIds?.(),
+    liveCwds: deps.getLiveCwds?.(),
+    tmuxSessionExists: (name) => taken.has(name),
+    redact: deps.redact,
+  });
+}
+
+async function handleHostRecoverable(
+  req: HostRecoverableRequest,
+  deps: RecoverableDeps,
+): Promise<HostRecoverableDoneFrame> {
+  try {
+    const sessions = await collectRecoverable(req.within_hours, deps);
+    return {
+      action: "host_recoverable_done",
+      request_id: req.request_id,
+      sessions,
+    };
+  } catch (err) {
+    return {
+      action: "host_recoverable_done",
+      request_id: req.request_id,
+      error: (err as Error).message,
+    };
+  }
+}
+
+/**
+ * Watch a freshly-restored pane for Claude Code's folder-trust prompt and
+ * answer it. Restoring a session is proof the directory already hosted one,
+ * so the trust decision was made when it first opened; without this the
+ * session sits wedged at the prompt and never reconnects to the hub.
+ *
+ * Only ever sends keys after seeing the prompt's own text in the pane.
+ */
+async function answerTrustPrompt(tmuxSession: string): Promise<boolean> {
+  const deadline = Date.now() + TRUST_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await delay(TRUST_POLL_INTERVAL_MS);
+    const pane = await tmuxCapture([
+      "capture-pane",
+      "-p",
+      "-t",
+      exactPane(tmuxSession),
+    ]);
+    if (!pane) continue;
+    if (!pane.includes(TRUST_PROMPT_MARKER)) continue;
+    await tmuxCapture([
+      "send-keys",
+      "-t",
+      exactPane(tmuxSession),
+      "1",
+      "Enter",
+    ]);
+    return true;
+  }
+  return false;
+}
+
+async function handleHostRestore(
+  req: HostRestoreRequest,
+  allowDangerousSkip: boolean,
+  deps: RecoverableDeps,
+): Promise<HostRestoreDoneFrame> {
+  if (req.skip_permissions && !allowDangerousSkip) {
+    return {
+      action: "host_restore_done",
+      request_id: req.request_id,
+      error: "skip_permissions not allowed on this host",
+    };
+  }
+  const ids = Array.isArray(req.session_ids) ? req.session_ids : [];
+  if (ids.length === 0) {
+    return {
+      action: "host_restore_done",
+      request_id: req.request_id,
+      error: "session_ids must be a non-empty array",
+    };
+  }
+  if (ids.length > MAX_RESTORE_BATCH) {
+    return {
+      action: "host_restore_done",
+      request_id: req.request_id,
+      error: `at most ${MAX_RESTORE_BATCH} sessions per restore`,
+    };
+  }
+
+  // Re-scan rather than trusting anything the caller sent. An id absent
+  // from the fresh scan is stale (already restored, or now running), which
+  // is what makes a long-open dashboard tab harmless.
+  let candidates: RecoverableSession[];
+  try {
+    candidates = await collectRecoverable(undefined, deps);
+  } catch (err) {
+    return {
+      action: "host_restore_done",
+      request_id: req.request_id,
+      error: (err as Error).message,
+    };
+  }
+  const byId = new Map(candidates.map((c) => [c.session_id, c]));
+  const autoTrust = req.auto_trust !== false;
+
+  const taken = await tmuxSessionNames();
+  const results: HostRestoreResult[] = [];
+  const trustWatches: Array<Promise<void>> = [];
+
+  for (const id of ids) {
+    const candidate = byId.get(id);
+    if (!candidate) {
+      results.push({
+        session_id: id,
+        ok: false,
+        error: "no longer recoverable",
+      });
+      continue;
+    }
+    if (candidate.tmux_conflict) {
+      results.push({
+        session_id: id,
+        ok: false,
+        error: `tmux session '${candidate.tmux_conflict}' already owns this directory`,
+      });
+      continue;
+    }
+
+    const base = path.basename(candidate.cwd) || candidate.cwd;
+    const tmuxSession = freeSessionName(base, taken);
+    taken.add(tmuxSession);
+
+    const args = [
+      "new-session",
+      "-d",
+      "-s",
+      tmuxSession,
+      "-c",
+      candidate.cwd,
+      // Tells bin/claude-channels it is already inside tmux so it execs
+      // Claude Code directly instead of wrapping itself a second time.
+      "-e",
+      "CLAUDE_NET_IN_TMUX_WRAP=1",
+      "--",
+      "claude-channels",
+    ];
+    if (req.skip_permissions) args.push("--dangerously-skip-permissions");
+    // --resume pins the exact transcript the user ticked. --continue would
+    // pick whatever is newest for the cwd, which need not be the same one.
+    args.push("--resume", candidate.session_id);
+
+    try {
+      await spawnDetached(args);
+      const result: HostRestoreResult = {
+        session_id: id,
+        ok: true,
+        tmux_session: tmuxSession,
+      };
+      results.push(result);
+      if (autoTrust && candidate.needs_trust) {
+        trustWatches.push(
+          answerTrustPrompt(tmuxSession).then((answered) => {
+            result.trust_answered = answered;
+          }),
+        );
+      }
+    } catch (err) {
+      taken.delete(tmuxSession);
+      results.push({
+        session_id: id,
+        ok: false,
+        error: `restore failed: ${(err as Error).message}`,
+      });
+      continue;
+    }
+    await delay(RESTORE_STAGGER_MS);
+  }
+
+  await Promise.all(trustWatches);
+
+  return {
+    action: "host_restore_done",
+    request_id: req.request_id,
+    results,
+  };
+}
+
+function spawnDetached(args: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn("tmux", args, {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    proc.on("exit", (code) => {
+      if (code === 0 || code === null) resolve();
+      else reject(new Error(`tmux new-session exited with code ${code}`));
+    });
+    proc.on("error", reject);
+    proc.unref();
+  });
 }

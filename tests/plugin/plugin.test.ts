@@ -11,6 +11,8 @@ import {
   buildDefaultName,
   createChannelNotification,
   detectChannelCapability,
+  isPatchedBinaryPath,
+  parentIsPatchedBinary,
   withSessionSuffix,
   writeSessionState,
 } from "@/plugin/plugin";
@@ -340,6 +342,51 @@ describe("plugin helpers", () => {
       expect(
         detectChannelCapability({ experimental: { "claude/channel": 0 } }),
       ).toBe(false);
+    });
+  });
+
+  describe("isPatchedBinaryPath", () => {
+    test("true for the cc-patcher symlink and its versioned target", () => {
+      expect(
+        isPatchedBinaryPath("/home/u/.local/share/cc-patcher/claude-patched"),
+      ).toBe(true);
+      expect(
+        isPatchedBinaryPath(
+          "/home/u/.local/share/cc-patcher/claude-patched-ccaee123cf99c2bf",
+        ),
+      ).toBe(true);
+    });
+
+    test("true for the legacy claude-channels cache layout", () => {
+      expect(
+        isPatchedBinaryPath(
+          "/home/u/.local/share/claude-channels/claude-patched",
+        ),
+      ).toBe(true);
+    });
+
+    test("false for an unpatched Claude Code binary", () => {
+      expect(
+        isPatchedBinaryPath("/home/u/.local/share/claude/versions/2.1.229"),
+      ).toBe(false);
+      expect(isPatchedBinaryPath("/home/u/.local/bin/claude")).toBe(false);
+    });
+
+    test("false for other processes that could parent the plugin", () => {
+      expect(isPatchedBinaryPath("/usr/bin/bash")).toBe(false);
+      expect(isPatchedBinaryPath("/usr/local/bin/node")).toBe(false);
+    });
+  });
+
+  describe("parentIsPatchedBinary", () => {
+    test("false for an unreadable pid rather than throwing", () => {
+      // Pid 0 is never a real process, so neither /proc/0/exe nor ps
+      // can resolve it — exercises the degrade-to-false path.
+      expect(parentIsPatchedBinary(0)).toBe(false);
+    });
+
+    test("false when the parent is this test runner (bun, not patched)", () => {
+      expect(parentIsPatchedBinary(process.pid)).toBe(false);
     });
   });
 

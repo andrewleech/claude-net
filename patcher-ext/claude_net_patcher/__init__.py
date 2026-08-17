@@ -12,12 +12,14 @@ from .channels import (
     FeatureGatePatch,
     NotificationSuppressionPatch,
     OrgPolicyChannelsEnabledPatch,
+    SessionChannelListPatch,
 )
 
 PATCHES = [
     FeatureGatePatch(),
     OrgPolicyChannelsEnabledPatch(),
     AllowlistBypassPatch(),
+    SessionChannelListPatch(),
     DevChannelsDialogPatch(),
     NotificationSuppressionPatch(),
     DynamicWorkflowsMasterGatePatch(),

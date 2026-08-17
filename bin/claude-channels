@@ -6,12 +6,14 @@ set -euo pipefail
 # Patching is delegated to the `cc-patcher` engine plus the
 # `claude-net-patcher` provider package (see patcher-ext/), which must be
 # pip-installed in the `python3` environment this script runs under. Together
-# they apply six same-length edits to bypass the channel-related
-# restrictions and force the dynamic-workflows master gate on; see
+# they apply seven edits to bypass the channel-related restrictions and
+# force the dynamic-workflows master gate on; see
 # patcher-ext/claude_net_patcher/channels.py for the patch definitions.
 #
 # Auto-detects MCP servers from ~/.claude.json and injects
-# --dangerously-load-development-channels for each.
+# --dangerously-load-development-channels for each. The session-channel-list
+# patch makes this redundant on a fully-patched binary; it stays as a
+# backstop for a partial patch run, which still launches.
 #
 # Patched binaries are cached by hash at ~/.local/share/cc-patcher/
 # and re-patched automatically when Claude Code updates.
@@ -330,6 +332,9 @@ fi
 # the patched binary, so channels ARE actually loaded. The plugin uses
 # this to set `channel_capable: true` on register without needing the
 # fragile "LLM call _ack_channel within 60s" ceremony, which agents have
-# been observed to ignore as noise.
+# been observed to ignore as noise. The plugin also probes its parent
+# process for a patched binary, which covers launchers that don't set
+# this; the explicit signal is kept for when the parent isn't visible
+# (e.g. a shell wrapper between Claude Code and the MCP subprocess).
 export CLAUDE_NET_CHANNELS_PATCHED=1
 exec "$CLI_PATH" "${EXTRA_ARGS[@]}" "$@"

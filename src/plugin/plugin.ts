@@ -229,6 +229,48 @@ export function detectChannelCapability(
   return !!capabilities?.experimental?.["claude/channel"];
 }
 
+/** Basename prefix cc-patcher gives every patched binary it caches —
+ *  the `claude-patched` symlink, its `claude-patched-<hash>` target,
+ *  and the legacy `claude-channels/claude-patched` layout. */
+const PATCHED_BINARY_PREFIX = "claude-patched";
+
+/**
+ * True when `exePath` is a Claude Code binary produced by cc-patcher.
+ * Exported for unit testability.
+ */
+export function isPatchedBinaryPath(exePath: string): boolean {
+  return path.basename(exePath).startsWith(PATCHED_BINARY_PREFIX);
+}
+
+/**
+ * Whether the Claude Code process that spawned this plugin is a
+ * cc-patcher-produced binary, which means the channel patches are in
+ * place and channels are loaded.
+ *
+ * Asking the parent process directly rather than trusting a launcher-set
+ * env var: the patched binary is a shared artifact any launcher can
+ * exec (`claude-channels`, cc-local-router's `claude-v2`, bare
+ * `cc-patcher launch`), and only `claude-channels` exports
+ * CLAUDE_NET_CHANNELS_PATCHED. Keying off the parent covers all of
+ * them. Returns false — falling back to the `_ack_channel` ceremony —
+ * whenever the parent can't be read, so a shell wrapper between Claude
+ * Code and the plugin degrades rather than misreports.
+ */
+export function parentIsPatchedBinary(ppid: number = process.ppid): boolean {
+  try {
+    // Linux: /proc/<pid>/exe resolves symlinks to the versioned target.
+    return isPatchedBinaryPath(fs.readlinkSync(`/proc/${ppid}/exe`));
+  } catch {
+    // No procfs (macOS): ask ps for the parent's executable path.
+    try {
+      const out = Bun.spawnSync(["ps", "-o", "comm=", "-p", String(ppid)]);
+      return isPatchedBinaryPath(out.stdout.toString().trim());
+    } catch {
+      return false;
+    }
+  }
+}
+
 /**
  * Body of the combined registered-as / channel self-test notification
  * sent to the LLM after register. Single notification on purpose:
@@ -1440,18 +1482,19 @@ export class Plugin {
         | { experimental?: Record<string, unknown> }
         | undefined;
       // Forward-compatible: if a future Claude Code advertises the
-      // experimental flag explicitly, trust it; otherwise we'll wait
-      // for the empirical _ack_channel handshake to flip the bit.
-      // Belt-and-braces: when launched via `claude-channels`, the
-      // launcher exports CLAUDE_NET_CHANNELS_PATCHED=1 — that proves
-      // the binary patches are in place and channels are loaded, so
-      // we can skip the LLM-visible ceremony entirely. The ceremony
-      // was observed to be ignored by busy agents as noise, leaving
-      // them permanently channel_capable=false even when channels
-      // worked. The env-var path is invisible to the LLM.
+      // experimental flag explicitly, trust it. Otherwise, a patched
+      // parent binary proves the channel patches are in place and
+      // channels are loaded, so we skip the LLM-visible ceremony
+      // entirely — it was observed to be ignored by busy agents as
+      // noise, leaving them permanently channel_capable=false even
+      // when channels worked. CLAUDE_NET_CHANNELS_PATCHED is an
+      // explicit override for launchers that know better than the
+      // parent-process probe. Both paths are invisible to the LLM;
+      // only when none of them hold do we fall back to _ack_channel.
       this.channelCapable =
         detectChannelCapability(caps) ||
-        process.env.CLAUDE_NET_CHANNELS_PATCHED === "1";
+        process.env.CLAUDE_NET_CHANNELS_PATCHED === "1" ||
+        parentIsPatchedBinary();
       this.mcpInitialized = true;
 
       // Flush any register that was waiting on this callback.

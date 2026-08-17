@@ -1,10 +1,10 @@
-"""The six existing channel + workflow gate patches, migrated.
+"""The channel + workflow gate patches.
 
-Each patch emits Edits with `delta == 0` (same-length surgery). The
-regex / replacement strings are lifted verbatim from the v1 patcher.
+Most patches here emit Edits with `delta == 0` (same-length surgery);
+`SessionChannelListPatch` is the one growable exception.
 
-`expect_count = (1, None)` on every patch here means "apply to every
-match, as long as there is at least one" — no upper bound. This
+`expect_count = (1, None)` on the same-length patches means "apply to
+every match, as long as there is at least one" — no upper bound. This
 mirrors the anchors' minified-identifier patterns, which can and do
 match more than once per build (occurrence counts drift release to
 release); every match gets the same same-length rewrite.
@@ -176,6 +176,84 @@ class NotificationSuppressionPatch:
         return (
             f"NotificationSuppressionPatch:{self.PATTERN.decode('latin1')}:"
             f"{self.NEW_BODY.decode('latin1')}"
+        )
+
+
+class SessionChannelListPatch:
+    """Give the per-session channel lookup a synthetic fallback entry.
+
+    `s2r()` decides whether an MCP server may register a channel. After
+    the capability / provider / policy checks it does:
+
+        let i=IRt(e,tR());
+        if(!i)return{action:"skip",kind:"session",
+                     reason:`server ${e} not in --channels list ...`};
+
+    `tR()` is `allowedChannels()`, populated only from
+    `--dangerously-load-development-channels` (a.k.a. `--channels`), so
+    without that flag every server is skipped no matter how many of the
+    downstream policy / allowlist / dialog gates are neutered. This is
+    the one channel gate that cannot be forced from inside the binary
+    by a boolean flip — the code needs an *entry object*, not a true.
+
+    So append `??{kind:"server",name:e,dev:!0}` to the lookup: an
+    explicitly-listed server or plugin still resolves to its real
+    entry (preserving the marketplace check for `kind:"plugin"`), and
+    anything unlisted gets a synthetic dev server entry, which reaches
+    `{action:"register"}`. Channels then work under any launcher,
+    including ones that exec the patched binary with no channel argv.
+
+    Grows the payload by the length of the appended expression, so this
+    is a growable edit and must declare its containing StringPointer
+    region.
+
+    Anchored on the body signature rather than the minified function
+    name (`IRt` in 2.1.229), which drifts every release.
+    """
+
+    name = "Session channel list fallback (IRt)"
+    description = (
+        "Make the per-session channel lookup fall back to a synthetic "
+        "server entry so channels register without "
+        "--dangerously-load-development-channels."
+    )
+    may_grow = True
+    expect_count = 1
+    diag_anchor = b"not in --channels list for this session"
+    ANCHOR_RX = (
+        rb'function [\w$]{1,6}\(e,t\)\{'
+        rb'(?=let r=e\.split\(":"\);return t\.find\(\(n\)=>n\.kind==="server")'
+    )
+    FALLBACK = b'??{kind:"server",name:e,dev:!0}'
+
+    def discover(self, ctx: DiscoveryContext) -> list[Edit]:
+        matches = ctx.find_regex_in_payload(self.ANCHOR_RX)
+        if len(matches) != 1:
+            return []
+        body_start = matches[0].end()
+        body_end = ctx.find_balanced_close(
+            body_start, ctx.bun.offsets_struct_offset,
+        )
+        if body_end is None:
+            return []
+        # The fallback is only valid appended directly to the trailing
+        # `t.find(...)` call expression. A different last byte means the
+        # body shape drifted (e.g. a trailing `;`), so emit nothing and
+        # let the expect_count check report the miss.
+        if ctx.buf[body_end - 1] != ord(")"):
+            return []
+        region = ctx.containing_string_pointer(body_end)
+        if region is None:
+            return []
+        return [Edit(
+            offset=body_end, old=b"}", new=self.FALLBACK + b"}",
+            patch_name=self.name, grows_region=region,
+        )]
+
+    def cache_key(self) -> str:
+        return (
+            f"SessionChannelListPatch:{self.ANCHOR_RX.decode('latin1')}:"
+            f"{self.FALLBACK.decode('latin1')}"
         )
 
 

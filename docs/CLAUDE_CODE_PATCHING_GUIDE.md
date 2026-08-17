@@ -81,7 +81,7 @@ When reverse-engineering a new gate or check:
 | `?.accessToken` (property access pattern) | Exact function signatures |
 | `{action:"skip",kind:"allowlist"` (return value shape) | Line numbers or byte offsets |
 
-## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159)
+## Current patches (verified on v2.1.87, v2.1.104, v2.1.108, v2.1.109, v2.1.110, v2.1.112, v2.1.159, v2.1.229)
 
 Implementation: `patcher-ext/claude_net_patcher/channels.py`, a `cc_patcher.patches` entry-point provider consumed by the `cc-patcher` engine (`~/cc-patcher`).
 
@@ -144,7 +144,34 @@ rb'if\(![a-zA-Z0-9_$]+\.dev\)return\{action:"skip",kind:"allowlist"'
 
 **Expected matches:** 2
 
-### Patch 4: Dev channels dialog auto-accept
+### Patch 4: Session channel list fallback
+
+**What it bypasses:** The per-session channel list. `s2r()` decides whether an MCP server may register a channel, and after the capability / provider / policy checks it looks the server up in the list built from `--dangerously-load-development-channels`:
+
+```javascript
+function IRt(e,t){let r=e.split(":");return t.find((n)=>n.kind==="server"?e===n.name:r[0]==="plugin"&&r[1]===n.name)}
+// ...
+let i=IRt(e,tR());   // tR() === allowedChannels()
+if(!i)return{action:"skip",kind:"session",reason:`server ${e} not in --channels list for this session`};
+```
+
+Without the CLI flag naming the server, `tR()` is empty, the lookup returns `undefined`, and every server is skipped no matter how many downstream gates are neutered. This is the only channel gate that can't be forced with a boolean flip — the code needs an *entry object*, not a `true`.
+
+**Anchor regex (matches the function head, lookahead pins the body shape):**
+```python
+rb'function [\w$]{1,6}\(e,t\)\{'
+rb'(?=let r=e\.split\(":"\);return t\.find\(\(n\)=>n\.kind==="server")'
+```
+
+**Replacement:** append `??{kind:"server",name:e,dev:!0}` to the lookup expression, immediately before the body's closing `}` (located with `ctx.find_balanced_close`). An explicitly-listed server or plugin still resolves to its real entry, preserving the marketplace check for `kind:"plugin"`; anything unlisted gets a synthetic dev server entry and reaches `{action:"register"}`.
+
+This is the one **growable** patch here (+30 bytes), so the edit declares its containing StringPointer region and `cc-patcher` rewrites the Bun/ELF framing.
+
+**Why it matters:** channels work under any launcher that execs the patched binary, not just ones that inject the channel argv. `cc-patcher launch` is shared with other providers (e.g. `cc-local-router`'s `claude-v2`), and a launcher that forgets the argv otherwise produces a fully channel-patched binary with channels silently off.
+
+**Expected matches:** 1
+
+### Patch 5: Dev channels dialog auto-accept
 
 **What it bypasses:** When `--dangerously-load-development-channels` is used, a prompt asks the user to confirm "I am using this for local development" before proceeding.
 
@@ -169,7 +196,7 @@ rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)Ai\(\["
 
 **Expected matches:** 2
 
-### Patch 5: Channel notification suppression
+### Patch 6: Channel notification suppression
 
 **What it bypasses:** A separate notification function (`TJ1`) generates UI toast messages about channel problems. For server-type entries, it shows "server: entries need --dangerously-load-development-channels" when `!Y.dev`.
 
@@ -182,7 +209,7 @@ rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"s
 
 **Expected matches:** 2
 
-### Patch 6: Dynamic workflows master gate
+### Patch 7: Dynamic workflows master gate
 
 **What it bypasses:** The `Workflow` tool (multi-agent orchestration via `Workflow(...)` invocations) is gated behind four independent checks. When any of them fails the tool returns `Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting in /config)`.
 
@@ -225,9 +252,11 @@ The function and helper names (Y2, B48, a87, BP6, fP5) all mangle per build. The
 1. Finds the Claude Code binary (prefers native ELF at known locations over npm/bun installs)
 2. Caches a patched copy at `~/.local/share/cc-patcher/`, keyed by a hash of the source binary folded with the discovered provider registry's combined `cache_key()`s. Either a binary update or an installed/removed/changed provider package invalidates the cache.
 3. Re-patches automatically on a cache-key mismatch
-4. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each
+4. Auto-detects MCP servers from `~/.claude.json` (user-wide and project-scoped) and injects `--dangerously-load-development-channels server:NAME` for each. Patch 4 makes this redundant for a fully-patched binary; it stays as a backstop, because a partial patch run still launches (falling back to the previously cached binary, or the partially-patched one) and the argv keeps channels working if the Patch 4 anchor ever drifts.
 5. On partial patch failure, prints diagnostics and offers fallback to previous version
 6. Execs the patched binary with all injected + user-provided args
+
+Other launchers — `cc-local-router`'s `claude-v2`, or a bare `cc-patcher launch` — exec the same cached patched binary without any of the above. They get working channels from Patch 4 alone, and the plugin recognises them by probing its parent process (see `parentIsPatchedBinary` in `src/plugin/plugin.ts`) rather than relying on `claude-channels` to export `CLAUDE_NET_CHANNELS_PATCHED=1`.
 
 ## Adapting for a new Claude Code version
 
@@ -264,7 +293,20 @@ cc-patcher "$BINARY" /tmp/test-patched
 grep -cP 'return!0.*tengu_harbor' /tmp/test-patched          # Patch 1
 grep -cP 'channelsEnabled===!0' /tmp/test-patched             # Patch 2
 grep -cP 'if\(!1\s+\)return\{action:"skip"' /tmp/test-patched  # Patch 3
-grep -cP '\|\| [a-zA-Z0-9_$]+\(\)\?\.accessToken' /tmp/test-patched  # Patch 4
-grep -cP 'if\(!1\s+\)[a-zA-Z0-9_$]+\.push' /tmp/test-patched  # Patch 5
-grep -cP 'function [\w$]+\(\)\{return!0 +\}function [\w$]+\(\)\{return [\w$]+\(\)\.defaultOn\}' /tmp/test-patched  # Patch 6
+grep -cP '\?\?\{kind:"server",name:e,dev:!0\}' /tmp/test-patched  # Patch 4
+grep -cP '\|\| [a-zA-Z0-9_$]+\(\)\?\.accessToken' /tmp/test-patched  # Patch 5
+grep -cP 'if\(!1\s+\)[a-zA-Z0-9_$]+\.push' /tmp/test-patched  # Patch 6
+grep -cP 'function [\w$]+\(\)\{return!0 +\}function [\w$]+\(\)\{return [\w$]+\(\)\.defaultOn\}' /tmp/test-patched  # Patch 7
+```
+
+End-to-end check that channels actually register without the CLI flag — the thing Patch 4 exists for:
+
+```bash
+# No --dangerously-load-development-channels anywhere in this invocation.
+/tmp/test-patched --strict-mcp-config \
+  --mcp-config '{"mcpServers":{"claude-net":{"command":"bun","args":["run","'"$PWD"'/src/plugin/plugin.ts"],"env":{"CLAUDE_NET_HUB":"<hub>"}}}}' \
+  -p 'call claude-net register with name "chanprobe", then Bash "sleep 70" in the
+      foreground; afterwards report whether a <channel> block appeared'
+# While it sleeps, send it a message from another agent. A patched binary
+# delivers the <channel> block; an unpatched one silently drops it.
 ```

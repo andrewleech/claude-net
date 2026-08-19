@@ -1807,7 +1807,7 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("orphan sweep backstop reaps a long-idle agent-bound entry", () => {
+  test("orphan sweep backstop closes a long-idle agent-bound entry", () => {
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -1822,7 +1822,10 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
       r.entry.lastEventAt = new Date(Date.now() - 60_000);
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
-      expect(quick.hasSession(sid)).toBe(false);
+      // Closed, not dropped: the entry stays listed as a reconnectable
+      // gravestone until the retention window ages it out. What matters is
+      // that a bound zombie can't stay live forever.
+      expect(r.entry.closedAt).not.toBeNull();
     } finally {
       quick.stop();
     }

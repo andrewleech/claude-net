@@ -368,7 +368,10 @@ export class MirrorRegistry {
       victims.push({ sid: entry.sid, host: entry.host });
     }
     for (const { sid, host } of victims) {
-      this.closeAndDrop(sid, "agent_timeout", host);
+      // closeSession, not closeAndDrop: the entry stays listed as a closed
+      // gravestone for the retention window so it remains reconnectable
+      // from the dashboard.
+      this.closeSession(sid, "agent_timeout", host);
     }
   }
 
@@ -719,6 +722,10 @@ export class MirrorRegistry {
       // earlier "Session owner mismatch" 409 that permanently wedged any
       // renamed session whose ccPid couldn't vouch for identity — the
       // session showed offline/no-mirror while Claude ran fine.)
+      // Same (host, ccPid) means the same process. Only that process may
+      // reopen its own closed sid.
+      const identityMatches =
+        existing.ccPid !== null && ccPid !== null && existing.ccPid === ccPid;
       if (existing.closedAt) {
         // A deliberately-severed entry (POST /:sid/close) never comes
         // back, regardless of identity - that's what distinguishes an
@@ -732,11 +739,9 @@ export class MirrorRegistry {
           };
         }
         // A closed sid must not be handed back to a differently-
-        // identified process. `identityMatches` is also the guard the
-        // owner-mismatch check above trusts — reuse it here: known,
-        // differing ccPids means this re-POST is not the same process
-        // the close was for (e.g. it was deliberately dropped because
-        // the old ccPid died), so refuse to resurrect. `existing.ccPid
+        // identified process: known, differing ccPids mean this re-POST is
+        // not the same process the close was for (e.g. it was deliberately
+        // dropped because the old ccPid died), so refuse to resurrect. `existing.ccPid
         // === null` (pre-rollout) is the one case with no identity to
         // check, so it keeps the old idempotent-reopen behaviour.
         const ccPidMismatch =

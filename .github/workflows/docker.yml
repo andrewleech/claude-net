@@ -37,10 +37,21 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
+      # The Dockerfile's GIT_COMMIT arg feeds CLAUDE_NET_VERSION, which the
+      # hub reports in the UI and stamps into the mirror-agent bundle it
+      # serves. Left unset it defaults to "dev", so every build looks
+      # identical and an installed agent never sees a version change to
+      # update itself against.
+      - name: Resolve short commit
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          build-args: |
+            GIT_COMMIT=${{ steps.sha.outputs.short }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 

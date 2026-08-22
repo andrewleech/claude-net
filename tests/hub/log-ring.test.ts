@@ -165,6 +165,33 @@ describe("captureProcessOutput", () => {
     expect(process.stderr.write).toBe(before);
   });
 
+  test("captures console.log, which bypasses process.stdout.write in Bun", () => {
+    // Patching the stream alone misses every console.* call under Bun —
+    // they write to the fd directly. Without this the most idiomatic way
+    // to add a diagnostic would be invisible in the ring.
+    const ring = new LogRing();
+    const release = captureProcessOutput(ring);
+    try {
+      console.log("banner %s and %d", "text", 42);
+      console.error("a failure");
+    } finally {
+      release();
+    }
+    const lines = ring.query();
+    expect(lines.map((l) => l.text)).toContain("banner text and 42");
+    const err = lines.find((l) => l.text === "a failure");
+    expect(err?.stream).toBe("stderr");
+  });
+
+  test("restores the console methods on release", () => {
+    const ring = new LogRing();
+    const before = console.log;
+    const release = captureProcessOutput(ring);
+    expect(console.log).not.toBe(before);
+    release();
+    expect(console.log).toBe(before);
+  });
+
   test("accepts Buffer chunks", () => {
     const ring = new LogRing();
     const realWrite = process.stderr.write;

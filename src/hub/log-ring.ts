@@ -20,6 +20,8 @@
  * otherwise pin far more memory than the line count suggests.
  */
 
+import { format } from "node:util";
+
 export type LogStream = "stdout" | "stderr";
 
 export interface LogLine {
@@ -176,10 +178,26 @@ export class LogRing {
 
 type WriteFn = typeof process.stderr.write;
 
+/** console methods to tee, and which stream each is considered to write. */
+const CONSOLE_METHODS: [keyof Console, LogStream][] = [
+  ["log", "stdout"],
+  ["info", "stdout"],
+  ["debug", "stdout"],
+  ["warn", "stderr"],
+  ["error", "stderr"],
+  ["trace", "stderr"],
+];
+
 /**
  * Tee `process.stdout` and `process.stderr` into `ring`, leaving the
  * original writes intact so a host that *does* capture output still gets
  * everything. Returns a function that restores the original writers.
+ *
+ * `console.*` is wrapped separately: under Bun those methods write to the
+ * fd directly rather than through `process.stdout.write`, so patching the
+ * stream alone captures nothing a `console.log` emitted. Verified, not
+ * assumed — and worth keeping, since a diagnostic added with
+ * `console.error` would otherwise be silently absent from the ring.
  *
  * Safe against reentrancy: a throw inside the ring must not recurse
  * through a stderr write of its own.
@@ -231,8 +249,36 @@ export function captureProcessOutput(ring: LogRing): () => void {
   process.stdout.write = tee("stdout", originalOut.bind(process.stdout));
   process.stderr.write = tee("stderr", originalErr.bind(process.stderr));
 
+  const consoleTarget = console as unknown as Record<
+    string,
+    (...args: unknown[]) => void
+  >;
+  const originalConsole = new Map<string, (...args: unknown[]) => void>();
+  for (const [method, stream] of CONSOLE_METHODS) {
+    const name = String(method);
+    const original = consoleTarget[name];
+    if (typeof original !== "function") continue;
+    originalConsole.set(name, original);
+    consoleTarget[name] = (...args: unknown[]): void => {
+      if (!inWrite) {
+        inWrite = true;
+        try {
+          ring.write(stream, `${format(...args)}\n`);
+        } catch {
+          // Never let capture break the actual log call.
+        } finally {
+          inWrite = false;
+        }
+      }
+      original.apply(console, args);
+    };
+  }
+
   return () => {
     process.stdout.write = originalOut;
     process.stderr.write = originalErr;
+    for (const [name, original] of originalConsole) {
+      consoleTarget[name] = original;
+    }
   };
 }

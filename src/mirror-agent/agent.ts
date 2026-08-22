@@ -68,6 +68,9 @@ interface SessionState {
   tmuxPane: string | null;
   /** Set while a recovery round-trip is in flight to avoid duplicate recoveries. */
   recovering: boolean;
+  /** Timestamp the hub WS was first seen not-open, cleared whenever it is
+   *  open again. Drives the stall backstop in the watchdog loop. */
+  wsDownSince: number | null;
   /** Highest context-window size we've inferred for this session (auto-
    *  upgrades from 200k → 1M the first time a usage row crosses 200k). */
   ctxWindow: number;
@@ -178,6 +181,13 @@ const RECOVERY_SLOW_DELAY_MS = 5 * 60 * 1000;
 /** Cap the WS-open re-assert POST so a half-open socket after suspend/resume
  *  can't hang the reopen (and thus the flush) indefinitely. */
 const REOPEN_TIMEOUT_MS = 10_000;
+
+/** How long a session's hub WS may stay unbound before the watchdog loop
+ *  rebuilds it. Comfortably longer than HubClient's own reconnect ceiling
+ *  (30 s) and its handshake deadline, and well inside the hub's 30-min
+ *  orphan sweep, so a wedged client is caught before the hub gives up on
+ *  the session. */
+const WS_STALL_MS = 3 * 60 * 1000;
 
 /** Maximum age of an isApiErrorMessage JSONL record we'll report to the
  *  hub. The JSONL tail re-reads recent transcript on every agent start, so
@@ -496,6 +506,30 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           closeSession(s, "idle");
         }
       }
+    }
+    // Hub-WS stall backstop. A session whose WS stays unbound stops
+    // reaching the hub entirely, and the hub ends it as `agent_timeout`
+    // 30 min later. HubClient reconnects on its own, so anything down
+    // for WS_STALL_MS is a client that has wedged (or a hub that has
+    // been refusing us for minutes); rebuild it from scratch.
+    for (const s of sessions.values()) {
+      if (s.closed || s.recovering) continue;
+      if (s.ws?.isOpen()) {
+        s.wsDownSince = null;
+        continue;
+      }
+      if (s.wsDownSince === null) {
+        s.wsDownSince = now;
+        continue;
+      }
+      if (now - s.wsDownSince < WS_STALL_MS) continue;
+      log(
+        `[${s.sid}] hub WS down for ${Math.round((now - s.wsDownSince) / 1000)}s — forcing recovery`,
+      );
+      s.wsDownSince = now;
+      void recoverSession(s).catch((err: unknown) => {
+        log(`[${s.sid}] stall recovery failed: ${String(err)}`);
+      });
     }
     // Orphan sweep: if the Claude Code parent died (SIGKILL, crash) the
     // Stop hook never fires and the session leaks. Probe each open
@@ -938,6 +972,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       closed: false,
       tmuxPane: tmuxPane ?? null,
       recovering: false,
+      wsDownSince: null,
       reopening: false,
       ctxWindow: 200_000,
       lastCtxPct: -1,

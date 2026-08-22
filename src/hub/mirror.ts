@@ -70,18 +70,25 @@ const DEFAULT_NEVER_ACTIVE_MS = 5 * 60 * 1000;
  */
 const DEFAULT_ORPHAN_CLOSE_MS = 30 * 60 * 1000;
 /**
- * Backstop for agent-bound entries that `sweepOrphans` / `sweepNeverActive`
- * otherwise always skip (a bound WS normally means a live daemon still
- * pinging it). The mirror-agent watchdog is the primary defense against
- * "CC exits, daemon lives" — this catches what it misses (e.g. a
- * ccPid-less pre-rollout client, or a daemon that itself died without
- * cleanly closing its WS) so a stuck agent-bound entry can never live
- * forever. Deliberately much longer than DEFAULT_ORPHAN_CLOSE_MS since
- * an idle-but-alive bound session is a normal, common state.
+ * Backstop cutoff for agent-bound entries, which the sweeps otherwise
+ * always skip. 0 (the default) disables it, because on a bound entry
+ * there is nothing for it to measure: `lastEventAt` advances only on a
+ * recorded hook event, and a live Claude Code waiting on its user
+ * produces no hooks at all. Any non-zero value therefore closes healthy
+ * idle sessions on a timer — they show offline in the dashboard until
+ * their next event forces a re-open.
  *
- * Set to 0 to disable.
+ * A bound WS is itself the liveness signal: the daemon pings every 5 s
+ * and Bun drops a WS silent for 120 s, so a daemon that dies — even
+ * without closing cleanly — unbinds within ~2 min and the entry falls to
+ * the ordinary `orphanCloseMs` path. The case where the daemon outlives
+ * its Claude Code is handled where the pid is actually visible: the
+ * daemon's own sweep probes `ccPid` and POSTs /close.
+ *
+ * Kept as a knob for an operator who wants a hard ceiling on bound
+ * entries and accepts that cost.
  */
-const DEFAULT_BOUND_ORPHAN_CLOSE_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_BOUND_ORPHAN_CLOSE_MS = 0;
 const ORPHAN_SWEEP_INTERVAL_MS = 60 * 1000;
 
 // ── Entry types ───────────────────────────────────────────────────────────
@@ -532,7 +539,9 @@ export interface MirrorRegistryOptions {
   neverActiveMs?: number;
   /**
    * Backstop cutoff for agent-bound entries otherwise exempt from the
-   * sweeps above. 0 disables. Default 2h. See `DEFAULT_BOUND_ORPHAN_CLOSE_MS`.
+   * sweeps above. 0 (default) disables — see
+   * `DEFAULT_BOUND_ORPHAN_CLOSE_MS` for why a non-zero value closes
+   * healthy idle sessions.
    */
   boundOrphanCloseMs?: number;
 }
@@ -666,11 +675,10 @@ export class MirrorRegistry {
    * retention window — orphan-swept entries are user-invisible and
    * the dashboard sidebar should clear them immediately.
    *
-   * Agent-bound entries get a much longer `boundOrphanCloseMs` backstop
-   * instead of an outright skip: the mirror-agent watchdog is the
-   * primary defense against "CC exits, daemon lives", but this catches
-   * what it misses (ccPid-less clients, a daemon that died without
-   * cleanly closing its WS) so a stuck bound entry can't live forever.
+   * Agent-bound entries are skipped unless `boundOrphanCloseMs` is set,
+   * which it is not by default — a bound WS means a daemon still pinging,
+   * and an idle-but-alive session is a normal state with no events to
+   * measure. See `DEFAULT_BOUND_ORPHAN_CLOSE_MS`.
    */
   private sweepOrphans(): void {
     const cutoff = Date.now() - this.orphanCloseMs;
@@ -711,9 +719,8 @@ export class MirrorRegistry {
    * idle but alive CC session has agent != null and (createdAt ==
    * lastEventAt) until the user types something. Sweeping those would
    * tear down legitimate sessions visible in the dashboard sidebar —
-   * except past `boundOrphanCloseMs`, the same long-window backstop
-   * `sweepOrphans` applies, so a bound zombie probe entry can't live
-   * forever either.
+   * unless `boundOrphanCloseMs` is set, the same opt-in backstop
+   * `sweepOrphans` applies.
    */
   private sweepNeverActive(): void {
     const cutoff = Date.now() - this.neverActiveMs;

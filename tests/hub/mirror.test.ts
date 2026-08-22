@@ -1819,11 +1819,10 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("bound entry with recent activity survives the sweep under the default backstop", () => {
-    // Safety direction check for the backstop itself: an idle-but-alive
-    // bound session (agent connected, user hasn't typed in a while but
-    // well within boundOrphanCloseMs) must not be reaped just because
-    // a sweep ran.
+  test("bound entry with recent activity survives the sweep", () => {
+    // Safety direction check: an idle-but-alive bound session (agent
+    // connected, user hasn't typed in a while) must not be reaped just
+    // because a sweep ran.
     const quick = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
     try {
       const r = quick.createSession("bound:u@h", "/bound");
@@ -1834,6 +1833,48 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
       (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
       expect(quick.hasSession(sid)).toBe(true);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("default config keeps a long-idle bound session open", () => {
+    // The production case: a live Claude Code whose user hasn't typed for
+    // hours. It emits no hooks, so lastEventAt stays put while the daemon
+    // keeps its WS bound and pinging. Closing on that timer marked whole
+    // fleets of healthy sessions offline in the dashboard, so the default
+    // must leave a bound entry alone no matter how stale its last event.
+    const quick = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    try {
+      const r = quick.createSession("idle:u@h", "/idle");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = { ws: { send: () => {} }, wsIdentity: {} };
+      const longAgo = new Date(Date.now() - 12 * 60 * 60 * 1000); // 12h
+      r.entry.createdAt = longAgo;
+      r.entry.lastEventAt = longAgo;
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      (quick as unknown as { sweepNeverActive: () => void }).sweepNeverActive();
+      expect(quick.hasSession(sid)).toBe(true);
+      expect(r.entry.closedAt).toBeNull();
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("an unbound long-idle session is still swept under the default", () => {
+    // The fix must not blunt the sweep it was narrowed from: with no
+    // agent WS the ordinary orphanCloseMs path still applies.
+    const quick = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+    try {
+      const r = quick.createSession("gone:u@h", "/gone");
+      if (!r.ok) return;
+      const sid = r.entry.sid;
+      r.entry.agent = null;
+      r.entry.lastEventAt = new Date(Date.now() - 12 * 60 * 60 * 1000);
+      (quick as unknown as { sweepOrphans: () => void }).sweepOrphans();
+      expect(r.entry.closedAt).not.toBeNull();
+      expect(sid).toBeTruthy();
     } finally {
       quick.stop();
     }

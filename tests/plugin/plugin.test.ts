@@ -462,6 +462,37 @@ describe("plugin helpers", () => {
     });
   });
 
+  describe("queueNudge (dedup + cap)", () => {
+    afterEach(() => {
+      plugin.pendingNudges.length = 0;
+    });
+
+    test("collapses repeats of the same text to one entry", () => {
+      // The hub re-issues the upgrade hint on every register, and an agent
+      // being evicted and re-admitted in waves registers many times
+      // between two tool calls.
+      const hint = "claude-net: your plugin (version 0.1.0) is out of date.";
+      for (let i = 0; i < 35; i++) plugin.queueNudge({ text: hint });
+      expect(plugin.pendingNudges).toHaveLength(1);
+
+      const result = { content: [{ type: "text" as const, text: "out" }] };
+      plugin.drainNudges(result);
+      expect(result.content).toHaveLength(2);
+    });
+
+    test("keeps distinct nudges", () => {
+      plugin.queueNudge({ text: "A" });
+      plugin.queueNudge({ text: "B" });
+      plugin.queueNudge({ text: "A" });
+      expect(plugin.pendingNudges.map((n) => n.text)).toEqual(["A", "B"]);
+    });
+
+    test("refuses to grow past the cap", () => {
+      for (let i = 0; i < 50; i++) plugin.queueNudge({ text: `n${i}` });
+      expect(plugin.pendingNudges).toHaveLength(8);
+    });
+  });
+
   describe("buildChannelSelfTestText", () => {
     test("includes registered name and demands a fresh _ack_channel call", () => {
       const text = buildChannelSelfTestText("git-autosquash:corona@carbon");

@@ -73,6 +73,13 @@ const RECONNECT_MAX_MS = 30_000;
 // close fires, and reconnect never runs.
 const WATCHDOG_TIMEOUT_MS = 31_000;
 const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
+/**
+ * Cap on the one-shot nudge queue. The queue drains into the next tool
+ * result, so it is bounded by how many registers happen between two tool
+ * calls — which is not bounded at all when the hub is evicting and
+ * re-admitting agents in waves.
+ */
+const MAX_PENDING_NUDGES = 8;
 /** Delay between successful register and the channel self-test
  *  notification. Long enough that the user-facing "registered as" line
  *  has rendered; short enough that the test happens before the user
@@ -927,6 +934,19 @@ export class Plugin {
   // drainNudges() on every tool result.
   readonly pendingNudges: PendingNudge[] = [];
 
+  /**
+   * Queue a one-shot nudge, ignoring one whose text is already queued and
+   * refusing to grow past MAX_PENDING_NUDGES. The hub re-issues the
+   * upgrade hint on every register, so a session that reconnects
+   * repeatedly would otherwise queue one copy per registration and dump
+   * the lot into the next tool result.
+   */
+  queueNudge(nudge: PendingNudge): void {
+    if (this.pendingNudges.length >= MAX_PENDING_NUDGES) return;
+    if (this.pendingNudges.some((n) => n.text === nudge.text)) return;
+    this.pendingNudges.push(nudge);
+  }
+
   constructor(private readonly hubEnvUrl: string | undefined) {}
 
   // ── Stateless-on-instance helpers ────────
@@ -1319,13 +1339,13 @@ export class Plugin {
         // data when our plugin_version doesn't match its PLUGIN_VERSION_CURRENT.
         // Store it for one-shot surfacing on the next tool result.
         if (data && typeof data.upgrade_hint === "string") {
-          this.pendingNudges.push({ text: data.upgrade_hint });
+          this.queueNudge({ text: data.upgrade_hint });
         }
         this.storedName = candidate;
         this.registeredName = candidate;
         this.persistName(candidate);
         if (attempt > 0) {
-          this.pendingNudges.push({
+          this.queueNudge({
             text: `Rename suggestion: the default claude-net name "${baseName}" was already taken, so this session was auto-registered as "${candidate}". Before doing more claude-net work, please ask the user whether they would like a more meaningful name for this session (e.g. reviewer, tester, fork-a). If yes, call register(<name>) with their choice. If no, keep the current name and carry on. This notice only fires once.`,
             guard: () => !!this.registeredName,
           });

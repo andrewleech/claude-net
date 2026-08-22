@@ -26,6 +26,7 @@ import { type TailHandle, tailJsonl } from "./jsonl-tail";
 import { jsonlRecordToHistoryFrame } from "./jsonl-to-frame";
 import { PathObserver } from "./path-observer";
 import { ProbeAttemptTracker } from "./probe-tracker";
+import { encodeProjectDirName } from "./recoverable";
 import { Redactor, defaultConfigPaths } from "./redactor";
 import { TmuxInjector } from "./tmux-inject";
 
@@ -58,6 +59,10 @@ interface SessionState {
   seenUuids: Set<string>;
   outbox: string[];
   tail: TailHandle | null;
+  /** Sub-agent JSONL tails, keyed by agent_id. Each tails a sub-agent's
+   *  own transcript for its assistant reasoning/final text (tool calls
+   *  and results already arrive tagged via hooks). */
+  subagentTails: Map<string, TailHandle>;
   lastEventAt: number;
   closed: boolean;
   tmuxPane: string | null;
@@ -117,6 +122,13 @@ const DEFAULT_IDLE_SHUTDOWN_MS = 0;
  * session marked "ended".
  */
 const DEFAULT_SESSION_IDLE_MS = 0;
+/**
+ * How long a ccPid-less session (pre-CC_PID hook wrapper) can sit
+ * quiet before the watchdog bothers checking pane liveness. Mirrors
+ * the hub's DEFAULT_ORPHAN_CLOSE_MS — this is the client-side half of
+ * the same backstop for "CC exits, daemon lives".
+ */
+const NULL_CCPID_ORPHAN_MS = 30 * 60 * 1000;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 // Cap the per-session dedup set. Dedup only needs recent uuids (hook vs
@@ -353,6 +365,26 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         .filter((s) => s.cwd)
         .sort((a, b) => b.lastEventAt - a.lastEventAt)
         .map((s) => s.cwd),
+    // Crash recovery must not offer up sessions that are actually alive.
+    // The daemon's own map covers sessions it has seen; the /proc scan
+    // covers Claude Codes running without having fired a hook yet.
+    getLiveSessionIds: () => {
+      const ids = new Set<string>();
+      for (const s of sessions.values()) {
+        if (!s.closed) ids.add(s.sid);
+      }
+      for (const d of discoverRunningCcSessions()) ids.add(d.sessionId);
+      return ids;
+    },
+    getLiveCwds: () => {
+      const cwds = new Set<string>();
+      for (const s of sessions.values()) {
+        if (!s.closed && s.cwd) cwds.add(s.cwd);
+      }
+      for (const d of discoverRunningCcSessions()) cwds.add(d.cwd);
+      return cwds;
+    },
+    redact: (text) => redactor.redactText(text),
     onSessionProbe: (ccPid, cwd) => {
       // Skip if an active session for this ccPid already exists.
       for (const s of sessions.values()) {
@@ -466,7 +498,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // process is gone. Guard with a 5s grace window after lastEventAt
     // so we don't race a hook arriving on a freshly-recorded ccPid.
     for (const s of sessions.values()) {
-      if (s.closed || s.ccPid === null) continue;
+      if (s.closed) continue;
+      if (s.ccPid === null) {
+        // Pre-CC_PID-rollout client: no pid to signal, so fall back to
+        // a pane-liveness check once the session has gone quiet for a
+        // long time. Fire-and-forget — the hub-side sweep is the
+        // ultimate backstop if this misses.
+        if (now - s.lastEventAt > NULL_CCPID_ORPHAN_MS) {
+          void checkNullCcPidLiveness(s);
+        }
+        continue;
+      }
       if (now - s.lastEventAt < 5_000) continue;
       try {
         process.kill(s.ccPid, 0);
@@ -514,6 +556,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         status: "ok",
         sessions: sessions.size,
         port: server.port,
+        // hub + pid let the launcher detect a daemon running against a
+        // stale hub URL and kill/respawn it (see _mirror_agent_healthy in
+        // bin/claude-channels). Without this, a daemon spawned with the
+        // localhost fallback stays "healthy" forever while every hub call
+        // fails.
+        hub: hubUrl,
+        pid: process.pid,
       });
     }
     if (req.method === "GET" && url.pathname === "/sessions") {
@@ -696,15 +745,55 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       if (stale) closeSession(stale, "replaced-by-clear");
     }
 
-    // Stop / SubagentStop fire at turn end and carry only the FINAL
-    // assistant text block. When the JSONL tail is running for this
-    // session we already emit every text block (including the final
-    // one), so suppress the hook-sourced duplicate. The hook's arrival
-    // is still our "turn ended" signal for the thinking indicator —
-    // Stop / SubagentStop ends the turn. The hook's arrival is still
-    // the definitive turn-ended signal for the thinking indicator even
-    // when we're about to suppress its event (because the JSONL tail
-    // already emitted the final text).
+    // Start a sub-agent JSONL tail on first sighting of a new agent_id.
+    // Guarded on the sub-agent's transcript file existing yet - a
+    // sub-agent emits many hooks over its lifetime, so a later one
+    // retries once Claude Code has created the file.
+    if (ingested.frame.agent_id) {
+      startSubagentTailIfNeeded(
+        session,
+        ingested.frame.agent_id,
+        ingested.frame.agent_type,
+      );
+    }
+
+    // Sub-agent SubagentStop → done marker, not text. The sub-agent's
+    // reasoning/final text arrives via its own JSONL tail (started
+    // above), so replace the hook-sourced text with a minimal marker
+    // that only flips the tab's status to done.
+    if (
+      ingested.frame.kind === "assistant_message" &&
+      ingested.frame.agent_id
+    ) {
+      const doneFrame: MirrorEventFrame = {
+        action: "mirror_event",
+        sid: session.sid,
+        uuid: crypto.randomUUID(),
+        kind: "assistant_message",
+        ts: Date.now(),
+        payload: {
+          kind: "assistant_message",
+          text: "",
+          stop_reason: "",
+          subagent_done: true,
+        },
+        agent_id: ingested.frame.agent_id,
+        ...(ingested.frame.agent_type
+          ? { agent_type: ingested.frame.agent_type }
+          : {}),
+      };
+      queueEvent(session, doneFrame);
+      return new Response("ok", { status: 202 });
+    }
+
+    // Stop fires at turn end and carries only the FINAL assistant text
+    // block. When the JSONL tail is running for this session we already
+    // emit every text block (including the final one), so suppress the
+    // hook-sourced duplicate. The hook's arrival is still the definitive
+    // turn-ended signal for the thinking indicator even when we're about
+    // to suppress its event (because the JSONL tail already emitted the
+    // final text). SubagentStop never reaches this check - it is always
+    // agent_id-tagged and handled above.
     if (ingested.frame.kind === "assistant_message" && session.tail !== null) {
       onTurnEnd(session);
       return new Response("suppressed-tail-active", { status: 202 });
@@ -731,21 +820,26 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       );
     }
 
-    // Drive the thinking indicator purely off hook transitions.
-    if (ingested.frame.kind === "user_prompt") {
-      onTurnStart(session);
-    } else if (ingested.frame.kind === "tool_call") {
-      const payload = ingested.frame.payload as { tool_name?: string };
-      const toolName =
-        typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
-      onToolStart(session, toolName);
-    } else if (ingested.frame.kind === "tool_result") {
-      onToolEnd(session);
-    } else if (
-      ingested.frame.kind === "assistant_message" ||
-      ingested.frame.kind === "session_end"
-    ) {
-      onTurnEnd(session);
+    // Drive the thinking indicator purely off hook transitions. Sub-agent
+    // hooks are tagged with agent_id and must not flip the parent's
+    // busy/indicator state - they're already redacted + queued above
+    // (tagged), this just keeps them out of the parent's state machine.
+    if (!ingested.frame.agent_id) {
+      if (ingested.frame.kind === "user_prompt") {
+        onTurnStart(session);
+      } else if (ingested.frame.kind === "tool_call") {
+        const payload = ingested.frame.payload as { tool_name?: string };
+        const toolName =
+          typeof payload?.tool_name === "string" ? payload.tool_name : "tool";
+        onToolStart(session, toolName);
+      } else if (ingested.frame.kind === "tool_result") {
+        onToolEnd(session);
+      } else if (
+        ingested.frame.kind === "assistant_message" ||
+        ingested.frame.kind === "session_end"
+      ) {
+        onTurnEnd(session);
+      }
     }
 
     // Close on session_end.
@@ -834,6 +928,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       seenUuids: new Set(),
       outbox: [],
       tail: null,
+      subagentTails: new Map(),
       lastEventAt: Date.now(),
       closed: false,
       tmuxPane: tmuxPane ?? null,
@@ -1143,6 +1238,74 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   /**
+   * Start tailing a sub-agent's own JSONL transcript on first sighting of
+   * its agent_id. Mirrors the main tail's text-block extraction (tool
+   * calls/results already arrive tagged via hooks, so this emits
+   * assistant text blocks only - no duplication). Skips
+   * `emitCtxFromUsage`/`maybeReportApiError`: a sub-agent's usage would
+   * corrupt the parent's context bar, and API-error reporting is scoped
+   * to the parent thread's conversation. Reuses `session.seenUuids` for
+   * dedup - sub-agent record uuids are globally unique.
+   *
+   * No-ops if a tail is already running for this agent_id, or if the
+   * sub-agent's transcript file doesn't exist yet - a sub-agent emits
+   * many hooks over its lifetime, so a later one retries once Claude
+   * Code has created the file.
+   */
+  function startSubagentTailIfNeeded(
+    session: SessionState,
+    agentId: string,
+    agentType: string | undefined,
+  ): void {
+    if (session.subagentTails.has(agentId) || !session.transcriptPath) return;
+    const dir = path.dirname(session.transcriptPath);
+    const base = path.basename(session.transcriptPath, ".jsonl");
+    const subPath = path.join(dir, base, "subagents", `agent-${agentId}.jsonl`);
+    if (!fs.existsSync(subPath)) return;
+    const tail = tailJsonl(subPath, {
+      onRecord: (rec) => {
+        if (typeof rec.uuid === "string") {
+          session.seenUuids.add(rec.uuid);
+        }
+        if (
+          rec.type === "assistant" &&
+          rec.message &&
+          typeof rec.message === "object"
+        ) {
+          const msg = rec.message as { content?: unknown };
+          const content = Array.isArray(msg.content) ? msg.content : [];
+          for (let i = 0; i < content.length; i++) {
+            const block = content[i] as
+              | { type?: string; text?: string }
+              | undefined;
+            if (
+              block &&
+              block.type === "text" &&
+              typeof block.text === "string" &&
+              block.text.length > 0
+            ) {
+              emitAssistantTextFromJsonl(
+                session,
+                rec,
+                i,
+                block.text,
+                agentId,
+                agentType,
+              );
+            }
+          }
+        }
+      },
+      onError: (err) => {
+        log(
+          `[${session.sid}] sub-agent JSONL tail error (agent_id=${agentId}): ${err.message}`,
+        );
+      },
+    });
+    session.subagentTails.set(agentId, tail);
+  }
+
+  /**
    * POST a CC-side API-error record back to the hub. Dedupes per-uuid in
    * memory (lost on agent restart) and applies a 5-minute recency filter
    * so an agent restart re-reading old JSONL doesn't spam the hub with
@@ -1199,6 +1362,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     rec: { uuid?: string; timestamp?: string },
     blockIndex: number,
     text: string,
+    agentId?: string,
+    agentType?: string,
   ): void {
     const baseUuid =
       typeof rec.uuid === "string" && rec.uuid.length > 0
@@ -1223,6 +1388,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         stop_reason: "",
         ...(clamped.truncated ? { truncated: true } : {}),
       },
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(agentType ? { agent_type: agentType } : {}),
     };
     redactor.redactFrame(frame);
     queueEvent(session, frame);
@@ -1831,6 +1998,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       session.tail.stop();
       session.tail = null;
     }
+    for (const subTail of session.subagentTails.values()) {
+      subTail.stop();
+    }
+    session.subagentTails.clear();
     if (session.ws) {
       session.ws.stop();
       session.ws = null;
@@ -1841,6 +2012,24 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       /* best effort */
     });
     sessions.delete(session.sid);
+  }
+
+  /**
+   * Liveness fallback for sessions with no recorded ccPid (pre-CC_PID
+   * hook wrapper). Without a pid to signal, the best available proxy
+   * is whether the session's tmux pane still exists — `capturePane`
+   * fails once the pane is gone (killed shell, closed terminal). When
+   * there's no pane either, the caller's own staleness check (long
+   * quiet period) is the only signal available, so close on that alone.
+   */
+  async function checkNullCcPidLiveness(session: SessionState): Promise<void> {
+    if (session.closed) return;
+    if (session.tmuxPane) {
+      const cap = await injector.capturePane(session.tmuxPane, 1);
+      if (!cap.ok) closeSession(session, "orphan");
+      return;
+    }
+    closeSession(session, "orphan");
   }
 
   async function stop(): Promise<void> {
@@ -1897,14 +2086,31 @@ function toWsUrl(hubUrl: string, sid: string, host: string): string {
  *      inject CC_PID (pre-rollout clients), or for sessions whose
  *      ccPid was never recorded.
  *
+ * The pane signal alone is weaker than ccPid: two distinct, both-live
+ * processes could in principle report the same pane (a launcher bug,
+ * a copy-pasted TMUX_PANE). So a pane-only match only counts as
+ * "replaced" when the old session's ccPid is unknown or confirmed
+ * dead — a live old process must never be evicted underneath itself.
+ *
  * Exported pure for unit-testability — the real handler iterates the
- * returned sids and calls closeSession on each.
+ * returned sids and calls closeSession on each. `isPidAlive` defaults
+ * to a real `process.kill(pid, 0)` probe; tests inject a fake for
+ * determinism.
  */
 export interface ClearReplaceCandidate {
   sid: string;
   ccPid: number | null;
   tmuxPane: string | null;
   closed: boolean;
+}
+
+function defaultIsPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 export function findReplacedByClear(
@@ -1914,6 +2120,7 @@ export function findReplacedByClear(
   incomingSid: string,
   incomingCcPid: number | undefined,
   incomingTmuxPane: string | null | undefined,
+  isPidAlive: (pid: number) => boolean = defaultIsPidAlive,
 ): string[] {
   const iter = sessions instanceof Map ? sessions.values() : sessions;
   const victims: string[] = [];
@@ -1923,8 +2130,12 @@ export function findReplacedByClear(
     if (s.closed) continue;
     if (s.sid === incomingSid) continue;
     const matchByPid = ccPidUsable && s.ccPid === incomingCcPid;
+    if (matchByPid) {
+      victims.push(s.sid);
+      continue;
+    }
     const matchByPane = !!incomingTmuxPane && s.tmuxPane === incomingTmuxPane;
-    if (matchByPid || matchByPane) {
+    if (matchByPane && (s.ccPid === null || !isPidAlive(s.ccPid))) {
       victims.push(s.sid);
     }
   }
@@ -2006,9 +2217,7 @@ export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
  * -home-anl-claude-net, /home/anl/claude_marketplace/.claude/worktrees
  * → -home-anl-claude-marketplace--claude-worktrees).
  */
-export function encodeProjectDirName(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9]/g, "-");
-}
+export { encodeProjectDirName };
 
 export interface DiscoveredSession {
   sessionId: string;
@@ -2081,15 +2290,27 @@ function findOpenJsonlForPid(
  * same sid the CC will fire its hooks with (rather than minting a
  * fresh UUID that's guaranteed to disagree).
  *
- * Returns null when the projects dir is absent, empty, or unreadable
- * — the probe falls back to its old "fresh UUID" path in that case so
- * the broader behaviour is unchanged.
+ * Two or more Claude Code processes can share a cwd - most commonly
+ * `--fork-session` siblings - so this tries progressively weaker
+ * signals and abstains rather than guess once the cwd is genuinely
+ * ambiguous and no stronger signal resolved it:
  *
- * Resolution order: first try `/proc/<pid>/fd` for a transcript the
- * process actually holds open — that pins the sid to THIS pid, so two CC
- * processes sharing one cwd don't both resolve to the same (mtime-latest)
- * file and thrash a single session between them. Fall back to the mtime
- * scan (covers macOS, and Linux when CC isn't currently holding the fd).
+ *   1. The session id named explicitly on the process's own command
+ *      line (`--resume <uuid>` / `--session-id <uuid>`), when that
+ *      transcript exists on disk. Authoritative.
+ *   2. The transcript `ccPid` actually holds open, via `/proc/<ccPid>/fd`
+ *      (Linux only). Opportunistic - some Claude Code versions open and
+ *      close the transcript per write, in which case this never finds
+ *      anything and falls through.
+ *   3. Newest-mtime file in the project dir, when there's only one
+ *      candidate transcript, or when this pid is the sole live Claude
+ *      Code for the cwd - either way there's only one plausible owner.
+ *   4. Abstain (null) when multiple transcripts exist AND the cwd is
+ *      shared by two or more live Claude Code processes: the newest
+ *      file's owner is genuinely undecidable from here, and a wrong
+ *      guess would misattribute one process's session to another's.
+ *
+ * Returns null when the projects dir is absent, empty, or unreadable.
  */
 export function findActiveSessionForCcPid(
   ccPid: number,
@@ -2105,19 +2326,31 @@ export function findActiveSessionForCcPid(
     encodeProjectDirName(cwd),
   );
 
-  // Preferred: a JSONL under this project dir that pid `ccPid` has open.
-  const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
-  if (held) return held;
-
   let entries: string[];
   try {
     entries = fs.readdirSync(projectDir);
   } catch {
     return null;
   }
+
+  const cmdlineSid = readSidFromCmdline(ccPid, procRoot);
+  if (cmdlineSid && entries.includes(`${cmdlineSid}.jsonl`)) {
+    return {
+      sessionId: cmdlineSid,
+      transcriptPath: path.join(projectDir, `${cmdlineSid}.jsonl`),
+    };
+  }
+
+  const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
+  if (held) return held;
+
+  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
+  if (jsonlNames.length > 1 && countLiveCcProcessesForCwd(cwd, procRoot) >= 2) {
+    return null;
+  }
+
   let best: { name: string; mtimeMs: number } | null = null;
-  for (const name of entries) {
-    if (!name.endsWith(".jsonl")) continue;
+  for (const name of jsonlNames) {
     try {
       const stat = fs.statSync(path.join(projectDir, name));
       if (best === null || stat.mtimeMs > best.mtimeMs) {
@@ -2137,6 +2370,90 @@ export function findActiveSessionForCcPid(
     sessionId,
     transcriptPath: path.join(projectDir, best.name),
   };
+}
+
+/**
+ * Extract an explicit session id from a process's command line, for the
+ * flags that take a uuid argument (`--resume`/`-r`, `--session-id`).
+ * NUL (\x00) is the field separator in /proc/PID/cmdline on Linux -
+ * argv[0] ends in NUL, not whitespace. Returns null when the cmdline
+ * is unreadable (process gone, no permission, non-Linux) or names no
+ * such flag.
+ */
+function readSidFromCmdline(pid: number, procRoot: string): string | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(procRoot, String(pid), "cmdline"), "utf8");
+  } catch {
+    return null;
+  }
+  const args = raw.split("\0").filter((a) => a.length > 0);
+  // --fork-session resumes a transcript under a freshly generated session
+  // id, so the id on the command line belongs to the session being forked
+  // from, not to this process. Treating it as authoritative would bind a
+  // fork to its original's sid.
+  if (args.includes("--fork-session")) return null;
+  for (let i = 0; i < args.length - 1; i++) {
+    const flag = args[i];
+    if (flag === "--resume" || flag === "-r" || flag === "--session-id") {
+      const candidate = args[i + 1];
+      if (candidate && /^[0-9a-f-]{32,40}$/i.test(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * True when `exe` (the target of /proc/<pid>/exe) looks like a Claude
+ * Code binary: Anthropic's native install layout
+ * (`.../claude/versions/<ver>/claude`), a plain `.../claude`, or
+ * bin/claude-channels' same-length-patched binary
+ * (`.../claude-channels/claude-patched-<hash>`).
+ */
+function isClaudeCodeExe(exe: string): boolean {
+  return (
+    /\/claude\/versions\//.test(exe) ||
+    /\/claude$/.test(exe) ||
+    /\/cc-patcher\/claude-patched/.test(exe) ||
+    /\/claude-channels\/claude-patched/.test(exe)
+  );
+}
+
+/**
+ * Count live Claude Code processes whose cwd is exactly `cwd`. Used to
+ * decide whether a newest-mtime transcript pick is unambiguous (see
+ * `findActiveSessionForCcPid`). Linux-only, like the rest of the
+ * /proc-based discovery in this file - returns 0 when procRoot can't
+ * be listed, which callers treat as "can't tell, don't block on it".
+ */
+function countLiveCcProcessesForCwd(cwd: string, procRoot: string): number {
+  let pidDirs: string[];
+  try {
+    pidDirs = fs.readdirSync(procRoot);
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const dirName of pidDirs) {
+    if (!/^\d+$/.test(dirName)) continue;
+    let exe: string;
+    try {
+      exe = fs.readlinkSync(path.join(procRoot, dirName, "exe"));
+    } catch {
+      continue;
+    }
+    if (!isClaudeCodeExe(exe)) continue;
+    let pcwd: string;
+    try {
+      pcwd = fs.readlinkSync(path.join(procRoot, dirName, "cwd"));
+    } catch {
+      continue;
+    }
+    if (pcwd === cwd) count++;
+  }
+  return count;
 }
 
 /**
@@ -2199,21 +2516,14 @@ export function discoverRunningCcSessions(
     } catch {
       continue;
     }
-    if (
-      !/\/claude\/versions\//.test(exe) &&
-      !/\/claude$/.test(exe) &&
-      !/\/cc-patcher\/claude-patched/.test(exe) &&
-      !/\/claude-channels\/claude-patched/.test(exe)
-    ) {
-      continue;
-    }
+    if (!isClaudeCodeExe(exe)) continue;
     let cwd: string;
     try {
       cwd = fs.readlinkSync(`${procRoot}/${pid}/cwd`);
     } catch {
       continue;
     }
-    const discovered = findActiveSessionForCcPid(pid, cwd, home);
+    const discovered = findActiveSessionForCcPid(pid, cwd, home, procRoot);
     if (!discovered) continue;
     // Two CC processes can share a sid only across hosts (impossible
     // on /proc) or via a fork that we'd resolve to one. Dedup defensively.
@@ -2539,7 +2849,25 @@ function removeSentinelFile(stateDir: string): void {
   }
 }
 
+// Consecutive identical messages are collapsed into a single "repeated N
+// more times" line when the message changes. A daemon stuck in a retry
+// loop (e.g. hub unreachable) otherwise fills the log with one line
+// repeated thousands of times, burying everything else.
+let lastLogMsg: string | null = null;
+let lastLogRepeats = 0;
+
 function log(msg: string): void {
+  if (msg === lastLogMsg) {
+    lastLogRepeats++;
+    return;
+  }
+  if (lastLogRepeats > 0) {
+    process.stderr.write(
+      `[claude-net/mirror] (last message repeated ${lastLogRepeats} more time${lastLogRepeats === 1 ? "" : "s"})\n`,
+    );
+  }
+  lastLogMsg = msg;
+  lastLogRepeats = 0;
   process.stderr.write(`[claude-net/mirror] ${msg}\n`);
 }
 

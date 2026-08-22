@@ -90,6 +90,45 @@ describe("findActiveSessionForCcPid", () => {
     expect(found?.sessionId).toBe(sampleSid);
   });
 
+  test("prefers the transcript the pid actually holds open over newest-mtime", () => {
+    // Simulates a fork: the original (older mtime, still actively
+    // writing) and the fork share this cwd. Without the fd-scan, the
+    // fork's probe would misattribute the original's sid because it's
+    // the newest-mtime file in the shared dir.
+    const cwd = "/home/alice/work";
+    const olderMs = Date.now() - 10_000;
+    const newerMs = Date.now();
+    const heldPath = writeJsonl(cwd, olderSid, olderMs);
+    writeJsonl(cwd, sampleSid, newerMs);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-fd-proc-"));
+    try {
+      const fdDir = path.join(tmpProc, "999", "fd");
+      fs.mkdirSync(fdDir, { recursive: true });
+      fs.symlinkSync(heldPath, path.join(fdDir, "10"));
+      const found = findActiveSessionForCcPid(999, cwd, tmpHome, tmpProc);
+      expect(found?.sessionId).toBe(olderSid);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to newest-mtime when the pid holds no matching fd", () => {
+    const cwd = "/home/alice/work";
+    const olderMs = Date.now() - 10_000;
+    const newerMs = Date.now();
+    writeJsonl(cwd, olderSid, olderMs);
+    writeJsonl(cwd, sampleSid, newerMs);
+    // No /proc/<pid>/fd at all for this pid (ENOENT) — falls straight
+    // through to the mtime scan, same as before the fd-scan existed.
+    const found = findActiveSessionForCcPid(
+      999,
+      cwd,
+      tmpHome,
+      path.join(tmpHome, "no-such-proc"),
+    );
+    expect(found?.sessionId).toBe(sampleSid);
+  });
+
   test("rejects filenames that aren't UUID-shaped", () => {
     const cwd = "/home/alice/work";
     const dir = path.join(projectsDir, encodeProjectDirName(cwd));
@@ -152,6 +191,82 @@ describe("findActiveSessionForCcPid", () => {
       expect(found?.sessionId).toBe(sampleSid);
     } finally {
       fs.rmSync(procRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("prefers an explicit --resume <uuid> on cmdline over a newer, unrelated transcript", () => {
+    // Reproduces the fork-clobbering bug: the resumed session's own
+    // transcript is older than an unrelated file that happens to sit
+    // in the same project dir. cmdline names the resumed session
+    // explicitly, so it must win regardless of mtime ordering.
+    const cwd = "/home/alice/work";
+    const resumedMs = Date.now() - 10_000;
+    const otherMs = Date.now();
+    writeJsonl(cwd, sampleSid, resumedMs);
+    writeJsonl(cwd, olderSid, otherMs);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-cmdline-proc-"));
+    try {
+      const dir = path.join(tmpProc, "888");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "cmdline"),
+        `/path/claude-patched\0--resume\0${sampleSid}\0`,
+      );
+      const found = findActiveSessionForCcPid(888, cwd, tmpHome, tmpProc);
+      expect(found?.sessionId).toBe(sampleSid);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores the cmdline sid when --fork-session is present", () => {
+    // A fork resumes an existing transcript but writes under a freshly
+    // generated session id, so the id on the command line names the
+    // session being forked from. Trusting it binds the fork to its
+    // original, which is the collision this resolution order exists to
+    // avoid. With no other signal the answer is the mtime fallback, not
+    // the transcript named on the command line.
+    const cwd = "/home/alice/work";
+    writeJsonl(cwd, sampleSid, Date.now() - 10_000);
+    writeJsonl(cwd, olderSid, Date.now());
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-fork-proc-"));
+    try {
+      const dir = path.join(tmpProc, "999");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "cmdline"),
+        `/path/claude-patched\0--resume\0${sampleSid}\0--fork-session\0`,
+      );
+      const found = findActiveSessionForCcPid(999, cwd, tmpHome, tmpProc);
+      expect(found?.sessionId).not.toBe(sampleSid);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("abstains (null) when two live CC processes share a cwd with two transcripts and no stronger signal", () => {
+    // Neither process names a session on its cmdline nor holds a
+    // transcript fd open - the newest-mtime file's owner is genuinely
+    // undecidable, so this must not guess.
+    const cwd = "/home/alice/work";
+    const olderMs = Date.now() - 10_000;
+    const newerMs = Date.now();
+    writeJsonl(cwd, olderSid, olderMs);
+    writeJsonl(cwd, sampleSid, newerMs);
+    const tmpProc = fs.mkdtempSync(
+      path.join(os.tmpdir(), "cn-ambiguous-proc-"),
+    );
+    try {
+      for (const pid of [7001, 7002]) {
+        const dir = path.join(tmpProc, String(pid));
+        fs.mkdirSync(dir, { recursive: true });
+        fs.symlinkSync("/usr/local/bin/claude", path.join(dir, "exe"));
+        fs.symlinkSync(cwd, path.join(dir, "cwd"));
+      }
+      const found = findActiveSessionForCcPid(7001, cwd, tmpHome, tmpProc);
+      expect(found).toBe(null);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
     }
   });
 });
@@ -217,11 +332,19 @@ describe("discoverRunningCcSessions", () => {
     fs.symlinkSync(opts.cwd, path.join(dir, "cwd"));
   }
 
-  function plantJsonl(cwd: string, sid: string): void {
+  function plantJsonl(cwd: string, sid: string): string {
     const projects = path.join(tmpHome, ".claude", "projects");
     const dir = path.join(projects, encodeProjectDirName(cwd));
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, `${sid}.jsonl`), "");
+    const file = path.join(dir, `${sid}.jsonl`);
+    fs.writeFileSync(file, "");
+    return file;
+  }
+
+  function makeFakeFd(pid: number, fd: number, target: string): void {
+    const fdDir = path.join(tmpProc, String(pid), "fd");
+    fs.mkdirSync(fdDir, { recursive: true });
+    fs.symlinkSync(target, path.join(fdDir, String(fd)));
   }
 
   test("returns [] on non-Linux platforms", () => {
@@ -317,6 +440,48 @@ describe("discoverRunningCcSessions", () => {
     makeFakePid(4445, { exe: "/usr/local/bin/claude", cwd });
     const found = discoverRunningCcSessions(tmpProc, tmpHome);
     expect(found).toHaveLength(1);
+  });
+
+  test("resolves fork siblings sharing a cwd to their own distinct held transcripts", () => {
+    if (process.platform !== "linux") return;
+    // Reproduces the fork-clobbers-original bug: the original's
+    // transcript is actively written (newest mtime) while the fork's
+    // is older. Each pid holds its own transcript open via /proc/fd,
+    // so both must resolve to their own sid instead of colliding on
+    // the newest-mtime one.
+    const cwd = path.join(tmpHome, "shared-fork-cwd");
+    fs.mkdirSync(cwd, { recursive: true });
+    const originalSid = matchingSid;
+    const forkSid = "44444444-5555-6666-7777-888888888888";
+    const originalPath = plantJsonl(cwd, originalSid);
+    const forkPath = plantJsonl(cwd, forkSid);
+    const now = Date.now() / 1000;
+    fs.utimesSync(originalPath, now, now);
+    fs.utimesSync(forkPath, now - 10, now - 10);
+    makeFakePid(5001, { exe: "/usr/local/bin/claude", cwd });
+    makeFakePid(5002, { exe: "/usr/local/bin/claude", cwd });
+    makeFakeFd(5001, 10, originalPath);
+    makeFakeFd(5002, 10, forkPath);
+    const found = discoverRunningCcSessions(tmpProc, tmpHome);
+    const bySid = new Map(found.map((d) => [d.sessionId, d.ccPid]));
+    expect(bySid.get(originalSid)).toBe(5001);
+    expect(bySid.get(forkSid)).toBe(5002);
+  });
+
+  test("abstains for a cwd shared by two live CC processes with multiple transcripts and no stronger signal", () => {
+    if (process.platform !== "linux") return;
+    const cwd = path.join(tmpHome, "ambiguous-cwd");
+    fs.mkdirSync(cwd, { recursive: true });
+    plantJsonl(cwd, matchingSid);
+    plantJsonl(cwd, "55555555-6666-7777-8888-999999999999");
+    // Two live processes share this cwd; neither carries an explicit
+    // --resume/--session-id nor holds a transcript fd open, so neither
+    // pid should be adopted - misattributing either would poison the
+    // (sid, ccPid) binding.
+    makeFakePid(6001, { exe: "/usr/local/bin/claude", cwd });
+    makeFakePid(6002, { exe: "/usr/local/bin/claude", cwd });
+    const found = discoverRunningCcSessions(tmpProc, tmpHome);
+    expect(found).toEqual([]);
   });
 
   test("ignores non-pid entries in /proc", () => {

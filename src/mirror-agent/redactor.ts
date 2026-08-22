@@ -122,6 +122,11 @@ export class Redactor {
     return frame;
   }
 
+  /** Apply the rules to a bare string outside the frame pipeline. */
+  redactText(input: string): string {
+    return this.redactString(input);
+  }
+
   private redactString(input: string): string {
     if (!input) return input;
     let out = input;

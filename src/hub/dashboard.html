@@ -55,6 +55,7 @@
     --green: #55c27a;
     --red: #ff4d2e;       /* alias of --accent so existing error styles keep working */
     --text-accent: #ff6535; /* accent hue shifted orange for text — more legible in low light */
+    --text-warn: #d98b3a;  /* attention text: trust-prompt flags, restore badge */
     --blue: #6fb0d4;      /* desaturated, not the 'main' colour any more */
     --cyan: #6fc3d9;
     --orange: #ff9e64;
@@ -97,6 +98,7 @@
     --green: #3f8f52;
     --red: #c53518;
     --text-accent: var(--accent); /* light theme accent is already legible as text */
+    --text-warn: #96600f;  /* attention text: trust-prompt flags, restore badge */
     --blue: #3a7594;
     --cyan: #3a7594;
     --orange: #c55a18;
@@ -196,6 +198,60 @@
      duplicated the per-assistant indent rule at x=121-122. Per-event
      tick marks (.m-evt::after) still render and read as standalone
      dashes without the rail. */
+
+  /* ── Sub-agent tabs ──────────────────────────────────────────────
+     One pane per agent_id lives inside #mirror-transcript (the tool
+     toggle's ".mirror-transcript.hide-tool-calls .m-evt-tool" selector
+     is a descendant selector, so nesting doesn't break it). Only the
+     active pane is displayed; the tab bar above picks which one. */
+  .m-agent-tabs {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  .m-agent-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .m-agent-tab:hover { color: var(--text); border-color: var(--text-muted); }
+  .m-agent-tab.active { color: var(--text-accent); border-color: var(--accent); }
+  .m-agent-tab.has-unread::after {
+    content: "";
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .m-agent-tab-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .m-agent-tab-dot.running { background: var(--gold); box-shadow: 0 0 4px var(--gold); }
+  .m-agent-tab-dot.done { background: var(--green); }
+  .m-agent-pane { display: none; flex-direction: column; }
+  .m-agent-pane.is-active { display: flex; }
+  /* Task/Agent cards linked to a sub-agent tab (see TOOL_RENDERERS.Task)
+     are clickable - they jump to that tab. */
+  .m-evt-tool[data-linked-agent] { cursor: pointer; }
+  .m-evt-tool[data-linked-agent]:hover { background: rgba(255,255,255,0.03); }
 
   /* Tool-call rows (both full parent-level cards and the compact
      subagent one-liners) are hidden by default — a busy tool-using turn
@@ -299,26 +355,30 @@
      mark "this is the parent steering or hearing back from a child",
      and the body is wrapped in a <details> so the long subagent prompt
      never dominates the feed. ── */
-  .m-evt-subagent {
+  .m-evt-subagent,
+  .m-evt-tasknotif {
     padding-left: 128px;
     padding-right: 24px;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
   }
-  .m-evt-subagent > details {
+  .m-evt-subagent > details,
+  .m-evt-tasknotif > details {
     max-width: min(72ch, 100%);
     background: var(--bg-subtle, rgba(255,255,255,0.02));
     border-left: 3px solid var(--gold);
     padding: 8px 12px;
   }
-  .m-evt-subagent > details > summary {
+  .m-evt-subagent > details > summary,
+  .m-evt-tasknotif > details > summary {
     cursor: pointer;
     color: var(--gold);
     font-family: var(--mono);
     font-size: 0.9em;
   }
-  .m-evt-subagent > details > .m-subagent-body {
+  .m-evt-subagent > details > .m-subagent-body,
+  .m-evt-tasknotif > details > .m-subagent-body {
     margin-top: 6px;
     color: var(--text);
   }
@@ -339,6 +399,27 @@
   .m-evt-subagent-tool .m-tool-headline .m-tool-name {
     font-size: 9px;
     min-width: 50px;
+  }
+
+  /* Task notifications share the subagent disclosure layout above, just
+     tinted with the info accent instead of gold. Only the tint + two
+     caption styles are bespoke — the rest is the single source of truth
+     for collapsible transcript rows. */
+  .m-evt-tasknotif > details { border-left-color: var(--text-accent); }
+  .m-evt-tasknotif > details > summary { color: var(--text-accent); }
+  .m-evt-tasknotif .m-label { color: var(--text-accent); }
+  .m-evt-tasknotif-history { opacity: 0.78; }
+  .m-tn-note {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 11px;
+  }
+  .m-tn-meta {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 10px;
+    word-break: break-all;
   }
 
   /* ── ASSISTANT: the 'out' signal. Editorial layout — no bubble,
@@ -1240,6 +1321,45 @@
   .mirror-compose textarea:focus {
     outline: none;
     box-shadow: none;
+  }
+
+  /* Resize grip: drag the top edge of the compose bar upward to give a
+     long prompt more room. The dragged height is a floor: content still
+     auto-grows past it, and the box never goes below the two-row
+     default. Pointer devices only. */
+  .mirror-compose-grip {
+    position: absolute;
+    top: -4px;
+    left: 0;
+    right: 0;
+    height: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    /* Above the compose frame's border, below the slash popover. */
+    z-index: 19;
+    touch-action: none;
+  }
+  .mirror-compose-grip::before {
+    content: "";
+    width: 54px;
+    height: 2px;
+    background: var(--border);
+    transition: background 0.1s, width 0.1s;
+  }
+  .mirror-compose-grip:hover::before,
+  .mirror-compose.is-resizing .mirror-compose-grip::before {
+    background: var(--text-accent);
+    width: 96px;
+  }
+  /* No grip on touch devices: the software keyboard already governs how
+     much room the box gets, and the strip would sit under a thumb. */
+  .mirror-compose.is-touch .mirror-compose-grip { display: none; }
+  /* Suppress text selection everywhere while a drag is in flight. */
+  body.cn-compose-resizing {
+    user-select: none;
+    cursor: ns-resize;
   }
 
   /* Trailing cluster: keyboard hint + Send button, stacked so the
@@ -2509,6 +2629,23 @@
   }
   .cn-launch-btn:hover { background: var(--accent-ink); }
   .cn-launch-btn:disabled { opacity: 0.4; cursor: default; }
+  /* Restore button only renders when a host has crashed sessions, so it
+     carries the count that makes the sidebar the place you find out. */
+  .cn-restore-btn {
+    background: transparent;
+    color: var(--text-warn, #d98b3a);
+    border: 1px solid var(--text-warn, #d98b3a);
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    margin-right: 4px;
+  }
+  .cn-restore-btn:hover { background: var(--accent-ink); }
   .cn-host-child { padding-left: 22px !important; }
   .cn-session-row {
     align-items: flex-start !important;
@@ -2641,10 +2778,65 @@
   }
   .cn-launch-submit:disabled { background: var(--border); color: var(--text-muted); cursor: default; }
   .cn-launch-error { color: var(--text-accent); font-size: 11px; min-height: 1em; }
+
+  /* Restore picker - reuses the launch modal shell, swapping the path
+     input for a checklist of crashed sessions. */
+  .cn-restore-list {
+    max-height: 46vh;
+    overflow-y: auto;
+    border: 1px solid var(--border-dim);
+  }
+  .cn-restore-empty { padding: 14px; color: var(--text-muted); font-size: 11px; }
+  .cn-restore-item {
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-dim);
+    cursor: pointer;
+    font-size: 11px;
+    align-items: flex-start;
+  }
+  .cn-restore-item:last-child { border-bottom: none; }
+  .cn-restore-item:hover { background: var(--accent-ink); }
+  .cn-restore-item.is-blocked { opacity: 0.45; cursor: default; }
+  .cn-restore-item.is-blocked:hover { background: transparent; }
+  .cn-restore-item input { margin-top: 2px; flex: 0 0 auto; }
+  .cn-restore-body { flex: 1; min-width: 0; line-height: 1.4; }
+  .cn-restore-head { display: flex; gap: 8px; align-items: baseline; }
+  .cn-restore-label { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-restore-meta { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; margin-left: auto; white-space: nowrap; }
+  .cn-restore-cwd { color: var(--text-dim); font-family: var(--font-mono); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cn-restore-preview { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+  .cn-restore-flag {
+    color: var(--text-warn, #d98b3a);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .cn-restore-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .cn-restore-toolbar select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 4px;
+  }
+  .cn-restore-count { margin-left: auto; font-family: var(--font-mono); }
+  .cn-restore-results { font-size: 10px; font-family: var(--font-mono); color: var(--text-accent); }
+  .cn-restore-results div { padding: 1px 0; }
   @media (max-width: 767.98px) {
     .cn-launch-panel { width: 100vw; max-height: 90vh; }
     .cn-launch-modal { padding-top: 4vh; }
     .cn-launch-sugg-item { padding: 12px; min-height: 44px; }
+    .cn-restore-item { padding: 12px 10px; min-height: 44px; }
   }
 
   /* Mirror view inside #main-view. */
@@ -2909,6 +3101,10 @@
         <div class="collapse cn-tasks-panel" id="mirror-tasks-panel">
           <div id="mirror-tasks-list"></div>
         </div>
+        <!-- Sub-agent tab bar: "Main" + one tab per sub-agent (Task/Agent
+             tool dispatch). Hidden while only Main exists; a running/done
+             status dot and unread highlight are toggled from JS. -->
+        <div class="m-agent-tabs d-none" id="mirror-agent-tabs"></div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
         <button class="mirror-jump-btn" id="mirror-jump-btn" type="button">↓ latest</button>
         <div class="mirror-thinking" id="mirror-thinking"></div>
@@ -2924,6 +3120,9 @@
         </div>
         <div class="mirror-queued" id="mirror-queued" hidden></div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
+          <div class="mirror-compose-grip" id="mirror-compose-grip"
+               title="Drag to resize, double-click to reset"
+               aria-hidden="true"></div>
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
           <div class="mirror-schedule-pop" id="mirror-schedule-pop" hidden>
             <div class="msp-title">Send after</div>
@@ -2985,6 +3184,46 @@
         <button type="button" class="cn-launch-submit" id="launch-submit" disabled>Launch</button>
       </div>
       <div class="cn-launch-error" id="launch-error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Restore modal - opened by a host's "↻ restore" button, which only
+     appears when that host has sessions that died without a clean exit. -->
+<div class="cn-launch-modal" id="restore-modal" role="dialog" aria-modal="true" aria-label="Restore crashed Claude sessions">
+  <div class="cn-launch-panel">
+    <div class="cn-launch-head">
+      <span class="cn-launch-title" id="restore-title">Restore</span>
+      <button type="button" class="cn-launch-close" id="restore-close" data-restore-close title="Close">×</button>
+    </div>
+    <div class="cn-launch-body">
+      <div class="cn-restore-toolbar">
+        <label class="cn-launch-chk">
+          <input type="checkbox" id="restore-all" checked>
+          <span>All</span>
+        </label>
+        <select id="restore-window" aria-label="How far back to look">
+          <option value="24">last 24h</option>
+          <option value="72">last 3 days</option>
+          <option value="168">last week</option>
+          <option value="8760">everything</option>
+        </select>
+        <span class="cn-restore-count" id="restore-count"></span>
+      </div>
+      <div class="cn-restore-list" id="restore-list"></div>
+      <div class="cn-launch-controls">
+        <label class="cn-launch-chk" id="restore-skip-wrap">
+          <input type="checkbox" id="restore-skip" checked>
+          <span>Skip permission prompts</span>
+        </label>
+        <label class="cn-launch-chk" title="Answer Claude Code's folder-trust prompt for directories that have not accepted it. These directories already hosted the session being resumed.">
+          <input type="checkbox" id="restore-trust" checked>
+          <span>Auto-answer trust prompt</span>
+        </label>
+        <button type="button" class="cn-launch-submit" id="restore-submit" disabled>Restore</button>
+      </div>
+      <div class="cn-launch-error" id="restore-error"></div>
+      <div class="cn-restore-results" id="restore-results"></div>
     </div>
   </div>
 </div>
@@ -3074,6 +3313,7 @@
     return match;
   }
   const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at }
+  const recoverableCounts = new Map(); // host_id -> number of crashed sessions in the default window
   const pendingLaunches = []; // { hostId, launchKey, startedAt } — ghost rows replaced by real sessions
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
@@ -3251,12 +3491,14 @@
           connected_at: event.connected_at,
         });
         renderAgentsDebounced();
+        refreshRecoverableCount(event.host_id);
         break;
       }
 
       case 'host:disconnected': {
         var h = hosts.get(event.host_id);
         if (h) { h.online = false; renderAgentsDebounced(); }
+        recoverableCounts.delete(event.host_id);
         break;
       }
 
@@ -3361,6 +3603,7 @@
           var e = list[i];
           mirrorBySid.set(mirrorCompositeKey(e.host, e.sid), e);
           if (e.closed_at) continue;
+          clearGhostForCwd(e.cwd);
           if (!agents.has(e.owner_agent)) {
             upsertAgent({
               name: e.owner_agent,
@@ -3523,10 +3766,17 @@
     var launchBtn = host.online
       ? '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" type="button" title="Launch a new claude-channels session on this host">+ launch</button>'
       : '<span class="row-hint">offline</span>';
+    // Only rendered when there is something to recover, so its presence
+    // is how the user finds out a shutdown ate their sessions.
+    var recoverable = recoverableCounts.get(host.host_id) || 0;
+    var restoreBtn = (host.online && recoverable > 0)
+      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + escapeAttr(String(recoverable)) + ' session(s) on this host exited without a clean shutdown">↻ restore ' + escapeHtml(String(recoverable)) + '</button>'
+      : '';
     return (
       '<div class="cn-host-row' + offlineCls + '">'
       + '<span class="agent-dot ' + (host.online ? 'online' : 'offline') + '"></span>'
       + '<span class="cn-host-name">' + escapeHtml(host.user + '@' + host.hostname) + '</span>'
+      + restoreBtn
       + launchBtn
       + '</div>'
     );
@@ -3577,16 +3827,24 @@
     );
   }
 
+  // Bucket a duration given in seconds into the short form shared by
+  // relativeTime (event ages) and ghost-launch rows (time since launch),
+  // so a long-lived row reads "14m" rather than raw seconds.
+  function formatElapsed(dt) {
+    if (dt < 10) return 'just now';
+    if (dt < 60) return dt + 's';
+    if (dt < 3600) return Math.floor(dt / 60) + 'm';
+    if (dt < 86400) return Math.floor(dt / 3600) + 'h';
+    return Math.floor(dt / 86400) + 'd';
+  }
+
   function relativeTime(iso) {
     if (!iso) return '';
     var t = new Date(iso).getTime();
     if (!isFinite(t)) return '';
     var dt = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (dt < 10) return 'just now';
-    if (dt < 60) return dt + 's ago';
-    if (dt < 3600) return Math.floor(dt / 60) + 'm ago';
-    if (dt < 86400) return Math.floor(dt / 3600) + 'h ago';
-    return Math.floor(dt / 86400) + 'd ago';
+    var elapsed = formatElapsed(dt);
+    return elapsed === 'just now' ? elapsed : elapsed + ' ago';
   }
 
   // Row for an MCP agent that has no live mirror session — messaging-
@@ -3614,13 +3872,22 @@
     );
   }
 
+  // Drop the ghost row once its session actually shows up. Ghosts also
+  // carry their own expiry, so a row still clears even if the session
+  // never appears (dies, or sits unanswered at a trust prompt).
+  function clearGhostForCwd(cwd) {
+    if (!cwd) return;
+    var i = pendingLaunches.findIndex(function(p) { return p.cwd === cwd; });
+    if (i >= 0) pendingLaunches.splice(i, 1);
+  }
+
   function renderGhostLaunch(entry) {
     var ageSec = Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000));
     return (
       '<div class="list-group-item cn-host-child cn-ghost-launch">'
       + '<span class="agent-dot no-mirror"></span>'
-      + '<span class="agent-name">launching — ' + escapeHtml(entry.cwdShort) + '</span>'
-      + '<span class="row-hint">' + ageSec + 's</span>'
+      + '<span class="agent-name">' + escapeHtml(entry.verb || 'launching') + ' — ' + escapeHtml(entry.cwdShort) + '</span>'
+      + '<span class="row-hint">' + escapeHtml(formatElapsed(ageSec)) + '</span>'
       + '</div>'
     );
   }
@@ -4254,6 +4521,7 @@
           hostId: hostId,
           launchKey: launchKey,
           startedAt: Date.now(),
+          cwd: cwd,
           cwdShort: cwdParts.slice(-2).join('/') || cwd,
         });
         setTimeout(function() {
@@ -4269,8 +4537,323 @@
       });
   }
 
+  // --- Restore picker ---
+  // A session whose project still reads lastGracefulShutdown: false was
+  // killed rather than exited. The daemon finds them; this picks which
+  // come back. Ids only travel back to the host, never paths.
+  var RESTORE_DEFAULT_WINDOW_HOURS = 24;
+  var restoreModal = document.getElementById('restore-modal');
+  var restoreCloseBtn = document.getElementById('restore-close');
+  var restoreListEl = document.getElementById('restore-list');
+  var restoreCountEl = document.getElementById('restore-count');
+  var restoreAllChk = document.getElementById('restore-all');
+  var restoreWindowSel = document.getElementById('restore-window');
+  var restoreSkipChk = document.getElementById('restore-skip');
+  var restoreSkipWrap = document.getElementById('restore-skip-wrap');
+  var restoreTrustChk = document.getElementById('restore-trust');
+  var restoreSubmitBtn = document.getElementById('restore-submit');
+  var restoreTitleEl = document.getElementById('restore-title');
+  var restoreErrorEl = document.getElementById('restore-error');
+  var restoreResultsEl = document.getElementById('restore-results');
+  var restoreState = { hostId: null, sessions: [], selected: null, requestToken: 0, triggerEl: null };
+
+  function fetchRecoverable(hostId, withinHours) {
+    var url = '/api/host/' + encodeURIComponent(hostId)
+      + '/recoverable?within_hours=' + encodeURIComponent(withinHours);
+    return fetch(url)
+      .then(function(r) {
+        return r.json().then(function(body) { return { status: r.status, body: body }; });
+      })
+      .then(function(res) {
+        if (res.status >= 400) throw new Error((res.body && res.body.error) || ('HTTP ' + res.status));
+        return (res.body && res.body.sessions) || [];
+      });
+  }
+
+  // Badge-only refresh. Failures (rate-limited or a network blip) leave
+  // the previous count untouched rather than clearing the badge: a
+  // transient error is not evidence that nothing is recoverable any more.
+  function refreshRecoverableCount(hostId) {
+    fetchRecoverable(hostId, RESTORE_DEFAULT_WINDOW_HOURS)
+      .then(function(sessions) {
+        var prev = recoverableCounts.get(hostId) || 0;
+        recoverableCounts.set(hostId, sessions.length);
+        if (sessions.length !== prev) renderAgentsDebounced();
+      })
+      .catch(function() {});
+  }
+
+  function refreshAllRecoverableCounts() {
+    hosts.forEach(function(host, hostId) {
+      if (host.online) refreshRecoverableCount(hostId);
+    });
+  }
+
+  // Alt-tabbing fires repeated focus events; the /recoverable endpoint is
+  // rate-limited, so only the first focus in a quiet window triggers a
+  // re-check rather than one fetch per host per event.
+  var RECOVERABLE_FOCUS_THROTTLE_MS = 3000;
+  var recoverableFocusThrottledUntil = 0;
+  function refreshAllRecoverableCountsOnFocus() {
+    var now = Date.now();
+    if (now < recoverableFocusThrottledUntil) return;
+    recoverableFocusThrottledUntil = now + RECOVERABLE_FOCUS_THROTTLE_MS;
+    refreshAllRecoverableCounts();
+  }
+
+  // A shutdown can happen while the tab sits in the background, so
+  // re-check whenever the user comes back to it.
+  window.addEventListener('focus', refreshAllRecoverableCountsOnFocus);
+
+  function openRestoreModal(hostId, triggerEl) {
+    var host = hosts.get(hostId);
+    if (!host || !host.online) return;
+    restoreState.hostId = hostId;
+    restoreState.sessions = [];
+    restoreState.selected = null;
+    restoreState.triggerEl = triggerEl || null;
+    restoreTitleEl.textContent = 'Restore on ' + host.user + '@' + host.hostname;
+    restoreErrorEl.textContent = '';
+    restoreResultsEl.innerHTML = '';
+    restoreWindowSel.value = String(RESTORE_DEFAULT_WINDOW_HOURS);
+    if (host.allow_dangerous_skip) {
+      restoreSkipWrap.style.display = '';
+      restoreSkipChk.checked = true;
+    } else {
+      restoreSkipWrap.style.display = 'none';
+      restoreSkipChk.checked = false;
+    }
+    restoreTrustChk.checked = true;
+    restoreModal.classList.add('is-open');
+    loadRestoreList();
+    // The dialog sits late in the DOM, so without this Tab would walk the
+    // whole page before reaching it.
+    setTimeout(function() { restoreCloseBtn.focus(); }, 0);
+  }
+
+  function closeRestoreModal() {
+    restoreModal.classList.remove('is-open');
+    restoreState.hostId = null;
+    var triggerEl = restoreState.triggerEl;
+    restoreState.triggerEl = null;
+    if (triggerEl && document.body.contains(triggerEl)) {
+      setTimeout(function() { triggerEl.focus(); }, 0);
+    }
+  }
+
+  function loadRestoreList() {
+    if (!restoreState.hostId) return;
+    restoreListEl.innerHTML = '<div class="cn-restore-empty">Scanning…</div>';
+    restoreCountEl.textContent = '';
+    restoreSubmitBtn.disabled = true;
+    var hostId = restoreState.hostId;
+    var hours = Number(restoreWindowSel.value) || RESTORE_DEFAULT_WINDOW_HOURS;
+    // Captured per-request so a slower, older response (overlapping window
+    // changes, or a reopen of the same host) can never clobber a newer one.
+    var token = ++restoreState.requestToken;
+    fetchRecoverable(hostId, hours)
+      .then(function(sessions) {
+        if (restoreState.requestToken !== token) return;
+        restoreState.sessions = sessions;
+        // Everything ticked by default: after a crash the usual intent is
+        // "all of it", and unticking a couple beats ticking the rest.
+        restoreState.selected = new Set(
+          sessions.filter(function(s) { return !s.tmux_conflict; })
+                  .map(function(s) { return s.session_id; })
+        );
+        renderRestoreList();
+      })
+      .catch(function(err) {
+        if (restoreState.requestToken !== token) return;
+        // The list shown is now an error, so the selection state must not
+        // still describe a previous window's sessions.
+        restoreState.sessions = [];
+        restoreState.selected = null;
+        restoreListEl.innerHTML = '<div class="cn-restore-empty">Could not scan this host.</div>';
+        restoreErrorEl.textContent = err && err.message ? err.message : String(err);
+        syncRestoreSelectionUi();
+      });
+  }
+
+  function renderRestoreList() {
+    var sessions = restoreState.sessions;
+    if (!sessions.length) {
+      restoreListEl.innerHTML = '<div class="cn-restore-empty">Nothing to restore in this window.</div>';
+      restoreCountEl.textContent = '';
+      restoreSubmitBtn.disabled = true;
+      restoreSubmitBtn.textContent = 'Restore';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i];
+      var blocked = !!s.tmux_conflict;
+      var checked = restoreState.selected.has(s.session_id);
+      var flags = '';
+      if (s.needs_trust) flags += ' <span class="cn-restore-flag" title="Claude Code will ask whether you trust this folder">⚠ trust</span>';
+      if (blocked) flags += ' <span class="cn-restore-flag" title="tmux session ' + escapeAttr(s.tmux_conflict) + ' already owns this directory">busy</span>';
+      var turns = s.turns === null || s.turns === undefined ? '? turns' : (s.turns + (s.turns === 1 ? ' turn' : ' turns'));
+      html += '<label class="cn-restore-item' + (blocked ? ' is-blocked' : '') + '">'
+        + '<input type="checkbox" data-restore-pick="' + escapeAttr(s.session_id) + '"'
+        + (checked ? ' checked' : '') + (blocked ? ' disabled' : '') + '>'
+        + '<span class="cn-restore-body">'
+        +   '<span class="cn-restore-head">'
+        +     '<span class="cn-restore-label">' + escapeHtml(s.label) + '</span>' + flags
+        +     '<span class="cn-restore-meta">' + escapeHtml(relativeTime(s.last_active)) + ' · ' + escapeHtml(turns) + '</span>'
+        +   '</span>'
+        +   '<span class="cn-restore-cwd">' + escapeHtml(s.cwd) + '</span>'
+        +   (s.preview ? '<span class="cn-restore-preview">' + escapeHtml(s.preview) + '</span>' : '')
+        + '</span>'
+        + '</label>';
+    }
+    restoreListEl.innerHTML = html;
+    syncRestoreSelectionUi();
+  }
+
+  function syncRestoreSelectionUi() {
+    var n = restoreState.selected ? restoreState.selected.size : 0;
+    var selectable = restoreState.sessions.filter(function(s) { return !s.tmux_conflict; }).length;
+    restoreCountEl.textContent = n + ' selected';
+    restoreAllChk.checked = selectable > 0 && n === selectable;
+    restoreSubmitBtn.disabled = n === 0;
+    restoreSubmitBtn.textContent = n > 0 ? 'Restore ' + n : 'Restore';
+  }
+
+  function restoreSubmit() {
+    if (!restoreState.hostId || !restoreState.selected || !restoreState.selected.size) return;
+    var hostId = restoreState.hostId;
+    var host = hosts.get(hostId);
+    var ids = Array.from(restoreState.selected);
+    var byId = {};
+    restoreState.sessions.forEach(function(s) { byId[s.session_id] = s; });
+    var autoTrust = restoreTrustChk.checked;
+
+    restoreSubmitBtn.disabled = true;
+    restoreErrorEl.textContent = '';
+    restoreResultsEl.innerHTML = '';
+    fetch('/api/host/' + encodeURIComponent(hostId) + '/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_ids: ids,
+        skip_permissions: restoreSkipChk.checked && host.allow_dangerous_skip,
+        auto_trust: autoTrust,
+      }),
+    })
+      .then(function(r) {
+        return r.json().then(function(body) { return { status: r.status, body: body }; });
+      })
+      .then(function(res) {
+        restoreSubmitBtn.disabled = false;
+        if (res.status >= 400) {
+          restoreErrorEl.textContent = (res.body && res.body.error) || ('HTTP ' + res.status);
+          return;
+        }
+        var results = (res.body && res.body.results) || [];
+        var failures = results.filter(function(r) { return !r.ok; });
+        results.filter(function(r) { return r.ok; }).forEach(function(r) {
+          var s = byId[r.session_id];
+          addRestoreGhost(hostId, s ? s.cwd : r.session_id, r, autoTrust);
+        });
+        recoverableCounts.set(hostId, Math.max(0, (recoverableCounts.get(hostId) || 0) - (results.length - failures.length)));
+        renderAgents();
+        if (failures.length) {
+          // Keep the modal open on partial failure; closing it would hide
+          // which sessions did not come back.
+          restoreResultsEl.innerHTML = failures.map(function(r) {
+            var s = byId[r.session_id];
+            return '<div>' + escapeHtml((s ? s.label : r.session_id) + ': ' + (r.error || 'failed')) + '</div>';
+          }).join('');
+          loadRestoreList();
+          return;
+        }
+        closeRestoreModal();
+        refreshRecoverableCount(hostId);
+      })
+      .catch(function(err) {
+        restoreSubmitBtn.disabled = false;
+        restoreErrorEl.textContent = 'Restore failed: ' + (err && err.message ? err.message : err);
+      });
+  }
+
+  function addRestoreGhost(hostId, cwd, result, autoTrust) {
+    var launchKey = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+    var parts = String(cwd).split('/');
+    // needs_trust means the project has never accepted Claude Code's
+    // folder-trust dialog. If auto-trust was ticked the daemon answers it
+    // itself, so the session comes up regardless; only a human declining
+    // auto-trust on a needs_trust project actually leaves it sitting there.
+    var waitingOnTrust = !autoTrust && !!(result && result.needs_trust);
+    pendingLaunches.push({
+      hostId: hostId,
+      launchKey: launchKey,
+      startedAt: Date.now(),
+      cwd: cwd,
+      cwdShort: parts.slice(-2).join('/') || cwd,
+      verb: waitingOnTrust ? 'waiting on trust prompt' : 'restoring',
+    });
+    // A row waiting on a human answering the trust prompt gets a long
+    // leash, but every ghost must eventually clear even if its session
+    // never shows up and never sends a matching mirror event.
+    var expiryMs = waitingOnTrust ? 600_000 : 60_000;
+    setTimeout(function() {
+      var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
+      if (i >= 0) { pendingLaunches.splice(i, 1); renderAgents(); }
+    }, expiryMs);
+  }
+
+  restoreSubmitBtn.addEventListener('click', restoreSubmit);
+  restoreWindowSel.addEventListener('change', loadRestoreList);
+  // The restore modal has no text input to hang Escape off, unlike the
+  // launch modal's path field.
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && restoreModal.classList.contains('is-open')) {
+      e.preventDefault();
+      closeRestoreModal();
+    }
+  });
+
+  restoreAllChk.addEventListener('change', function() {
+    if (!restoreState.selected) return;
+    restoreState.selected.clear();
+    if (restoreAllChk.checked) {
+      restoreState.sessions.forEach(function(s) {
+        if (!s.tmux_conflict) restoreState.selected.add(s.session_id);
+      });
+    }
+    var boxes = restoreListEl.querySelectorAll('[data-restore-pick]');
+    for (var i = 0; i < boxes.length; i++) {
+      if (!boxes[i].disabled) boxes[i].checked = restoreAllChk.checked;
+    }
+    syncRestoreSelectionUi();
+  });
+
+  restoreListEl.addEventListener('change', function(e) {
+    var box = e.target.closest && e.target.closest('[data-restore-pick]');
+    if (!box || !restoreState.selected) return;
+    var id = box.getAttribute('data-restore-pick');
+    if (box.checked) restoreState.selected.add(id);
+    else restoreState.selected.delete(id);
+    syncRestoreSelectionUi();
+  });
+
   // Wire sidebar click → open modal, modal controls.
   document.addEventListener('click', function(e) {
+    var restoreBtn = e.target.closest && e.target.closest('[data-restore-host]');
+    if (restoreBtn) {
+      e.preventDefault();
+      dismissMobileSidebar();
+      openRestoreModal(restoreBtn.getAttribute('data-restore-host'), restoreBtn);
+      return;
+    }
+    if (e.target.closest && e.target.closest('[data-restore-close]')) {
+      closeRestoreModal();
+      return;
+    }
+    if (e.target === restoreModal) {
+      closeRestoreModal();
+      return;
+    }
     var launchBtn = e.target.closest && e.target.closest('[data-launch-host]');
     if (launchBtn) {
       e.preventDefault();
@@ -4480,8 +5063,196 @@
       for (var _k in activeSubagents) if (activeSubagents[_k]) return true;
       return false;
     }
+
+    // ── Sub-agent tabs ────────────────────────────────────────────────
+    // Newer Claude Code builds tag sub-agent-originated hooks with
+    // agent_id/agent_type (see hook-ingest.ts). Each distinct agent_id
+    // gets its own tab + transcript pane rendered at Main's fidelity
+    // (reasoning text + tool cards + final message) instead of the
+    // collapsed one-liners above. Older builds never set agent_id, so
+    // every frame routes to 'main' and the activeSubagents/
+    // postSubagentCover collapse above stays the fallback.
+    var agentTabsEl = document.getElementById('mirror-agent-tabs');
+    var agentPanes = Object.create(null); // agent_id (or 'main') → pane el
+    var agentTabs = Object.create(null); // agent_id (or 'main') → { type, label, status, tabEl, unread }
+    var toolUseToAgent = Object.create(null); // Task tool_use_id → agent_id
+    var activeAgentTab = 'main';
+
+    function syncAgentTabsVisibility() {
+      if (!agentTabsEl) return;
+      agentTabsEl.classList.toggle('d-none', Object.keys(agentTabs).length <= 1);
+    }
+
+    // `fromUser` marks a click on a tab (or on a Task card linking to one)
+    // as opposed to an internal switch such as falling back to Main when
+    // the active pane is pruned. Only the former re-snaps the scroll.
+    function selectAgentTab(aid, fromUser) {
+      if (!agentPanes[aid]) return;
+      activeAgentTab = aid;
+      Object.keys(agentPanes).forEach(function(k) {
+        agentPanes[k].classList.toggle('is-active', k === aid);
+      });
+      Object.keys(agentTabs).forEach(function(k) {
+        var t = agentTabs[k];
+        t.tabEl.classList.toggle('active', k === aid);
+        if (k === aid && t.unread) {
+          t.unread = false;
+          t.tabEl.classList.remove('has-unread');
+        }
+      });
+      if (!fromUser) return;
+      // Selecting a tab lands on that pane's latest event. Toggling pane
+      // visibility rewrites the transcript's scroll geometry, so snap
+      // across several frames with virtualization off instead of a single
+      // rAF, which can land short and read as "it scrolled up".
+      setScrolledUp(false);
+      deferVirtualization(400);
+      startTailObserver();
+    }
+
+    function setAgentTabStatus(aid, status) {
+      var rec = agentTabs[aid];
+      if (!rec) return;
+      rec.status = status;
+      var dot = rec.tabEl.querySelector('.m-agent-tab-dot');
+      if (dot) dot.className = 'm-agent-tab-dot ' + status;
+    }
+
+    function setAgentTabLabel(aid, label) {
+      var rec = agentTabs[aid];
+      if (!rec || !label) return;
+      rec.label = label;
+      var span = rec.tabEl.querySelector('.m-agent-tab-label');
+      if (span) span.textContent = label;
+    }
+
+    function markAgentTabUnread(aid) {
+      if (aid === activeAgentTab) return;
+      var rec = agentTabs[aid];
+      if (!rec || rec.unread) return;
+      rec.unread = true;
+      rec.tabEl.classList.add('has-unread');
+    }
+
+    // Drop finished sub-agent tabs/panes from previous turns. Called when a
+    // new main-thread turn starts (a human prompt) so the tab bar tracks the
+    // terminal: only the current turn's sub-agents remain. Running sub-agents
+    // are kept regardless. Main is never pruned.
+    function pruneDoneAgentTabs() {
+      var removed = false;
+      var activeRemoved = false;
+      Object.keys(agentTabs).forEach(function(aid) {
+        if (aid === 'main') return;
+        var rec = agentTabs[aid];
+        if (!rec || rec.status !== 'done') return;
+        if (rec.tabEl && rec.tabEl.parentNode) {
+          rec.tabEl.parentNode.removeChild(rec.tabEl);
+        }
+        var pane = agentPanes[aid];
+        if (pane && pane.parentNode) pane.parentNode.removeChild(pane);
+        delete agentTabs[aid];
+        delete agentPanes[aid];
+        if (activeAgentTab === aid) activeRemoved = true;
+        removed = true;
+      });
+      if (!removed) return;
+      // Drop stale Task-card → agent links pointing at pruned agents so a
+      // later click on an old dispatch card doesn't target a dead tab.
+      if (toolUseToAgent) {
+        Object.keys(toolUseToAgent).forEach(function(tuid) {
+          if (!agentTabs[toolUseToAgent[tuid]]) delete toolUseToAgent[tuid];
+        });
+      }
+      if (activeRemoved) selectAgentTab('main');
+      syncAgentTabsVisibility();
+    }
+
+    function addAgentTab(aid, label, agentType) {
+      if (agentTabs[aid]) return agentTabs[aid];
+      var tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'm-agent-tab';
+      tab.setAttribute('data-agent', aid);
+      tab.innerHTML =
+        '<span class="m-agent-tab-dot running"></span>' +
+        '<span class="m-agent-tab-label"></span>';
+      tab.querySelector('.m-agent-tab-label').textContent = label;
+      tab.addEventListener('click', function() { selectAgentTab(aid, true); }, { signal: attachSig });
+      if (agentTabsEl) agentTabsEl.appendChild(tab);
+      var rec = { type: agentType || '', label: label, status: 'running', tabEl: tab, unread: false };
+      agentTabs[aid] = rec;
+      syncAgentTabsVisibility();
+      return rec;
+    }
+
+    // Returns the pane for `aid`, lazily creating pane + tab on first
+    // sighting of a non-main agent_id. `evtLike` (optional) supplies
+    // agent_type for the new tab's initial label.
+    function paneFor(aid, evtLike) {
+      if (agentPanes[aid]) return agentPanes[aid];
+      var pane = document.createElement('div');
+      pane.className = 'm-agent-pane';
+      pane.setAttribute('data-agent', aid);
+      transcriptEl.appendChild(pane);
+      agentPanes[aid] = pane;
+      if (aid !== 'main') {
+        var agentType = evtLike && evtLike.agent_type;
+        addAgentTab(aid, agentType || aid.slice(0, 8), agentType);
+      }
+      return pane;
+    }
+
+    // Full reset: called on attach and on every applyInit (fresh init +
+    // reconnect) so tabs/panes rebuild cleanly from the replayed
+    // transcript rather than accumulating stale sub-agent tabs.
+    function resetAgentTabsUi() {
+      agentPanes = Object.create(null);
+      agentTabs = Object.create(null);
+      toolUseToAgent = Object.create(null);
+      activeAgentTab = 'main';
+      if (agentTabsEl) agentTabsEl.innerHTML = '';
+      var mainPane = document.createElement('div');
+      mainPane.className = 'm-agent-pane is-active';
+      mainPane.setAttribute('data-agent', 'main');
+      transcriptEl.appendChild(mainPane);
+      agentPanes.main = mainPane;
+      if (agentTabsEl) {
+        var mainTab = document.createElement('button');
+        mainTab.type = 'button';
+        mainTab.className = 'm-agent-tab active';
+        mainTab.setAttribute('data-agent', 'main');
+        mainTab.innerHTML = '<span class="m-agent-tab-label">Main</span>';
+        mainTab.addEventListener('click', function() { selectAgentTab('main', true); }, { signal: attachSig });
+        agentTabsEl.appendChild(mainTab);
+        agentTabs.main = { type: 'main', label: 'Main', status: '', tabEl: mainTab, unread: false };
+      }
+      syncAgentTabsVisibility();
+    }
+    resetAgentTabsUi();
+
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
+    // True until this attach has rendered its first init frame. Selecting
+    // a session always lands on the latest message; the saved scroll-back
+    // position is only restored when a reconnect re-inits a session the
+    // user is already reading.
+    var initSnapToTail = true;
+    // Row virtualization (content-visibility) makes scrollHeight an
+    // estimate, so it stays off while a scroll target is being applied
+    // and comes back once the position has settled. Switching it back on
+    // resizes every skipped row to its intrinsic estimate, which grows
+    // scrollHeight and leaves a tailed transcript sitting above the
+    // bottom, so re-snap afterwards unless the user has scrolled up.
+    var virtualizeTimer = null;
+    function deferVirtualization(ms) {
+      transcriptEl.classList.remove('is-virtualized');
+      if (virtualizeTimer) clearTimeout(virtualizeTimer);
+      virtualizeTimer = setTimeout(function() {
+        virtualizeTimer = null;
+        transcriptEl.classList.add('is-virtualized');
+        if (!userScrolledUp) startTailObserver();
+      }, ms);
+    }
     // Anchor for "load earlier history" requests — the timestamp of
     // the oldest frame currently rendered. Set on first renderEvent
     // (live or backfilled) and lowered as older frames are prepended.
@@ -4520,7 +5291,10 @@
     // topmost fully-or-partially-visible .m-evt element, then record
     // how far into it the scroll position sits.
     function captureAnchor() {
-      var els = transcriptEl.querySelectorAll('.m-evt[data-uuid]');
+      // Scoped to the active pane only - hidden panes (display:none)
+      // report offsetTop/offsetHeight 0, which would otherwise pollute
+      // the scan with unreachable "matches" at the top of the list.
+      var els = transcriptEl.querySelectorAll('.m-agent-pane.is-active .m-evt[data-uuid]');
       var st = transcriptEl.scrollTop;
       var anchor = null;
       for (var i = 0; i < els.length; i++) {
@@ -4543,6 +5317,18 @@
         if (a) { state.anchorUuid = a.uuid; state.anchorOffset = a.offset; }
       }
       setScrollState(sid, state);
+    }, { signal: attachSig });
+
+    // Clicking a Task/Agent card linked to a sub-agent (see
+    // TOOL_RENDERERS.Task.result) jumps to that agent's tab. Skip clicks
+    // inside a <summary> so expanding the prompt/result <details> still
+    // works instead of navigating away.
+    transcriptEl.addEventListener('click', function(e) {
+      if (e.target.closest && e.target.closest('summary')) return;
+      var linked = e.target.closest && e.target.closest('[data-linked-agent]');
+      if (!linked) return;
+      var targetAgent = linked.getAttribute('data-linked-agent');
+      if (targetAgent) selectAgentTab(targetAgent, true);
     }, { signal: attachSig });
 
     // Initial-replay tail-snap loop. scrollHeight is real so a couple
@@ -5339,6 +6125,11 @@
           var prompt = (p.input && p.input.prompt) || '';
           el.innerHTML = makeHeadline('Task',
             '▶ ' + escapeHtml(type || 'agent') + ': ' + escapeHtml(desc || ''));
+          // Stashed on the card so .result (called later, on the SAME
+          // element - found via tool_use_id) can enrich the linked
+          // sub-agent tab's label without a separate lookup table.
+          if (desc) el.setAttribute('data-task-desc', desc);
+          if (type) el.setAttribute('data-task-type', type);
           if (prompt) {
             appendDetails(el, 'prompt', '<pre>' + escapeHtml(truncateLines(prompt, 15)) + '</pre>');
           }
@@ -5348,6 +6139,19 @@
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
           appendDetails(el, 'result',
             '<pre>' + escapeHtml(truncateLines(resp || '', 30)) + '</pre>');
+          // Link this card to its sub-agent's tab - both async_launched
+          // and synchronous completed response shapes carry agentId.
+          var respObj = p.response && typeof p.response === 'object' ? p.response : null;
+          var agentId = respObj && typeof respObj.agentId === 'string' ? respObj.agentId : '';
+          if (agentId) {
+            toolUseToAgent[p.tool_use_id] = agentId;
+            var typeAttr = el.getAttribute('data-task-type') || '';
+            var descAttr = el.getAttribute('data-task-desc') || '';
+            paneFor(agentId, { agent_type: typeAttr });
+            if (descAttr) setAgentTabLabel(agentId, (typeAttr || 'agent') + ': ' + descAttr);
+            setAgentTabStatus(agentId, respObj.status === 'async_launched' ? 'running' : 'done');
+            el.setAttribute('data-linked-agent', agentId);
+          }
         },
       },
       // Agent (Task in older CC builds) is aliased AFTER this object
@@ -6652,12 +7456,93 @@
       return tpl.innerHTML;
     }
 
+    // ── Task-notification cards ──────────────────────────────────────
+    // The Claude Code harness injects <task-notification> blocks as
+    // user-turn content when a background task comes to rest. They arrive
+    // through the user paths (live user_prompt + history_text role=user)
+    // and would otherwise render as a raw <pre> that looks like the human
+    // typed it. Detect them and render a collapsed disclosure box instead:
+    // a header from the XML metadata, with the markdown <result> tucked
+    // inside.
+
+    // Pull the inner text of the first <tag>…</tag> from src. Non-greedy,
+    // dot-all (via [\s\S]) so multi-line bodies like <result> are captured.
+    function taskNotifTag(src, tag) {
+      var m = src.match(new RegExp('<' + tag + '>([\\s\\S]*?)<\\/' + tag + '>'));
+      return m ? m[1].trim() : '';
+    }
+
+    // Returns a parsed struct when text contains a <task-notification>
+    // block, else null. Robust to missing tags — only <result> carries
+    // markdown; everything else is metadata.
+    function parseTaskNotification(text) {
+      if (!text || text.indexOf('<task-notification>') === -1) return null;
+      return {
+        status: taskNotifTag(text, 'status'),
+        summary: taskNotifTag(text, 'summary'),
+        note: taskNotifTag(text, 'note'),
+        result: taskNotifTag(text, 'result'),
+        taskId: taskNotifTag(text, 'task-id'),
+        toolUseId: taskNotifTag(text, 'tool-use-id'),
+        outputFile: taskNotifTag(text, 'output-file'),
+        raw: text
+      };
+    }
+
+    function taskNotifGlyph(status) {
+      var s = (status || '').toLowerCase();
+      if (s === 'completed') return '✅';
+      if (s.indexOf('error') !== -1 || s.indexOf('fail') !== -1) return '⚠️';
+      if (s === 'running' || s === 'in_progress') return '⏳';
+      return '🔔';
+    }
+
+    // Reuses the subagent card layout (.m-evt row + meta line + <details>
+    // + .m-subagent-body) so the disclosure styling lives in one place.
+    // Timestamp comes free from the gutter via data-ts on the row.
+    function buildTaskNotifEl(fields, opts) {
+      opts = opts || {};
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-tasknotif' + (opts.history ? ' m-evt-tasknotif-history' : '');
+      var summary = taskNotifGlyph(fields.status) + ' ' +
+        (fields.summary || 'task notification') +
+        (fields.status ? ' (' + fields.status + ')' : '');
+      var body = fields.result
+        ? '<div class="m-subagent-body md-body">' + renderMarkdown(fields.result) + '</div>'
+        : '<pre class="m-subagent-body">' + escapeHtml(fields.raw || '') + '</pre>';
+      if (fields.note) {
+        body += '<div class="m-tn-note">' + escapeHtml(fields.note) + '</div>';
+      }
+      var meta = [];
+      if (fields.taskId) meta.push('task ' + fields.taskId);
+      if (fields.outputFile) meta.push(fields.outputFile);
+      if (meta.length) {
+        body += '<div class="m-tn-meta">' + escapeHtml(meta.join(' · ')) + '</div>';
+      }
+      el.innerHTML =
+        '<div class="m-evt-meta"><span class="m-label">task</span></div>' +
+        '<details><summary>' + escapeHtml(summary) + '</summary>' + body + '</details>';
+      return el;
+    }
+
     // ── Main renderEvent ─────────────────────────────────────────────
 
     function buildHistoryEl(evt) {
       var payload = evt.payload || {};
       var ts = formatTime(new Date(evt.ts).toISOString());
       var role = payload.role || 'system';
+      // History-backfilled task notifications get the same disclosure
+      // treatment as their live counterparts (just dimmed via the
+      // -history modifier), rather than a raw user <pre>.
+      if (role === 'user') {
+        var tn = parseTaskNotification(payload.text || '');
+        if (tn) {
+          var tnEl = buildTaskNotifEl(tn, { history: true });
+          tnEl.setAttribute('data-uuid', evt.uuid);
+          tnEl.setAttribute('data-ts', ts);
+          return tnEl;
+        }
+      }
       var el = document.createElement('div');
       el.className = 'm-evt m-evt-history m-evt-history-' + role;
       el.setAttribute('data-uuid', evt.uuid);
@@ -6679,12 +7564,46 @@
 
       var kind = evt.kind;
       var payload = evt.payload || {};
+      // Tagged frames (agent_id present) get their own pane at Main's
+      // fidelity, bypassing the untagged inSubagent()/postSubagentCover
+      // collapse below (that collapse is the fallback for older Claude
+      // Code builds that never set agent_id).
+      var tagged = !!evt.agent_id;
+      var aid = evt.agent_id || 'main';
+      var pane = paneFor(aid, evt);
       var el;
       var ts = formatTime(new Date(evt.ts).toISOString());
 
+      // A tagged SubagentStop arrives as a minimal marker frame (see
+      // agent.ts handleHookPost): the sub-agent's reasoning/final text
+      // already streamed in via its own JSONL tail, so this just flips
+      // the tab to done and renders nothing.
+      if (tagged && kind === 'assistant_message' && payload.subagent_done) {
+        setAgentTabStatus(aid, 'done');
+        return;
+      }
+
       if (kind === 'user_prompt') {
+        // Harness-injected task notifications come in on the user turn but
+        // aren't the human typing — render them as a collapsed disclosure
+        // box instead of a "user" message.
+        var tnLive = parseTaskNotification(payload.prompt || '');
+        // A genuine human prompt on the main thread starts a new turn:
+        // prune finished sub-agent tabs from previous turns (running stay).
+        // Harness task-notifications ride the user turn but aren't the human
+        // typing, so they don't count as a new turn.
+        if (!tagged && !tnLive) pruneDoneAgentTabs();
+        if (tnLive) {
+          el = buildTaskNotifEl(tnLive, {});
+          el.setAttribute('data-ts', ts);
+          el.setAttribute('data-uuid', evt.uuid);
+          pane.appendChild(el);
+          if (aid !== activeAgentTab) markAgentTabUnread(aid);
+          scrollToBottom();
+          return;
+        }
         el = document.createElement('div');
-        var isSubagentPrompt = inSubagent() || postSubagentCover;
+        var isSubagentPrompt = !tagged && (inSubagent() || postSubagentCover);
         postSubagentCover = false; // consume on every user_prompt regardless of branch
         if (isSubagentPrompt) {
           // The parent dispatched an Agent/Task subagent and the
@@ -6713,8 +7632,9 @@
         // payload.subagent === true comes from the SubagentStop hook on
         // the parent's session (set by hook-ingest in agent.ts). Treat
         // an in-flight Agent/Task as equivalent in case SubagentStop
-        // doesn't fire on this CC version.
-        var asSubagent = payload.subagent === true || inSubagent();
+        // doesn't fire on this CC version. Never true for tagged frames -
+        // those render at full fidelity in their own pane instead.
+        var asSubagent = !tagged && (payload.subagent === true || inSubagent());
         if (asSubagent) {
           var preview2 = (payload.text || '').split('\n')[0].slice(0, 100);
           el.className = 'm-evt m-evt-subagent';
@@ -6731,8 +7651,9 @@
             '<div class="md-body">' + renderMarkdown(payload.text || '') + '</div>' +
             (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
           // Claude moved on → any outstanding permission banner has been
-          // answered and should disappear.
-          onAssistantReply();
+          // answered and should disappear. Main-thread only - a tagged
+          // sub-agent's text must not dismiss Main's banner.
+          if (!tagged) onAssistantReply();
         }
       } else if (kind === 'tool_call') {
         // Question tools get their own card; everything else uses the
@@ -6745,10 +7666,12 @@
           // User-facing file delivery: always shown as a file card (never
           // hidden with tool rows), with on-demand thumbnails.
           el = renderFileDelivery(payload, ts);
-        } else if (inSubagent() && !isSubagentToolCall(payload)) {
+        } else if (!tagged && inSubagent() && !isSubagentToolCall(payload)) {
           // Tool call from within a subagent context. Render as a compact
           // one-liner instead of a full card — the result handler only
           // updates the status badge, no output details are expanded.
+          // Tagged frames skip this (untagged-only) fallback - they get
+          // their own pane instead.
           el = document.createElement('div');
           el.className = 'm-evt m-evt-subagent-tool';
           el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
@@ -6774,8 +7697,8 @@
         // Note subagent dispatches AFTER the card is built so the
         // dispatching tool_call itself isn't relabelled — it's a
         // parent-side action, the subagent context starts with the
-        // NEXT event.
-        if (isSubagentToolCall(payload) && payload.tool_use_id) {
+        // NEXT event. Untagged-collapse bookkeeping only.
+        if (!tagged && isSubagentToolCall(payload) && payload.tool_use_id) {
           activeSubagents[payload.tool_use_id] = true;
         }
       } else if (kind === 'tool_result') {
@@ -6784,14 +7707,17 @@
         // safety, mostly theoretical) is correctly attributed to the
         // parent again. Set postSubagentCover so the UserPromptSubmit CC
         // fires when packaging the result for the next API call is also
-        // treated as subagent context rather than human input.
-        if (payload.tool_use_id && activeSubagents[payload.tool_use_id]) {
+        // treated as subagent context rather than human input. Untagged-
+        // collapse bookkeeping only.
+        if (!tagged && payload.tool_use_id && activeSubagents[payload.tool_use_id]) {
           delete activeSubagents[payload.tool_use_id];
           postSubagentCover = true;
         }
-        // Try to attach to the matching tool_call / question card.
+        // Try to attach to the matching tool_call / question card - scoped
+        // to this event's own pane so a tool_use_id can't accidentally
+        // attach to a card living in a different agent's pane.
         var existing = payload.tool_use_id
-          ? transcriptEl.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
+          ? pane.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
           : null;
         // Detect any image content blocks ONCE — used both to suppress
         // empty-fallback noise in renderers that don't know about images
@@ -6827,6 +7753,7 @@
             }
             appendImageCard(existing, images);
           }
+          if (aid !== activeAgentTab) markAgentTabUnread(aid);
           scrollToBottom();
           return;
         }
@@ -6865,7 +7792,7 @@
         if (
           payload.source !== 'mirror-agent' &&
           /needs your|waiting for input/i.test(notifText) &&
-          transcriptEl.querySelector('.m-evt-aq:not(.answered)')
+          pane.querySelector('.m-evt-aq:not(.answered)')
         ) {
           return;
         }
@@ -6876,8 +7803,8 @@
         // the chat from stacking "CLAUDE NEEDS YOUR PERMISSION" rows.
         if (parsedMenu && parsedMenu.options.length > 0 && lastNotifEl) {
           var prev = lastNotifTitle || '';
-          if (prev && notifText.indexOf(prev) === 0 && lastNotifEl.parentNode === transcriptEl) {
-            transcriptEl.removeChild(lastNotifEl);
+          if (prev && notifText.indexOf(prev) === 0 && lastNotifEl.parentNode) {
+            lastNotifEl.parentNode.removeChild(lastNotifEl);
             lastNotifEl = null;
             lastNotifTitle = '';
           }
@@ -6942,7 +7869,8 @@
       }
       if (el) el.setAttribute('data-uuid', evt.uuid);
 
-      transcriptEl.appendChild(el);
+      pane.appendChild(el);
+      if (aid !== activeAgentTab) markAgentTabUnread(aid);
       scrollToBottom();
     }
 
@@ -6951,6 +7879,12 @@
     // jump when content is added above.
     function prependHistoryFrames(frames) {
       if (!frames || frames.length === 0) return;
+      // Backfilled history always comes from the main transcript's on-disk
+      // JSONL (never a sub-agent's), so it belongs in the Main pane -
+      // NOT appended directly to transcriptEl, which now only contains
+      // .m-agent-pane wrappers. transcriptEl itself stays the scroll
+      // container the scroll-restore math below operates on.
+      var mainPane = agentPanes.main;
       var prevTop = transcriptEl.scrollTop;
       var prevHeight = transcriptEl.scrollHeight;
       // Insertion anchor: keep prepending before whatever is currently
@@ -6960,10 +7894,10 @@
         historyDivider = document.createElement('div');
         historyDivider.className = 'm-evt m-evt-history-divider';
         historyDivider.textContent = '— earlier history loaded from transcript —';
-        if (transcriptEl.firstChild) {
-          transcriptEl.insertBefore(historyDivider, transcriptEl.firstChild);
+        if (mainPane.firstChild) {
+          mainPane.insertBefore(historyDivider, mainPane.firstChild);
         } else {
-          transcriptEl.appendChild(historyDivider);
+          mainPane.appendChild(historyDivider);
         }
       }
       // Build all elements first, then insert them in reverse so the
@@ -6981,7 +7915,7 @@
       }
       // Insert in reverse so the oldest frame is at the very top.
       for (var j = els.length - 1; j >= 0; j--) {
-        transcriptEl.insertBefore(els[j], transcriptEl.firstChild);
+        mainPane.insertBefore(els[j], mainPane.firstChild);
       }
       // Restore scroll: keep the user's view anchored to the same content
       // they were looking at before the prepend.
@@ -7274,14 +8208,27 @@
       firstRenderedTs = null;
       historyDivider = null;
       updateHistoryBtn();
+      // Turn virtualization OFF during initial replay so scrollHeight
+      // is accurate (content-visibility's estimated heights make
+      // "scroll to end" land on the wrong place — especially on
+      // mobile). 800ms is generous enough for the rAF snap loop below
+      // (≤4 frames) plus mobile paint settling, well under typical
+      // session-switch reaction time.
+      deferVirtualization(800);
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       activeSubagents = Object.create(null);
+      // Full reset of the sub-agent tabs/panes: a fresh init (including
+      // reconnect) rebuilds them from the replayed transcript below
+      // rather than accumulating stale tabs from the previous attach.
+      resetAgentTabsUi();
       disconnectTailObserver();
-      // Restore per-session scroll-back state. If the user previously
-      // scrolled up in this session, preserve that and restore their
-      // position; otherwise snap to the tail.
-      var scrollState = sessionScrollState.get(sid);
+      // Restore per-session scroll-back state on a reconnect re-init: if
+      // the user was scrolled up mid-read, preserve that and restore their
+      // position. The first init after selecting a session ignores the
+      // saved state and snaps to the tail.
+      var scrollState = initSnapToTail ? null : sessionScrollState.get(sid);
+      initSnapToTail = false;
       // Set userScrolledUp before the render loop so that scrollToBottom()
       // calls inside renderEvent no-op when we intend to restore position.
       setScrolledUp(!!(scrollState && scrollState.scrolledUp));
@@ -7409,6 +8356,7 @@
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       closeImageLightbox();
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
+      if (virtualizeTimer) { clearTimeout(virtualizeTimer); virtualizeTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       // Delayed-send: stop the countdown ticker and wipe the per-session
       // queued strip / popover so the next session starts clean.
@@ -7547,13 +8495,36 @@
       autoresizeCompose();
     }
 
+    // Two-row default floor for the compose textarea; mirrors the
+    // stylesheet's min-height.
+    var COMPOSE_MIN_HEIGHT_PX = 46;
+    // Transcript rows always left visible above a resized compose box.
+    var COMPOSE_MIN_TRANSCRIPT_PX = 120;
+    // Height (px) the user dragged the resize grip to; 0 = automatic.
+    var composeManualHeight = 0;
+
+    function composeMaxHeight() {
+      // Everything the textarea could claim is its own height plus the
+      // transcript's slack. Measuring the transcript rather than the
+      // window keeps the header, tabs and status rows accounted for.
+      var taH = composeText
+        ? composeText.getBoundingClientRect().height
+        : COMPOSE_MIN_HEIGHT_PX;
+      var slack = transcriptEl
+        ? transcriptEl.clientHeight - COMPOSE_MIN_TRANSCRIPT_PX
+        : 0;
+      return Math.max(COMPOSE_MIN_HEIGHT_PX, Math.floor(taH + slack));
+    }
+
     function autoresizeCompose() {
       // Compose textarea has rows=2; on history load with long entries
       // it would otherwise scroll internally without growing. Match the
       // behaviour the user expects from typing.
       if (!composeText) return;
       composeText.style.height = 'auto';
-      var max = Math.floor(window.innerHeight * 0.5);
+      var max = composeManualHeight
+        ? composeMaxHeight()
+        : Math.floor(window.innerHeight * 0.5);
       composeText.style.height = Math.min(composeText.scrollHeight, max) + 'px';
     }
 
@@ -8229,6 +9200,95 @@
     if (composeEl) {
       if (isTouchPrimary) composeEl.classList.add('is-touch');
     }
+
+    // ── Compose resize grip ───────────────────────────────────────
+    // Dragging the grip above the compose frame sets a floor height for
+    // the textarea: content still auto-grows past it, and it never goes
+    // below the two-row default. The chosen height persists across
+    // sessions; double-clicking the grip restores automatic sizing.
+    var composeGrip = document.getElementById('mirror-compose-grip');
+    var COMPOSE_HEIGHT_KEY = 'cn-compose-height';
+
+    function applyComposeHeight(px) {
+      if (!composeText) return;
+      if (!px) {
+        composeManualHeight = 0;
+        composeText.style.minHeight = '';
+        composeText.style.maxHeight = '';
+        autoresizeCompose();
+        return;
+      }
+      composeManualHeight = Math.max(Math.round(px), COMPOSE_MIN_HEIGHT_PX);
+      composeText.style.minHeight =
+        Math.min(composeManualHeight, composeMaxHeight()) + 'px';
+      // The stylesheet caps growth at 50vh; a deliberately tall box
+      // needs that raised or the extra rows are clipped.
+      composeText.style.maxHeight = composeMaxHeight() + 'px';
+    }
+
+    if (composeGrip && composeText && !isTouchPrimary) {
+      var storedHeight = 0;
+      try {
+        storedHeight = parseInt(localStorage.getItem(COMPOSE_HEIGHT_KEY), 10);
+      } catch (e) { /* storage disabled */ }
+      if (storedHeight > COMPOSE_MIN_HEIGHT_PX) applyComposeHeight(storedHeight);
+
+      var gripDragging = false;
+      var gripStartY = 0;
+      var gripStartH = 0;
+      var gripPinned = false;
+
+      composeGrip.addEventListener('pointerdown', function(e) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        gripDragging = true;
+        gripStartY = e.clientY;
+        gripStartH = composeText.getBoundingClientRect().height;
+        // Growing the box shrinks the transcript, which would otherwise
+        // drift off the tail. Re-pin during the drag if it was pinned.
+        gripPinned = !!transcriptEl && (
+          transcriptEl.scrollHeight - transcriptEl.scrollTop -
+            transcriptEl.clientHeight
+        ) <= SCROLL_LOCK_THRESHOLD;
+        composeEl.classList.add('is-resizing');
+        document.body.classList.add('cn-compose-resizing');
+        try { composeGrip.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+        e.preventDefault();
+      }, { signal: attachSig });
+
+      composeGrip.addEventListener('pointermove', function(e) {
+        if (!gripDragging) return;
+        applyComposeHeight(
+          Math.min(gripStartH + (gripStartY - e.clientY), composeMaxHeight()),
+        );
+        if (gripPinned && transcriptEl) {
+          transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      }, { signal: attachSig });
+
+      function endGripDrag() {
+        if (!gripDragging) return;
+        gripDragging = false;
+        composeEl.classList.remove('is-resizing');
+        document.body.classList.remove('cn-compose-resizing');
+        try {
+          localStorage.setItem(COMPOSE_HEIGHT_KEY, String(composeManualHeight));
+        } catch (e) { /* storage disabled */ }
+      }
+      composeGrip.addEventListener('pointerup', endGripDrag, { signal: attachSig });
+      composeGrip.addEventListener('pointercancel', endGripDrag, { signal: attachSig });
+
+      composeGrip.addEventListener('dblclick', function() {
+        applyComposeHeight(0);
+        try { localStorage.removeItem(COMPOSE_HEIGHT_KEY); }
+        catch (e) { /* storage disabled */ }
+      }, { signal: attachSig });
+
+      // A shorter viewport must not leave the box taller than the window.
+      window.addEventListener('resize', function() {
+        if (composeManualHeight) applyComposeHeight(composeManualHeight);
+      }, { signal: attachSig });
+    }
+
     var DOUBLE_ENTER_MS = 500;
     var lastEnterAt = 0;
 

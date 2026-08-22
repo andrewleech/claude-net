@@ -19,6 +19,7 @@
       "node_modules",
       "dist",
       "bin/mirror-agent.bundle.js",
+      "bin/plugin.bundle.js",
       "bin/marked.umd.min.js",
       "bin/purify.min.js",
       "bin/diff.min.js",

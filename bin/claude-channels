@@ -124,14 +124,88 @@ except Exception:
 " 2>/dev/null
 }
 
+resolve_hub_url() {
+    # Hub URL resolution:
+    #   1. CLAUDE_NET_HUB env var (explicit override)
+    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
+    #      (this is where the plugin already gets its URL, so the mirror-agent
+    #      ends up pointing at the same hub without extra configuration)
+    #   3. http://localhost:4815 as a last-ditch default — warned loudly,
+    #      because a daemon spawned against the wrong hub mirrors nothing
+    #      while still answering /health (this went unnoticed for two days).
+    # Echoes the URL with trailing slashes stripped so it compares exactly
+    # against the daemon's normalized value from /health.
+    local hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
+        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
+import json, os
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    for scope in [d.get('mcpServers', {}),
+                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
+        cfg = scope.get('claude-net')
+        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
+            print(cfg['env']['CLAUDE_NET_HUB'])
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+    if [ -z "$hub_url" ]; then
+        echo "[claude-net/mirror] WARNING: hub URL not found in CLAUDE_NET_HUB or ~/.claude.json — falling back to http://localhost:4815" >&2
+        hub_url="http://localhost:4815"
+    fi
+    while [ "${hub_url%/}" != "$hub_url" ]; do hub_url="${hub_url%/}"; done
+    echo "$hub_url"
+}
+
 _mirror_agent_healthy() {
-    # Echoes the live port number on stdout when /health responds 200; returns
+    # Echoes the live port number on stdout when /health responds 200 AND the
+    # daemon's configured hub matches the currently-resolved hub URL; returns
     # non-zero otherwise. Caller uses this to decide whether to skip spawn.
-    local port_file="$1" port
+    #
+    # The hub comparison matters: a daemon pointed at a stale hub (e.g. the
+    # localhost fallback, or a hub URL that changed in ~/.claude.json since
+    # spawn) still answers /health, so a liveness-only check keeps it alive
+    # forever while every hub call fails. On mismatch the stale daemon is
+    # killed here and we return non-zero so the caller's spawn path replaces
+    # it with one that re-resolves the config. A /health body without a
+    # `hub` field (pre-upgrade daemon) is treated as a mismatch, so old
+    # daemons self-heal on the first launch after an upgrade.
+    local port_file="$1" port body expected running
     [ -f "$port_file" ] || return 1
     port=$(cat "$port_file" 2>/dev/null || true)
     [ -n "$port" ] || return 1
-    curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1 || return 1
+    body=$(curl -fsS -m 1 "http://127.0.0.1:${port}/health" 2>/dev/null) || return 1
+
+    expected=$(resolve_hub_url)
+    # running = "<hub> <pid>" ("-" when the field is absent, pid 0 fallback).
+    running=$(HEALTH_BODY="$body" python3 -c "
+import json, os
+try:
+    d = json.loads(os.environ['HEALTH_BODY'])
+    hub = str(d.get('hub') or '-').rstrip('/') or '-'
+    print(hub, int(d.get('pid') or 0))
+except Exception:
+    print('- 0')
+" 2>/dev/null || echo "- 0")
+    local running_hub="${running% *}" daemon_pid="${running#* }"
+
+    if [ "$running_hub" != "$expected" ]; then
+        echo "[claude-net/mirror] daemon hub mismatch (running=${running_hub}, config=${expected}) — restarting" >&2
+        if [ "$daemon_pid" -gt 0 ] 2>/dev/null; then
+            kill "$daemon_pid" 2>/dev/null || true
+            # Give it a moment to die so the replacement doesn't race it.
+            local i=0
+            while [ $i -lt 10 ] && kill -0 "$daemon_pid" 2>/dev/null; do
+                sleep 0.1
+                i=$((i + 1))
+            done
+        fi
+        rm -f "$port_file" 2>/dev/null || true
+        return 1
+    fi
     echo "$port"
 }
 
@@ -155,30 +229,9 @@ _mirror_agent_spawn() {
         return 1
     fi
 
-    # Hub URL resolution:
-    #   1. CLAUDE_NET_HUB env var (explicit override)
-    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
-    #      (this is where the plugin already gets its URL, so the mirror-agent
-    #      ends up pointing at the same hub without extra configuration)
-    #   3. http://localhost:4815 as a last-ditch default
-    hub_url="${CLAUDE_NET_HUB:-}"
-    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
-        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
-import json, os
-try:
-    with open(os.environ['CLAUDE_JSON']) as f:
-        d = json.load(f)
-    for scope in [d.get('mcpServers', {}),
-                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
-        cfg = scope.get('claude-net')
-        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
-            print(cfg['env']['CLAUDE_NET_HUB'])
-            break
-except Exception:
-    pass
-" 2>/dev/null)
-    fi
-    hub_url="${hub_url:-http://localhost:4815}"
+    # See resolve_hub_url for the resolution order (env → ~/.claude.json →
+    # localhost fallback with a loud warning).
+    hub_url=$(resolve_hub_url)
     mkdir -p /tmp/claude-net 2>/dev/null || true
     CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 9>&- &
     disown $! 2>/dev/null || true
@@ -308,21 +361,71 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
     && [ "$(mirror_injection_mode)" = "tmux" ] \
     && command -v tmux >/dev/null 2>&1; then
     export CLAUDE_NET_IN_TMUX_WRAP=1
-    tmux_session_name="$(basename "$PWD")"
-    echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_name' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
-    if tmux has-session -t "$tmux_session_name" 2>/dev/null; then
-        # Session exists. If the pane is sitting at an idle shell (claude
-        # exited), cd to the current directory and re-launch. Any active
-        # process (bun, claude, …) is left undisturbed and we just attach.
-        pane_cmd=$(tmux display-message -t "$tmux_session_name" -p "#{pane_current_command}" 2>/dev/null || true)
-        case "$pane_cmd" in bash|sh|zsh|fish|dash|ksh|csh|tcsh)
-            relaunch="cd $(printf '%q' "$PWD")"
-            for a in "$SELF" "$@"; do relaunch="$relaunch $(printf '%q' "$a")"; done
-            tmux send-keys -t "$tmux_session_name" "$relaunch" Enter
+    tmux_session_base="$(basename "$PWD")"
+
+    # A fork/branch/resume is a *second* Claude in the *same directory*, so it
+    # collides with the first session's cwd-derived name. If we reattached to the
+    # existing session we would (a) silently drop these session-selecting args and
+    # (b) mirror one pane into two clients — which reads as the new session
+    # "clobbering" the old. So any launch that selects or forks a session always
+    # gets its own distinct tmux session instead of reattaching.
+    wants_distinct_session=false
+    for arg in "$@"; do
+        case "$arg" in
+            -r|--resume|-c|--continue|--fork-session|--session-id)
+                wants_distinct_session=true; break ;;
         esac
-        exec tmux attach-session -t "$tmux_session_name"
-    else
+    done
+
+    # tmux resolves -t by exact name, then fnmatch, then unique prefix, so a
+    # bare "claude" matches an existing "claude-net". Every target below is
+    # anchored with "=" to mean exactly this session. Commands taking a
+    # target-pane need the trailing colon so the anchored name is parsed as
+    # the session component.
+    _tmux_has_session() { tmux has-session -t "=$1" 2>/dev/null; }
+
+    # First unused name in the series base, base-2, base-3, … (matches the
+    # plugin's same-dir agent-name collision scheme).
+    _free_tmux_session_name() {
+        local n=1 name="$tmux_session_base"
+        while _tmux_has_session "$name"; do
+            n=$((n + 1)); name="${tmux_session_base}-${n}"
+        done
+        echo "$name"
+    }
+
+    # True when the session's pane is sitting at an idle shell (claude exited).
+    _tmux_pane_is_idle_shell() {
+        local cmd
+        cmd=$(tmux display-message -t "=$1:" -p "#{pane_current_command}" 2>/dev/null || true)
+        case "$cmd" in bash|sh|zsh|fish|dash|ksh|csh|tcsh) return 0 ;; *) return 1 ;; esac
+    }
+
+    if _tmux_has_session "$tmux_session_base" \
+        && ! $wants_distinct_session \
+        && _tmux_pane_is_idle_shell "$tmux_session_base"; then
+        # Coming back to this project's session and its claude has exited: cd to
+        # the current directory and relaunch in place, then attach. The `&& exec`
+        # keeps a single command line (an earlier version omitted the separator,
+        # producing `cd DIR SELF ARGS` → "cd: too many arguments") and replaces
+        # the pane's shell so its process becomes claude, not a shell parent.
+        echo "[claude-net/mirror] reattaching tmux session '$tmux_session_base'" >&2
+        relaunch="cd $(printf '%q' "$PWD") && exec"
+        for a in "$SELF" "$@"; do relaunch="$relaunch $(printf '%q' "$a")"; done
+        tmux send-keys -t "=${tmux_session_base}:" "$relaunch" Enter
+        exec tmux attach-session -t "=$tmux_session_base"
+    elif _tmux_has_session "$tmux_session_base"; then
+        # Session exists but is busy (or this is an explicit resume/fork): never
+        # hijack the running pane. Start a distinct session so the original stays
+        # put and reachable and this launch keeps its args.
+        tmux_session_name="$(_free_tmux_session_name)"
+        echo "[claude-net/mirror] '$tmux_session_base' in use; starting distinct session '$tmux_session_name'" >&2
         exec tmux new-session -s "$tmux_session_name" \
+            -e CLAUDE_NET_IN_TMUX_WRAP=1 \
+            -- "$SELF" "$@"
+    else
+        echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_base' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
+        exec tmux new-session -s "$tmux_session_base" \
             -e CLAUDE_NET_IN_TMUX_WRAP=1 \
             -- "$SELF" "$@"
     fi

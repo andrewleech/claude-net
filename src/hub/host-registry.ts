@@ -4,14 +4,25 @@ import type {
   HostLaunchDoneFrame,
   HostLsDoneFrame,
   HostMkdirDoneFrame,
+  HostRecoverableDoneFrame,
   HostRegisterFrame,
+  HostRestoreDoneFrame,
   HostSummary,
 } from "@/shared/types";
 
-type HostRpcResponse =
+export type HostRpcResponse =
   | HostLsDoneFrame
   | HostMkdirDoneFrame
-  | HostLaunchDoneFrame;
+  | HostLaunchDoneFrame
+  | HostRecoverableDoneFrame
+  | HostRestoreDoneFrame;
+
+export type HostRpcAction =
+  | "host_ls"
+  | "host_mkdir"
+  | "host_launch"
+  | "host_recoverable"
+  | "host_restore";
 
 /**
  * An entry in the host registry. Each connected mirror-agent daemon
@@ -146,7 +157,7 @@ export class HostRegistry {
    */
   async sendRpc(
     hostId: string,
-    action: "host_ls" | "host_mkdir" | "host_launch",
+    action: HostRpcAction,
     args: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<HostRpcResponse> {

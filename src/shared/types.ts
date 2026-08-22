@@ -129,6 +129,10 @@ export interface MirrorEventFrame {
   ts: number;
   payload: MirrorEventPayload;
   requestId?: string;
+  /** Present when this frame originated from a sub-agent (Task/Agent tool). */
+  agent_id?: string;
+  /** Sub-agent type, e.g. "general-purpose", present alongside agent_id. */
+  agent_type?: string;
 }
 
 /**
@@ -526,6 +530,10 @@ export interface MirrorEventBroadcastEvent {
   kind: MirrorEventKind;
   ts: number;
   payload: MirrorEventPayload;
+  /** Present when this frame originated from a sub-agent (Task/Agent tool). */
+  agent_id?: string;
+  /** Sub-agent type, e.g. "general-purpose", present alongside agent_id. */
+  agent_type?: string;
 }
 
 export interface MirrorWatcherJoinedEvent {
@@ -650,6 +658,72 @@ export interface HostLaunchDoneFrame {
   request_id: string;
   ok?: boolean;
   tmux_session?: string;
+  error?: string;
+}
+
+/**
+ * A Claude Code session that exited without a graceful shutdown and can
+ * be resumed. Built by the daemon from its own read of ~/.claude.json and
+ * the on-disk transcripts; the dashboard never supplies any of these
+ * fields back, only `session_id`.
+ */
+export interface RecoverableSession {
+  session_id: string;
+  cwd: string;
+  /** CC custom-title when the session was renamed, else basename(cwd). */
+  label: string;
+  /** ISO timestamp of the transcript's last write. */
+  last_active: string;
+  /** User turns in the transcript, or null when it was too large to count. */
+  turns: number | null;
+  /** Redacted tail of the last real user turn, for "was this worth reviving". */
+  preview: string;
+  /** Project has never had Claude Code's trust dialog accepted. */
+  needs_trust: boolean;
+  /** Name of an existing tmux session that already owns this directory. */
+  tmux_conflict: string | null;
+}
+
+export interface HostRecoverableRequest {
+  action: "host_recoverable";
+  request_id: string;
+  /** Only surface sessions whose transcript was written within this window. */
+  within_hours?: number;
+}
+
+export interface HostRecoverableDoneFrame {
+  action: "host_recoverable_done";
+  request_id: string;
+  sessions?: RecoverableSession[];
+  error?: string;
+}
+
+export interface HostRestoreRequest {
+  action: "host_restore";
+  request_id: string;
+  session_ids: string[];
+  skip_permissions?: boolean;
+  /**
+   * Answer Claude Code's "do you trust this folder" prompt on the restored
+   * session's behalf. Sound for restore specifically: the directory
+   * already hosted the session being resumed. Defaults to true.
+   */
+  auto_trust?: boolean;
+}
+
+export interface HostRestoreResult {
+  session_id: string;
+  ok: boolean;
+  tmux_session?: string;
+  /** Project had never accepted Claude Code's folder-trust dialog. */
+  needs_trust?: boolean;
+  error?: string;
+}
+
+export interface HostRestoreDoneFrame {
+  action: "host_restore_done";
+  request_id: string;
+  results?: HostRestoreResult[];
   error?: string;
 }
 
@@ -788,6 +862,12 @@ export interface MirrorAssistantMessagePayload {
    * the hub does not flip session activity state to awaiting_input.
    */
   subagent?: boolean;
+  /**
+   * Set for a minimal marker frame emitted in place of a sub-agent's
+   * SubagentStop text (the real text arrives via the sub-agent's own JSONL
+   * tail). It has no text; it only flips the agent's tab status to done.
+   */
+  subagent_done?: boolean;
 }
 
 export interface MirrorToolCallPayload {

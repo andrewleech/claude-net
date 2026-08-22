@@ -700,6 +700,17 @@ export class MirrorRegistry {
       victims.push({ sid: entry.sid, host: entry.host });
     }
     for (const { sid, host } of victims) {
+      const entry = this.entryByKey(host, sid);
+      const idleMin = entry
+        ? Math.round((Date.now() - entry.lastEventAt.getTime()) / 60_000)
+        : "?";
+      // Which branch caught it matters when reading this back: an unbound
+      // entry is the ordinary case, while a bound one means the opt-in
+      // boundOrphanCloseMs backstop is on and closing live sessions.
+      const why = entry?.agent ? "agent bound but idle" : "no agent WS";
+      process.stderr.write(
+        `[claude-net/mirror] orphan sweep: closing ${sid} (${entry?.ownerAgent ?? "?"}) — ${why}, last event ${idleMin}min ago\n`,
+      );
       // closeSession, not closeAndDrop: the entry stays listed as a closed
       // gravestone for the retention window so it remains reconnectable
       // from the dashboard.

@@ -28,6 +28,7 @@ import { PathObserver } from "./path-observer";
 import { ProbeAttemptTracker } from "./probe-tracker";
 import { encodeProjectDirName } from "./recoverable";
 import { Redactor, defaultConfigPaths } from "./redactor";
+import { SessionIndex } from "./session-index";
 import { TmuxInjector } from "./tmux-inject";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -306,6 +307,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const hubUrl = config.hubUrl.replace(/\/+$/, "");
   const bindHost = config.bindHost ?? "127.0.0.1";
   const stateDir = config.stateDir ?? "/tmp/claude-net";
+  // Authoritative (ccPid, cwd) → sid map learned from hook payloads, so a
+  // restart re-attaches instead of re-deriving. See session-index.ts.
+  const sessionIndex = new SessionIndex(stateDir);
   const idleShutdownMs = config.idleShutdownMs ?? DEFAULT_IDLE_SHUTDOWN_MS;
   const sessionIdleMs = config.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
 
@@ -469,9 +473,18 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   // sids already in the map (defensive — sessions is empty on a
   // fresh process, but a future caller might preload entries).
   void (async () => {
-    const candidates = discoverRunningCcSessions();
+    sessionIndex.load();
+    const candidates = discoverRunningCcSessions(
+      "/proc",
+      os.homedir(),
+      (ccPid, cwd) => sessionIndex.get(ccPid, cwd),
+    );
     if (candidates.length === 0) return;
-    log(`startup rediscovery: found ${candidates.length} live CC session(s)`);
+    const fromIndex = candidates.filter((c) => c.fromIndex).length;
+    log(
+      `startup rediscovery: found ${candidates.length} live CC session(s)` +
+        ` (${fromIndex} from the session index, ${candidates.length - fromIndex} derived)`,
+    );
     for (const c of candidates) {
       if (sessions.has(c.sessionId)) continue;
       try {
@@ -902,6 +915,14 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     const live = sessions.get(sid);
     if (live && !live.closed) {
       if (transcriptPath) retargetTail(live, transcriptPath);
+      // The transcript may have moved (a --resume under a different cwd
+      // reuses the sid), so keep the index pointing at the current file.
+      sessionIndex.record(
+        sid,
+        live.cwd || cwd,
+        live.ccPid ?? ccPid,
+        live.transcriptPath ?? transcriptPath,
+      );
       return live;
     }
     // Coalesce concurrent opens for the same sid onto one create POST.
@@ -981,6 +1002,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       apiErrorUuidsPosted: new Set(),
       observer: new PathObserver(cwd ?? null),
     };
+    // Remember this session's identity so a restart doesn't have to guess
+    // it back. Cheap and idempotent — the index skips unchanged writes.
+    sessionIndex.record(sid, cwd, resolvedPid, transcriptPath);
+
     // Defensive: if a prior state for this sid somehow lingers, mark it
     // closed and stop its tail + client before replacing. Setting `closed`
     // matters — a running recoverSession loop checks it and bails, so it
@@ -2031,6 +2056,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (session.closed) return;
     session.closed = true;
     log(`[${session.sid}] closing (${reason})`);
+    // Drop the index entry: this session is over, and leaving it behind
+    // would have a restart re-adopt a session the daemon just ended.
+    sessionIndex.forget(session.ccPid, session.cwd);
     // Clear any open turn-state BEFORE nulling session.ws so the final
     // active:false frame can still go out.
     onTurnEnd(session);
@@ -2545,6 +2573,10 @@ export interface DiscoveredCcProcess {
   tmuxPane: string | undefined;
   sessionId: string;
   transcriptPath: string;
+  /** True when the sid came from the persisted index (authoritative,
+   *  originally learned from a hook) rather than being derived from
+   *  /proc and the on-disk transcripts. */
+  fromIndex: boolean;
 }
 
 /**
@@ -2574,6 +2606,10 @@ export interface DiscoveredCcProcess {
 export function discoverRunningCcSessions(
   procRoot = "/proc",
   home: string = os.homedir(),
+  lookupIndex?: (
+    ccPid: number,
+    cwd: string,
+  ) => { sid: string; transcriptPath: string } | undefined,
 ): DiscoveredCcProcess[] {
   if (process.platform !== "linux") return [];
   let pidDirs: string[];
@@ -2600,7 +2636,15 @@ export function discoverRunningCcSessions(
     } catch {
       continue;
     }
-    const discovered = findActiveSessionForCcPid(pid, cwd, home, procRoot);
+    // The index is checked first because it is the only exact answer
+    // available here: it records what a hook already told us. The
+    // derivation below cannot separate two sessions sharing a directory
+    // and correctly declines to guess, which is what leaves multi-session
+    // projects unmirrored until their next hook.
+    const indexed = lookupIndex?.(pid, cwd);
+    const discovered = indexed
+      ? { sessionId: indexed.sid, transcriptPath: indexed.transcriptPath }
+      : findActiveSessionForCcPid(pid, cwd, home, procRoot);
     if (!discovered) continue;
     // Two CC processes can share a sid only across hosts (impossible
     // on /proc) or via a fork that we'd resolve to one. Dedup defensively.
@@ -2612,6 +2656,7 @@ export function discoverRunningCcSessions(
       tmuxPane: readTmuxPaneFromCcEnv(pid),
       sessionId: discovered.sessionId,
       transcriptPath: discovered.transcriptPath,
+      fromIndex: indexed !== undefined,
     });
   }
   return out;

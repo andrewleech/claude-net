@@ -491,4 +491,50 @@ describe("discoverRunningCcSessions", () => {
     fs.writeFileSync(path.join(tmpProc, "version"), "fake");
     expect(discoverRunningCcSessions(tmpProc, tmpHome)).toEqual([]);
   });
+
+  test("the session index resolves what the /proc derivation cannot", () => {
+    // Two live Claude Codes in one directory: the derivation refuses to
+    // guess which transcript belongs to which pid, so without the index
+    // neither session is rediscovered. This is the production case that
+    // left multi-session projects unmirrored after a daemon restart.
+    if (process.platform !== "linux") return;
+    const cwd = path.join(tmpHome, "shared-project");
+    fs.mkdirSync(cwd, { recursive: true });
+    const sidA = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+    const sidB = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+    const trA = plantJsonl(cwd, sidA);
+    const trB = plantJsonl(cwd, sidB);
+    makeFakePid(7001, { exe: "/usr/local/bin/claude", cwd });
+    makeFakePid(7002, { exe: "/usr/local/bin/claude", cwd });
+
+    // Without the index: ambiguous, so nothing resolves.
+    expect(discoverRunningCcSessions(tmpProc, tmpHome)).toEqual([]);
+
+    // With it: each pid gets its own recorded sid.
+    const index = new Map([
+      [`7001:${cwd}`, { sid: sidA, transcriptPath: trA }],
+      [`7002:${cwd}`, { sid: sidB, transcriptPath: trB }],
+    ]);
+    const found = discoverRunningCcSessions(tmpProc, tmpHome, (pid, c) =>
+      index.get(`${pid}:${c}`),
+    );
+    expect(found).toHaveLength(2);
+    const byPid = new Map(found.map((f) => [f.ccPid, f]));
+    expect(byPid.get(7001)?.sessionId).toBe(sidA);
+    expect(byPid.get(7002)?.sessionId).toBe(sidB);
+    expect(byPid.get(7001)?.transcriptPath).toBe(trA);
+    expect(found.every((f) => f.fromIndex)).toBe(true);
+  });
+
+  test("falls back to the derivation when the index has no entry", () => {
+    if (process.platform !== "linux") return;
+    const cwd = path.join(tmpHome, "solo-project");
+    fs.mkdirSync(cwd, { recursive: true });
+    plantJsonl(cwd, matchingSid);
+    makeFakePid(7101, { exe: "/usr/local/bin/claude", cwd });
+    const found = discoverRunningCcSessions(tmpProc, tmpHome, () => undefined);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.sessionId).toBe(matchingSid);
+    expect(found[0]?.fromIndex).toBe(false);
+  });
 });

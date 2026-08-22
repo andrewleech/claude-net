@@ -2,7 +2,9 @@ import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import type {
   DashboardEvent,
+  MirrorActivityBaseState,
   MirrorActivityState,
+  MirrorBackgroundTask,
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
   MirrorEventPayload,
@@ -128,8 +130,22 @@ export interface MirrorSessionEntry {
    * UserPromptSubmit / tool call flips to `busy`; the top-level Stop
    * hook (assistant_message without `subagent`) or a Notification flips
    * back to `awaiting_input`.
+   *
+   * This is the base state only. What dashboards see is
+   * `effectiveActivityState(...)`, which folds in `pendingBackground`.
    */
-  activityState: MirrorActivityState;
+  activityState: MirrorActivityBaseState;
+  /**
+   * Background work the session launched and has not been told is
+   * finished, keyed by task id. Non-empty means an `awaiting_input` base
+   * state is really "working, will resume itself".
+   */
+  pendingBackground: Map<string, MirrorBackgroundTask>;
+  /**
+   * True when the last notification was a permission prompt — a real
+   * block on the user, which outranks any outstanding background work.
+   */
+  awaitingUser: boolean;
   /** Most recent context-usage snapshot from the mirror-agent, so new
    *  watchers see the current bar value at attach time rather than
    *  waiting for the next assistant response. */
@@ -150,11 +166,11 @@ export interface MirrorSessionEntry {
  * top-level Stop arrives.
  */
 export function nextActivityState(
-  prev: MirrorActivityState,
+  prev: MirrorActivityBaseState,
   kind: MirrorEventFrame["kind"],
   payload: MirrorEventPayload,
   agentId?: string,
-): MirrorActivityState {
+): MirrorActivityBaseState {
   // A sub-agent-tagged frame must never change the parent session's
   // activity state: the parent Task tool call already flipped it busy,
   // and a sub-agent finishing (or emitting tool calls of its own) is
@@ -180,6 +196,323 @@ export function nextActivityState(
     default:
       return prev;
   }
+}
+
+// ── Background-work tracking ──────────────────────────────────────────────
+//
+// A turn ending is not the same thing as a session needing the user. Claude
+// Code routinely ends a turn while work it launched keeps running — a
+// backgrounded shell, an async subagent, a workflow, a persistent Monitor,
+// a scheduled wakeup — and re-enters the session on its own when that work
+// reports back. Those sessions must not draw the "needs you" pulse.
+//
+// Both ends of that lifecycle are already visible in the frames the hub
+// receives, so no new hooks are needed:
+//   launch     PostToolUse tool_result carrying a task id
+//   completion UserPromptSubmit whose prompt is a synthetic
+//              `<task-notification>` naming the same id
+// The launch side is matched on the *shape* of the tool_result rather than
+// on tool names, so a new background-capable tool that follows the same
+// protocol is picked up without a code change here.
+
+/**
+ * How long an unresolved background task keeps a session out of
+ * `awaiting_input`. Bounds the damage when the hub never sees the
+ * completion notification (dropped hook, hub restarted mid-flight):
+ * without it, one missed notification would suppress the attention pulse
+ * for the rest of the session's life. Generous, because real background
+ * work — long builds, multi-hour agents — legitimately runs for hours.
+ */
+const BACKGROUND_STALE_MS = 6 * 60 * 60 * 1000;
+
+/** Slack added to a scheduled wakeup's own delay before it ages out. */
+const WAKEUP_SLACK_MS = 5 * 60 * 1000;
+
+/**
+ * Fallback bound for a persistent Monitor whose launching tool_call was
+ * never seen. A persistent Monitor is the one kind of background work
+ * that reports no completion — it fires an event per match and simply
+ * stops existing when its own timeout elapses — so it needs a tighter
+ * bound than BACKGROUND_STALE_MS or a dead monitor would hold the
+ * session in `background` for hours.
+ */
+const MONITOR_DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+
+/**
+ * Key prefix for the provisional entry recorded when a persistent
+ * Monitor is called. The call carries the timeout but not the task id;
+ * the result carries the task id but reports `timeoutMs: 0`. The
+ * provisional entry ferries the real timeout across to the result, which
+ * then re-keys it under the task id.
+ */
+const MONITOR_CALL_PREFIX = "monitor-call:";
+
+/** Cap on tracked tasks per session, so a pathological session can't grow
+ *  the ledger without bound. Oldest entries are evicted first. */
+const MAX_PENDING_BACKGROUND = 64;
+
+/** Only one wakeup can be scheduled at a time, so it gets a fixed key —
+ *  a fresh ScheduleWakeup replaces the previous one rather than stacking. */
+const WAKEUP_KEY = "wakeup";
+
+/**
+ * `<status>` values that mean the task is finished. A notification with
+ * no status at all is a persistent Monitor reporting a match while still
+ * watching, which leaves the entry outstanding.
+ */
+const TERMINAL_TASK_STATUSES = new Set([
+  "completed",
+  "failed",
+  "killed",
+  "error",
+  "timeout",
+  "cancelled",
+  "canceled",
+]);
+
+/** Tools whose invocation kills a tracked task named in their input. */
+const TASK_STOP_TOOLS = new Set(["TaskStop", "KillShell", "KillTask"]);
+
+/**
+ * Notification text that means Claude is blocked on an explicit user
+ * decision. Distinct from the routine "Claude is waiting for your input"
+ * idle notification, which also fires while background work runs and so
+ * must not outrank it.
+ */
+const PERMISSION_NOTIFICATION_RE =
+  /needs? your permission|permission to use|needs? your approval/i;
+
+export interface ParsedTaskNotification {
+  taskId: string;
+  toolUseId: string;
+  /** "" when the notification carries no `<status>` element. */
+  status: string;
+}
+
+/**
+ * Parse the synthetic `<task-notification>` prompt Claude Code injects
+ * when background work reports back. Returns null for ordinary prompts.
+ */
+export function parseTaskNotification(
+  prompt: string,
+): ParsedTaskNotification | null {
+  if (!prompt.includes("<task-notification>")) return null;
+  const pick = (tag: string): string => {
+    const m = prompt.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+    return m?.[1] ? m[1].trim() : "";
+  };
+  return {
+    taskId: pick("task-id"),
+    toolUseId: pick("tool-use-id"),
+    status: pick("status").toLowerCase(),
+  };
+}
+
+/**
+ * Recognise a frame that launched background work, by the shape of what
+ * the launching tool returned:
+ *   Bash run_in_background  → { backgroundTaskId }
+ *   Agent (async)           → { status: "async_launched", agentId }
+ *   Workflow                → { status: "async_launched", taskId }
+ *   Monitor (persistent)    → { taskId, persistent: true }
+ * ScheduleWakeup is the one exception: it reports nothing useful back, so
+ * it is read off the call's own input instead.
+ */
+export function backgroundTaskFromFrame(
+  frame: MirrorEventFrame,
+): MirrorBackgroundTask | null {
+  const p = frame.payload;
+
+  if (p.kind === "tool_call") {
+    if (p.tool_name !== "ScheduleWakeup") return null;
+    const input = asRecord(p.input);
+    if (input?.stop === true) return null; // the loop is being ended
+    const delayMs =
+      typeof input?.delaySeconds === "number"
+        ? Math.max(0, input.delaySeconds) * 1000
+        : 0;
+    return {
+      task_id: WAKEUP_KEY,
+      tool_use_id: p.tool_use_id,
+      kind: "wakeup",
+      tool_name: p.tool_name,
+      started_at: frame.ts,
+      // The wakeup fires as an ordinary prompt with no task-notification,
+      // so its own schedule is the only bound available.
+      expires_at: frame.ts + delayMs + WAKEUP_SLACK_MS,
+    };
+  }
+
+  if (p.kind !== "tool_result") return null;
+  const r = asRecord(p.response);
+  if (!r) return null;
+
+  const base = {
+    tool_use_id: p.tool_use_id,
+    tool_name: p.tool_name,
+    started_at: frame.ts,
+    expires_at: frame.ts + BACKGROUND_STALE_MS,
+  };
+
+  const bgCommand = nonEmptyString(r.backgroundTaskId);
+  if (bgCommand) return { ...base, kind: "command", task_id: bgCommand };
+
+  if (r.status === "async_launched") {
+    const agentId = nonEmptyString(r.agentId);
+    if (agentId) return { ...base, kind: "agent", task_id: agentId };
+    const taskId = nonEmptyString(r.taskId);
+    if (taskId) return { ...base, kind: "workflow", task_id: taskId };
+  }
+
+  if (r.persistent === true) {
+    const taskId = nonEmptyString(r.taskId);
+    if (taskId) {
+      return {
+        ...base,
+        kind: "monitor",
+        task_id: taskId,
+        expires_at: frame.ts + MONITOR_DEFAULT_TIMEOUT_MS,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Fold one frame into a session's background-work ledger. Mutates
+ * `pending` in place; pure with respect to everything else.
+ */
+export function updateBackgroundLedger(
+  pending: Map<string, MirrorBackgroundTask>,
+  frame: MirrorEventFrame,
+): void {
+  // Sub-agent frames are tracked as the parent's own `agent` entry, and a
+  // task a sub-agent backgrounds reports its completion to the sub-agent,
+  // not to this session — so folding those frames in here would add
+  // entries nothing can ever clear.
+  if (frame.agent_id) return;
+  const p = frame.payload;
+
+  if (p.kind === "tool_call" && TASK_STOP_TOOLS.has(p.tool_name)) {
+    // The stopped task's id appears somewhere in the call's input; match
+    // loosely rather than guessing each tool's argument name.
+    const input = JSON.stringify(p.input ?? null);
+    for (const [key, task] of pending) {
+      if (task.task_id && input.includes(task.task_id)) pending.delete(key);
+    }
+    return;
+  }
+
+  if (p.kind === "user_prompt") {
+    const note = parseTaskNotification(p.prompt);
+    if (!note) return;
+    if (!note.status) {
+      // A persistent Monitor reporting a match: still watching, so the
+      // entry stays. Its expiry is not extended — a monitor firing does
+      // not extend the timeout it was created with.
+      return;
+    }
+    if (!TERMINAL_TASK_STATUSES.has(note.status)) return;
+    pending.delete(note.taskId);
+    if (note.toolUseId) {
+      for (const [key, task] of pending) {
+        if (task.tool_use_id === note.toolUseId) pending.delete(key);
+      }
+    }
+    return;
+  }
+
+  if (
+    p.kind === "tool_call" &&
+    p.tool_name === "Monitor" &&
+    asRecord(p.input)?.persistent === true
+  ) {
+    const timeoutMs = asRecord(p.input)?.timeout_ms;
+    pending.set(`${MONITOR_CALL_PREFIX}${p.tool_use_id}`, {
+      task_id: "",
+      tool_use_id: p.tool_use_id,
+      kind: "monitor",
+      tool_name: p.tool_name,
+      started_at: frame.ts,
+      expires_at:
+        frame.ts +
+        (typeof timeoutMs === "number" && timeoutMs > 0
+          ? timeoutMs
+          : MONITOR_DEFAULT_TIMEOUT_MS),
+    });
+    return;
+  }
+
+  const launched = backgroundTaskFromFrame(frame);
+  if (!launched) return;
+  if (launched.kind === "monitor" && launched.tool_use_id) {
+    // Adopt the timeout the matching call declared, and drop the
+    // provisional entry so the monitor is counted once.
+    const callKey = `${MONITOR_CALL_PREFIX}${launched.tool_use_id}`;
+    const provisional = pending.get(callKey);
+    if (provisional) {
+      launched.started_at = provisional.started_at;
+      launched.expires_at = provisional.expires_at;
+      pending.delete(callKey);
+    }
+  }
+  pending.set(launched.task_id, launched);
+  while (pending.size > MAX_PENDING_BACKGROUND) {
+    const oldest = pending.keys().next();
+    if (oldest.done) break;
+    pending.delete(oldest.value);
+  }
+}
+
+/** Drop entries past their expiry. Returns the tasks still outstanding. */
+export function prunePendingBackground(
+  pending: Map<string, MirrorBackgroundTask>,
+  now: number,
+): MirrorBackgroundTask[] {
+  for (const [key, task] of pending) {
+    if (task.expires_at <= now) pending.delete(key);
+  }
+  return [...pending.values()];
+}
+
+/**
+ * A permission prompt blocks on the user even when background work is
+ * outstanding. Any frame that isn't a notification means the prompt has
+ * been answered or dismissed.
+ */
+export function nextAwaitingUser(
+  prev: boolean,
+  payload: MirrorEventPayload,
+): boolean {
+  if (payload.kind !== "notification") return false;
+  return PERMISSION_NOTIFICATION_RE.test(payload.text) || prev;
+}
+
+/**
+ * Fold the base state and the background ledger into the state
+ * dashboards render.
+ */
+export function effectiveActivityState(
+  base: MirrorActivityBaseState,
+  pending: Map<string, MirrorBackgroundTask>,
+  awaitingUser: boolean,
+  now: number,
+): MirrorActivityState {
+  if (base === "busy") return "busy";
+  if (awaitingUser) return "awaiting_input";
+  return prunePendingBackground(pending, now).length > 0
+    ? "background"
+    : "awaiting_input";
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function nonEmptyString(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
 }
 
 export interface MirrorRegistryOptions {
@@ -781,6 +1114,8 @@ export class MirrorRegistry {
       lastStatusline: null,
       retentionTimerId: null,
       activityState: "awaiting_input",
+      pendingBackground: new Map(),
+      awaitingUser: false,
     };
     this.setEntry(entry);
 
@@ -844,6 +1179,8 @@ export class MirrorRegistry {
       frame.payload,
       frame.agent_id,
     );
+    entry.awaitingUser = nextAwaitingUser(entry.awaitingUser, frame.payload);
+    updateBackgroundLedger(entry.pendingBackground, frame);
 
     // Durable write-through. NullStore is a no-op.
     try {
@@ -876,11 +1213,21 @@ export class MirrorRegistry {
     // Lightweight activity ping to the dashboard socket — no payload, so we
     // don't flood every dashboard with every tool-result blob. Dashboards
     // use this to bump last_event_at and re-sort the sidebar.
+    const background = prunePendingBackground(
+      entry.pendingBackground,
+      frame.ts,
+    );
     this.dashboardBroadcast({
       event: "mirror:activity",
       sid,
       ts: frame.ts,
-      activity_state: entry.activityState,
+      activity_state: effectiveActivityState(
+        entry.activityState,
+        entry.pendingBackground,
+        entry.awaitingUser,
+        frame.ts,
+      ),
+      background,
     });
 
     return { ok: true, duplicate: false };
@@ -1798,6 +2145,7 @@ export class MirrorRegistry {
 }
 
 function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
+  const now = Date.now();
   return {
     sid: entry.sid,
     owner_agent: entry.ownerAgent,
@@ -1810,7 +2158,13 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     attached: entry.agent !== null && entry.closedAt === null,
     watcher_count: entry.watchers.size,
     transcript_len: entry.transcript.length,
-    activity_state: entry.activityState,
+    activity_state: effectiveActivityState(
+      entry.activityState,
+      entry.pendingBackground,
+      entry.awaitingUser,
+      now,
+    ),
+    background: prunePendingBackground(entry.pendingBackground, now),
   };
 }
 

@@ -149,8 +149,9 @@
   .status-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
   .status-dot.offline { background: var(--text-muted); }
 
-  /* Agent row indicator. Three states:
+  /* Agent row indicator. Four states:
        online + mirror   → filled accent dot (clickable, row opens mirror)
+       online, working   → gold dot, slow breath (background work outstanding)
        online, no mirror → hollow accent ring (not clickable, no mirror)
        offline           → small muted dot (not clickable) */
   .agent-dot {
@@ -2282,6 +2283,20 @@
     animation: dot-attention 2.4s ease-in-out infinite;
   }
 
+  /* Background work outstanding: the turn has ended but the session
+     resumes itself when a backgrounded shell / async agent / workflow /
+     monitor reports back. Deliberately unlike the awaiting pulse — a
+     slow gold breath reads as "running", not "answer me". */
+  @keyframes dot-breath {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+  .agent-dot.online.working {
+    background: var(--gold);
+    box-shadow: 0 0 4px rgba(212, 160, 77, 0.35);
+    animation: dot-breath 3.2s ease-in-out infinite;
+  }
+
   /* ── Misc ── */
   /* Panel-body scrollable area inside sidebar/teams panels. */
   .panel-body { padding: 0; }
@@ -2294,6 +2309,7 @@
     .m-evt { animation: none; }
     header h1::before, #mirror-conn::before { animation: none; }
     .agent-dot.online.awaiting { animation: none; }
+    .agent-dot.online.working { animation: none; }
   }
 
   /* ── Unified shell ────────────────────────────────────────────────
@@ -3512,6 +3528,7 @@
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
           if (event.activity_state) entry.activity_state = event.activity_state;
+          if (event.background) entry.background = event.background;
           renderAgentsDebounced();
         }
         break;
@@ -3803,9 +3820,17 @@
     // only an explicit false as detached so old hubs don't dim everything.
     var dead = !!sess.closed_at || sess.attached === false;
     var awaiting = sess.activity_state === 'awaiting_input' && !dead;
+    // Turn over, but the session is waiting on work it launched itself and
+    // will resume without the user. Never flash the attention pulse here.
+    var working = sess.activity_state === 'background' && !dead;
     var dotCls = dead
       ? 'agent-dot offline'
-      : 'agent-dot online' + (awaiting ? ' awaiting' : '');
+      : 'agent-dot online' + (awaiting ? ' awaiting' : (working ? ' working' : ''));
+    var dotTitle = awaiting
+      ? 'Waiting for user input'
+      : working
+        ? backgroundTitle(sess.background)
+        : (dead ? 'Source offline — right-click / long-press to reconnect' : '');
     return (
       '<a class="list-group-item list-group-item-action agent-item cn-host-child cn-session-row' + activeCls + (dead ? ' is-dead' : '') + '"'
       + ' href="#agent=' + encodeURIComponent(sess.sid)
@@ -3814,7 +3839,7 @@
       + ' data-host="' + escapeAttr(sess.host || '') + '"'
       + ' data-dead="' + (dead ? '1' : '0') + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
-      + '<span class="' + dotCls + '"' + (awaiting ? ' title="Waiting for user input"' : (dead ? ' title="Source offline — right-click / long-press to reconnect"' : '')) + '></span>'
+      + '<span class="' + dotCls + '"' + (dotTitle ? ' title="' + escapeAttr(dotTitle) + '"' : '') + '></span>'
       + '<div class="cn-session-body">'
       +   '<div class="cn-session-title">' + escapeHtml(label) + suffix + '</div>'
       +   '<div class="cn-session-sub">'
@@ -3836,6 +3861,36 @@
     if (dt < 3600) return Math.floor(dt / 60) + 'm';
     if (dt < 86400) return Math.floor(dt / 3600) + 'h';
     return Math.floor(dt / 86400) + 'd';
+  }
+
+  // Human labels for MirrorBackgroundTask.kind, used in the dot tooltip.
+  var BACKGROUND_LABELS = {
+    command: 'background command',
+    agent: 'subagent',
+    workflow: 'workflow',
+    monitor: 'monitor',
+    wakeup: 'scheduled wakeup'
+  };
+
+  // Tooltip for the "working" dot — names what the session is waiting on
+  // so the sidebar can be read without opening the session.
+  function backgroundTitle(tasks) {
+    if (!Array.isArray(tasks) || !tasks.length) return 'Working in the background';
+    var counts = {};
+    var order = [];
+    var oldest = Infinity;
+    for (var i = 0; i < tasks.length; i++) {
+      var kind = BACKGROUND_LABELS[tasks[i].kind] || tasks[i].kind || 'task';
+      if (!counts[kind]) order.push(kind);
+      counts[kind] = (counts[kind] || 0) + 1;
+      var started = Number(tasks[i].started_at);
+      if (isFinite(started) && started < oldest) oldest = started;
+    }
+    var parts = order.map(function(k) {
+      return counts[k] > 1 ? counts[k] + ' ' + k + 's' : '1 ' + k;
+    });
+    var age = isFinite(oldest) ? relativeTime(new Date(oldest).toISOString()) : '';
+    return 'Waiting on ' + parts.join(', ') + (age ? ' · oldest started ' + age : '');
   }
 
   function relativeTime(iso) {

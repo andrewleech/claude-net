@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   MirrorRegistry,
+  type MirrorSessionEntry,
   type SessionWatcher,
   _resetSessionCreateLimiterForTest,
+  backgroundTaskFromFrame,
   mirrorPlugin,
   nextActivityState,
+  parseTaskNotification,
 } from "@/hub/mirror";
 import { Scheduler } from "@/hub/scheduler";
 import type { MirrorEventFrame } from "@/shared/types";
@@ -2101,5 +2104,465 @@ describe("file fetch route", () => {
     } finally {
       app.stop();
     }
+  });
+});
+
+// ── Background-work detection ─────────────────────────────────────────────
+//
+// Payload shapes below are copied from real Claude Code transcripts, since
+// the whole mechanism keys off them.
+
+describe("backgroundTaskFromFrame", () => {
+  function resultFrame(
+    toolName: string,
+    response: unknown,
+    ts = 1_000,
+  ): MirrorEventFrame {
+    return {
+      action: "mirror_event",
+      sid: "s",
+      uuid: "u",
+      kind: "tool_result",
+      ts,
+      payload: {
+        kind: "tool_result",
+        tool_use_id: "toolu_1",
+        tool_name: toolName,
+        response,
+      },
+    };
+  }
+
+  test("Bash run_in_background → command task", () => {
+    const t = backgroundTaskFromFrame(
+      resultFrame("Bash", {
+        stdout: "",
+        stderr: "",
+        interrupted: false,
+        backgroundTaskId: "bsgen3rhs",
+      }),
+    );
+    expect(t?.kind).toBe("command");
+    expect(t?.task_id).toBe("bsgen3rhs");
+    expect(t?.tool_use_id).toBe("toolu_1");
+  });
+
+  test("async Agent → agent task keyed on agentId", () => {
+    const t = backgroundTaskFromFrame(
+      resultFrame("Agent", {
+        isAsync: true,
+        status: "async_launched",
+        agentId: "a47cbe7602502580c",
+        description: "Research",
+      }),
+    );
+    expect(t?.kind).toBe("agent");
+    expect(t?.task_id).toBe("a47cbe7602502580c");
+  });
+
+  test("Workflow → workflow task keyed on taskId", () => {
+    const t = backgroundTaskFromFrame(
+      resultFrame("Workflow", {
+        status: "async_launched",
+        taskId: "w1ze98xfj",
+        taskType: "local_workflow",
+      }),
+    );
+    expect(t?.kind).toBe("workflow");
+    expect(t?.task_id).toBe("w1ze98xfj");
+  });
+
+  test("persistent Monitor → monitor task", () => {
+    const t = backgroundTaskFromFrame(
+      resultFrame("Monitor", {
+        taskId: "bzy9rkfvs",
+        timeoutMs: 0,
+        persistent: true,
+      }),
+    );
+    expect(t?.kind).toBe("monitor");
+    expect(t?.task_id).toBe("bzy9rkfvs");
+  });
+
+  test("ScheduleWakeup call bounds its own expiry", () => {
+    const t = backgroundTaskFromFrame({
+      action: "mirror_event",
+      sid: "s",
+      uuid: "u",
+      kind: "tool_call",
+      ts: 1_000,
+      payload: {
+        kind: "tool_call",
+        tool_use_id: "toolu_w",
+        tool_name: "ScheduleWakeup",
+        input: { delaySeconds: 600, noop: true },
+      },
+    });
+    expect(t?.kind).toBe("wakeup");
+    // 1s + 600s delay + 5min slack.
+    expect(t?.expires_at).toBe(1_000 + 600_000 + 5 * 60 * 1000);
+  });
+
+  test("ScheduleWakeup with stop:true is not background work", () => {
+    const t = backgroundTaskFromFrame({
+      action: "mirror_event",
+      sid: "s",
+      uuid: "u",
+      kind: "tool_call",
+      ts: 1_000,
+      payload: {
+        kind: "tool_call",
+        tool_use_id: "toolu_w",
+        tool_name: "ScheduleWakeup",
+        input: { stop: true },
+      },
+    });
+    expect(t).toBeNull();
+  });
+
+  test("ignores results that merely carry a taskId", () => {
+    // TaskUpdate (the todo list) returns { taskId } and is not background
+    // work; a blocking Monitor returns no persistent flag.
+    expect(
+      backgroundTaskFromFrame(resultFrame("TaskUpdate", { taskId: "83" })),
+    ).toBeNull();
+    expect(
+      backgroundTaskFromFrame(
+        resultFrame("Monitor", { taskId: "bx1", timeoutMs: 5000 }),
+      ),
+    ).toBeNull();
+    expect(
+      backgroundTaskFromFrame(
+        resultFrame("Bash", { stdout: "ok", stderr: "" }),
+      ),
+    ).toBeNull();
+    expect(
+      backgroundTaskFromFrame(resultFrame("Read", "file text")),
+    ).toBeNull();
+  });
+});
+
+describe("parseTaskNotification", () => {
+  test("extracts task id, tool use id and status", () => {
+    const note = parseTaskNotification(
+      "<task-notification>\n" +
+        "<task-id>b27m079a3</task-id>\n" +
+        "<tool-use-id>toolu_01Gz</tool-use-id>\n" +
+        "<status>completed</status>\n" +
+        '<summary>Background command "x" completed (exit code 0)</summary>\n' +
+        "</task-notification>",
+    );
+    expect(note).toEqual({
+      taskId: "b27m079a3",
+      toolUseId: "toolu_01Gz",
+      status: "completed",
+    });
+  });
+
+  test("monitor events carry no status", () => {
+    const note = parseTaskNotification(
+      "<task-notification>\n<task-id>byroz9uek</task-id>\n" +
+        "<summary>Monitor event: build milestones</summary>\n</task-notification>",
+    );
+    expect(note?.taskId).toBe("byroz9uek");
+    expect(note?.status).toBe("");
+  });
+
+  test("ordinary prompts are not notifications", () => {
+    expect(parseTaskNotification("please fix the build")).toBeNull();
+  });
+});
+
+describe("MirrorRegistry background activity state", () => {
+  let reg: MirrorRegistry;
+
+  beforeEach(() => {
+    reg = new MirrorRegistry({
+      transcriptRing: 50,
+      retentionMs: 0,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+  });
+
+  function open(): { sid: string; entry: MirrorSessionEntry } {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) throw new Error("createSession failed");
+    return { sid: r.entry.sid, entry: r.entry };
+  }
+
+  function stateOf(sid: string): string {
+    const summary = reg.listAll().find((s) => s.sid === sid);
+    if (!summary) throw new Error("no summary");
+    return summary.activity_state;
+  }
+
+  function launchBgCommand(sid: string, taskId: string, toolUseId: string) {
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, `launch-${taskId}`, {
+        kind: "tool_result",
+        payload: {
+          kind: "tool_result",
+          tool_use_id: toolUseId,
+          tool_name: "Bash",
+          response: { stdout: "", stderr: "", backgroundTaskId: taskId },
+        },
+      }),
+    );
+  }
+
+  function stop(sid: string, uuid: string) {
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, uuid, {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "end_turn",
+        },
+      }),
+    );
+  }
+
+  function notify(sid: string, uuid: string, body: string) {
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, uuid, {
+        kind: "user_prompt",
+        payload: {
+          kind: "user_prompt",
+          prompt: `<task-notification>\n${body}\n</task-notification>`,
+          cwd: "/a",
+        },
+      }),
+    );
+  }
+
+  test("Stop with a backgrounded command outstanding reports background", () => {
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+  });
+
+  test("completion notification releases the session to awaiting_input", () => {
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    stop(sid, "stop-1");
+    notify(
+      sid,
+      "note-1",
+      "<task-id>b1</task-id>\n<tool-use-id>toolu_a</tool-use-id>\n<status>completed</status>",
+    );
+    // The notification itself is a prompt, so the session is busy again.
+    expect(stateOf(sid)).toBe("busy");
+    stop(sid, "stop-2");
+    expect(stateOf(sid)).toBe("awaiting_input");
+  });
+
+  test("only the finished task is released", () => {
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    launchBgCommand(sid, "b2", "toolu_b");
+    notify(
+      sid,
+      "note-1",
+      "<task-id>b1</task-id>\n<tool-use-id>toolu_a</tool-use-id>\n<status>completed</status>",
+    );
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+    notify(
+      sid,
+      "note-2",
+      "<task-id>b2</task-id>\n<tool-use-id>toolu_b</tool-use-id>\n<status>killed</status>",
+    );
+    stop(sid, "stop-2");
+    expect(stateOf(sid)).toBe("awaiting_input");
+  });
+
+  test("an async subagent keeps the session out of awaiting_input", () => {
+    const { sid } = open();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "launch-agent", {
+        kind: "tool_result",
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "toolu_ag",
+          tool_name: "Agent",
+          response: {
+            isAsync: true,
+            status: "async_launched",
+            agentId: "ag1",
+          },
+        },
+      }),
+    );
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+    const summary = reg.listAll().find((s) => s.sid === sid);
+    expect(summary?.background).toHaveLength(1);
+    expect(summary?.background[0]?.kind).toBe("agent");
+  });
+
+  test("a persistent monitor firing an event stays outstanding", () => {
+    const { sid } = open();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "launch-mon", {
+        kind: "tool_result",
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "toolu_m",
+          tool_name: "Monitor",
+          response: { taskId: "m1", timeoutMs: 0, persistent: true },
+        },
+      }),
+    );
+    notify(
+      sid,
+      "note-1",
+      "<task-id>m1</task-id>\n<summary>Monitor event</summary>",
+    );
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+  });
+
+  test("work backgrounded by a sub-agent is not tracked on the parent", () => {
+    // The completion notification for it goes to the sub-agent, so an
+    // entry here would never clear.
+    const { sid, entry } = open();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "sub-bg", {
+        kind: "tool_result",
+        agent_id: "a47cbe76",
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "toolu_s",
+          tool_name: "Bash",
+          response: { stdout: "", stderr: "", backgroundTaskId: "b9" },
+        },
+      }),
+    );
+    expect(entry.pendingBackground.size).toBe(0);
+  });
+
+  test("a persistent monitor is bounded by the timeout its call declared", () => {
+    // The call carries timeout_ms; the result reports timeoutMs: 0. Only
+    // the call's value bounds a monitor, which never reports completion.
+    const { sid, entry } = open();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "mon-call", {
+        kind: "tool_call",
+        ts: 10_000,
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "toolu_m",
+          tool_name: "Monitor",
+          input: {
+            persistent: true,
+            timeout_ms: 3_600_000,
+            command: "tail -F x",
+          },
+        },
+      }),
+    );
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "mon-result", {
+        kind: "tool_result",
+        ts: 11_000,
+        payload: {
+          kind: "tool_result",
+          tool_use_id: "toolu_m",
+          tool_name: "Monitor",
+          response: { taskId: "m1", timeoutMs: 0, persistent: true },
+        },
+      }),
+    );
+    // One entry, re-keyed onto the task id, carrying the call's timeout.
+    expect(entry.pendingBackground.size).toBe(1);
+    const task = entry.pendingBackground.get("m1");
+    expect(task?.expires_at).toBe(10_000 + 3_600_000);
+  });
+
+  test("TaskStop on the tracked task releases the session", () => {
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "kill-1", {
+        kind: "tool_call",
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "toolu_k",
+          tool_name: "TaskStop",
+          input: { taskId: "b1" },
+        },
+      }),
+    );
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("awaiting_input");
+  });
+
+  test("a permission prompt outranks outstanding background work", () => {
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "note-perm", {
+        kind: "notification",
+        payload: { kind: "notification", text: "Claude needs your permission" },
+      }),
+    );
+    expect(stateOf(sid)).toBe("awaiting_input");
+  });
+
+  test("the routine idle notification does not outrank background work", () => {
+    // Claude Code fires this even while a backgrounded task is running, so
+    // treating it as a hard block would reintroduce the false "needs you".
+    const { sid } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "note-idle", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "Claude is waiting for your input",
+        },
+      }),
+    );
+    expect(stateOf(sid)).toBe("background");
+  });
+
+  test("a task past its expiry stops suppressing awaiting_input", () => {
+    const { sid, entry } = open();
+    launchBgCommand(sid, "b1", "toolu_a");
+    stop(sid, "stop-1");
+    expect(stateOf(sid)).toBe("background");
+    const task = entry.pendingBackground.get("b1");
+    if (task) task.expires_at = Date.now() - 1;
+    expect(stateOf(sid)).toBe("awaiting_input");
+    expect(entry.pendingBackground.size).toBe(0);
+  });
+
+  test("activity broadcast carries the background task list", () => {
+    const { sid } = open();
+    const dashSent: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((evt) => dashSent.push(evt));
+    launchBgCommand(sid, "b1", "toolu_a");
+    stop(sid, "stop-1");
+    const last = dashSent
+      .filter((m) => m.event === "mirror:activity")
+      .pop() as { activity_state: string; background: unknown[] };
+    expect(last.activity_state).toBe("background");
+    expect(last.background).toHaveLength(1);
   });
 });

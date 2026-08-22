@@ -556,11 +556,56 @@ export interface MirrorWatcherLeftEvent {
  */
 /**
  * Coarse "is the agent busy or waiting on the user?" state, derived
- * from frame kinds the hub has already seen. The dashboard uses it to
- * draw an attention pulse on the session-row dot when the agent has
- * stopped working and is waiting on input — without any new hooks.
+ * purely from the frame kinds the hub has already seen. `busy` covers a
+ * turn in progress; `awaiting_input` covers a turn that has ended.
  */
-export type MirrorActivityState = "busy" | "awaiting_input";
+export type MirrorActivityBaseState = "busy" | "awaiting_input";
+
+/**
+ * Activity state as published to dashboards. Adds `background` to the
+ * base states: the turn has ended, but the session is still waiting on
+ * work it launched itself (a backgrounded shell, an async subagent, a
+ * workflow, a persistent Monitor, a scheduled wakeup) and will resume on
+ * its own. The dashboard draws the "needs you" attention pulse only for
+ * `awaiting_input`, so `background` keeps a self-resuming session from
+ * looking like it is blocked on the user.
+ */
+export type MirrorActivityState = MirrorActivityBaseState | "background";
+
+/**
+ * Flavour of outstanding background work, derived from the shape of the
+ * launching tool_result. Used only for dashboard labelling.
+ */
+export type MirrorBackgroundKind =
+  | "command"
+  | "agent"
+  | "workflow"
+  | "monitor"
+  | "wakeup";
+
+/**
+ * One piece of background work a session is still waiting on.
+ *
+ * Claude Code reports these through two surfaces the hub already sees:
+ * the launching tool_result carries the task id, and completion arrives
+ * as a synthetic `<task-notification>` user prompt naming the same id.
+ */
+export interface MirrorBackgroundTask {
+  /** Claude Code's task id (`backgroundTaskId` / `agentId` / `taskId`). */
+  task_id: string;
+  /** tool_use_id of the launching call; "" when the frame lacked one. */
+  tool_use_id: string;
+  kind: MirrorBackgroundKind;
+  /** Tool that launched it, e.g. "Bash", "Agent", "Monitor". */
+  tool_name: string;
+  /** Epoch ms of the launching frame. */
+  started_at: number;
+  /**
+   * Epoch ms after which the entry is dropped even without a completion
+   * notification, so a missed notification can't pin the dot forever.
+   */
+  expires_at: number;
+}
 
 export interface MirrorActivityEvent {
   event: "mirror:activity";
@@ -568,6 +613,8 @@ export interface MirrorActivityEvent {
   ts: number;
   /** Latest derived activity state for the session. */
   activity_state: MirrorActivityState;
+  /** Outstanding background work; empty unless state is `background`. */
+  background: MirrorBackgroundTask[];
 }
 
 /**
@@ -948,4 +995,6 @@ export interface MirrorSessionSummary {
   transcript_len: number;
   /** Coarse derived state used to color the dashboard session-row dot. */
   activity_state: MirrorActivityState;
+  /** Outstanding background work; empty unless state is `background`. */
+  background: MirrorBackgroundTask[];
 }

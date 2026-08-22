@@ -301,9 +301,16 @@ start_mirror_agent_watchdog() {
 
     start_mirror_agent || return 1
 
+    # The pid this watchdog belongs to. This process goes on to exec either
+    # the patched binary or a tmux client, so its liveness is the watchdog's
+    # reason to exist. Captured out here because $$ is not reliably the
+    # subshell's parent across shells.
+    local owner_pid=$$
+
     # Detached background subshell: polls every 5 s and respawns if the agent
-    # is gone. Exits cleanly when the sentinel file appears (written by the
-    # agent on idle-shutdown so we don't restart intentional stops).
+    # is gone. Exits when the sentinel file appears (written by the agent on
+    # idle-shutdown so we don't restart intentional stops) or when the
+    # process it belongs to is gone.
     # Backoff: consecutive restart failures double the poll delay (5s→10→20→30)
     # to avoid a tight crash-loop filling the log.
     (
@@ -312,6 +319,11 @@ start_mirror_agent_watchdog() {
             sleep "$backoff"
             # Sentinel: agent stopped intentionally — don't restart.
             [ -f "$sentinel" ] && exit 0
+            # Our Claude Code (or tmux client) is gone, so nothing here needs
+            # the daemon any more. Without this the subshell reparents to
+            # init and polls /health every 5 s forever: one leaked watchdog
+            # per claude-channels launch, for the uptime of the host.
+            kill -0 "$owner_pid" 2>/dev/null || exit 0
             # Port file present + health check passing: all good.
             local port
             port="$(cat "$port_file" 2>/dev/null || true)"

@@ -6,6 +6,8 @@ import { binServerPlugin, ensureBundleBuilt } from "./bin-server";
 import { EventLog } from "./event-log";
 import { hostPlugin } from "./host";
 import { HostRegistry } from "./host-registry";
+import { LogRing, captureProcessOutput } from "./log-ring";
+import { type LoopLagMonitor, startLoopLagMonitor } from "./loop-lag";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
 import { Registry } from "./registry";
@@ -43,6 +45,12 @@ export interface CreateHubOptions {
    * bloating memory.
    */
   eventLogCapacity?: number;
+  /**
+   * Max lines retained by the stdout/stderr ring. Defaults to the ring's
+   * own bound. Set 0 to skip capture entirely (tests that assert on
+   * process output).
+   */
+  logRingCapacity?: number;
 }
 
 export interface Hub {
@@ -53,6 +61,8 @@ export interface Hub {
   mirrorRegistry: MirrorRegistry;
   hostRegistry: HostRegistry;
   eventLog: EventLog;
+  logRing: LogRing;
+  loopLag: LoopLagMonitor;
   startedAt: Date;
   /** Stop the ping tick and the Elysia server. Idempotent. */
   stop: () => void;
@@ -72,6 +82,28 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   const hostRegistry = new HostRegistry();
   const uploadsRegistry = new UploadsRegistry();
   const eventLog = new EventLog(options.eventLogCapacity);
+
+  // Capture the hub's own output first, so startup diagnostics land in
+  // the ring too. Tees rather than replaces, so a host that captures
+  // stdio still gets everything.
+  const logRing = new LogRing(
+    options.logRingCapacity === undefined || options.logRingCapacity > 0
+      ? options.logRingCapacity
+      : 1,
+  );
+  const releaseCapture =
+    options.logRingCapacity === 0 ? () => {} : captureProcessOutput(logRing);
+
+  // A stalled event loop leaves no other trace — see loop-lag.ts.
+  const loopLag = startLoopLagMonitor({
+    onStall: (lagMs) => {
+      const seconds = (lagMs / 1000).toFixed(1);
+      process.stderr.write(
+        `[claude-net] event loop blocked for ${seconds}s — requests were not served during this window\n`,
+      );
+      eventLog.push("loop.stall", { lag_ms: Math.round(lagMs) });
+    },
+  });
 
   // Delayed-inject scheduler. Fires queued prompts through the same relay
   // as /inject; reports each transition to the owning session's watchers
@@ -278,6 +310,8 @@ export function createHub(options: CreateHubOptions = {}): Hub {
         hostRegistry,
         eventLog,
         mirrorRegistry,
+        logRing,
+        loopLag,
       }),
     )
     .use(mirrorPlugin({ mirrorRegistry, scheduler, hostRegistry }))
@@ -357,6 +391,10 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     stopped = true;
     clearInterval(pingTick);
     scheduler.stop();
+    loopLag.stop();
+    // Restore the real writers before the process (or the next test's
+    // hub) installs its own tee, so captures can't stack.
+    releaseCapture();
     try {
       app.stop();
     } catch {
@@ -372,6 +410,8 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     mirrorRegistry,
     hostRegistry,
     eventLog,
+    logRing,
+    loopLag,
     startedAt,
     stop,
   };
@@ -389,6 +429,8 @@ const {
   mirrorRegistry,
   hostRegistry,
   eventLog,
+  logRing,
+  loopLag,
   startedAt,
 } = hub;
 
@@ -431,5 +473,7 @@ export {
   mirrorRegistry,
   hostRegistry,
   eventLog,
+  logRing,
+  loopLag,
   startedAt,
 };

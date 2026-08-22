@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { app } from "@/hub/index";
+import { app, logRing } from "@/hub/index";
 
 describe("hub server", () => {
   afterAll(() => {
@@ -139,5 +139,56 @@ describe("hub server", () => {
     // The surrounding single-quoted literal must also be gone — the replacement
     // target includes the quotes so the result is a bare JS expression.
     expect(html).not.toContain("'__LAUNCH_DEFAULT_PATH__'");
+  });
+
+  test("GET /api/logs serves the hub's own captured stderr", async () => {
+    const port = app.server?.port;
+    // A line of the kind the hub writes for real (bundle-build failures,
+    // store-append failures, orphan-sweep closes).
+    process.stderr.write("[claude-net] test-only diagnostic line\n");
+
+    const response = await fetch(`http://localhost:${port}/api/logs?limit=200`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      capacity: number;
+      size: number;
+      dropped: number;
+      lines: { ts: number; stream: string; text: string }[];
+    };
+    expect(typeof body.capacity).toBe("number");
+    expect(typeof body.dropped).toBe("number");
+    const hit = body.lines.find((l) =>
+      l.text.includes("test-only diagnostic line"),
+    );
+    expect(hit).toBeDefined();
+    expect(hit?.stream).toBe("stderr");
+    expect(typeof hit?.ts).toBe("number");
+  });
+
+  test("GET /api/logs honours the stream filter and limit", async () => {
+    const port = app.server?.port;
+    const response = await fetch(
+      `http://localhost:${port}/api/logs?stream=stdout&limit=5`,
+    );
+    const body = (await response.json()) as { lines: { stream: string }[] };
+    expect(body.lines.length).toBeLessThanOrEqual(5);
+    expect(body.lines.every((l) => l.stream === "stdout")).toBe(true);
+  });
+
+  test("the module hub exposes its log ring", () => {
+    // The ring is the only way to read hub output on a host whose
+    // container stdio isn't captured, so it must be reachable.
+    expect(logRing.capacity).toBeGreaterThan(0);
+  });
+
+  test("GET /api/status reports event-loop lag", async () => {
+    const port = app.server?.port;
+    const response = await fetch(`http://localhost:${port}/api/status`);
+    const body = (await response.json()) as {
+      event_loop?: { max_lag_ms: number; stalls: number };
+    };
+    expect(body.event_loop).toBeDefined();
+    expect(typeof body.event_loop?.max_lag_ms).toBe("number");
+    expect(typeof body.event_loop?.stalls).toBe("number");
   });
 });

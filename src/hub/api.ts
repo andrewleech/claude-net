@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import { Elysia } from "elysia";
 import type { EventLog } from "./event-log";
 import type { HostRegistry } from "./host-registry";
+import type { LogRing } from "./log-ring";
+import type { LoopLagMonitor } from "./loop-lag";
 import type { MirrorRegistry } from "./mirror";
 import { RateLimiter } from "./rate-limit";
 import type { Registry } from "./registry";
@@ -14,6 +16,10 @@ export interface ApiDeps {
   router: Router;
   startedAt: Date;
   eventLog: EventLog;
+  /** Ring of the hub's own stdout/stderr, served by GET /api/logs. */
+  logRing?: LogRing;
+  /** Event-loop lag readings, surfaced on GET /api/status. */
+  loopLag?: LoopLagMonitor;
   hostRegistry?: HostRegistry;
   /** Optional — used by the /mirror/api-error route to look up a
    *  session's owner_agent. When omitted (e.g. older tests) the route
@@ -24,6 +30,8 @@ export interface ApiDeps {
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
 const SUMMARY_DEFAULT_WINDOW_MS = 60 * 60 * 1000;
+const LOGS_DEFAULT_LIMIT = 200;
+const LOGS_MAX_LIMIT = 2000;
 const AGENT_LOG_DEFAULT_LINES = 200;
 const AGENT_LOG_MAX_LINES = 2000;
 // Tail-read cap: bounded so a long-lived agent on tmpfs doesn't load
@@ -126,6 +134,8 @@ export function apiPlugin(deps: ApiDeps): Elysia {
     hostRegistry,
     eventLog,
     mirrorRegistry,
+    logRing,
+    loopLag,
   } = deps;
 
   return (
@@ -144,6 +154,43 @@ export function apiPlugin(deps: ApiDeps): Elysia {
           uptime: (Date.now() - startedAt.getTime()) / 1000,
           agents: { online, offline },
           teams: teams.teams.size,
+          event_loop: {
+            max_lag_ms: loopLag ? loopLag.maxLagMs() : 0,
+            stalls: loopLag ? loopLag.stallCount() : 0,
+          },
+        };
+      })
+
+      // GET /api/logs — the hub's own stdout/stderr, from the in-memory
+      // ring. Nothing is written to disk: on hosts where disk pressure is
+      // itself under suspicion, a log file is the wrong instrument.
+      .get("/logs", ({ query, set }) => {
+        if (!logRing) {
+          set.status = 501;
+          return { error: "log capture is not enabled on this hub" };
+        }
+        const q = query as Record<string, string | undefined>;
+        const rawLimit = parseOptionalNumber(q.limit);
+        const limit =
+          rawLimit === undefined || rawLimit <= 0
+            ? LOGS_DEFAULT_LIMIT
+            : Math.min(Math.floor(rawLimit), LOGS_MAX_LIMIT);
+        const stream =
+          q.stream === "stdout" || q.stream === "stderr" ? q.stream : undefined;
+        // Pending partial lines are flushed so a diagnostic written
+        // without a trailing newline is still visible.
+        logRing.flush();
+        return {
+          capacity: logRing.capacity,
+          size: logRing.size,
+          dropped: logRing.dropped,
+          lines: logRing.query({
+            limit,
+            ...(parseOptionalNumber(q.since) !== undefined
+              ? { since: parseOptionalNumber(q.since) as number }
+              : {}),
+            ...(stream ? { stream } : {}),
+          }),
         };
       })
 

@@ -1560,13 +1560,14 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("POST /:sid/close severs an agent-bound entry but keeps it browsable for the retention window", async () => {
-    // Regression for the bug where /close called the soft closeSession,
-    // which left entry.agent bound — the still-connected daemon then
-    // re-opened it on its next keepalive/hook re-POST, so /close looked
-    // like a 200 success but never actually severed the entry. And for
-    // the follow-up bug where the fix (closeAndDrop) deleted the entry
-    // immediately, making the retention window unreachable from /close.
+  test("POST /:sid/close resolves the right host's entry and keeps it reopenable", async () => {
+    // /close is the mirror-agent's own teardown signal (shutdown,
+    // session_end, /clear rotation, orphan), so the entry must stay
+    // browsable for the retention window AND stay reopenable: a
+    // restarted daemon re-adopting the same live Claude Code re-POSTs
+    // the same sid. Regression for the earlier silent no-op where
+    // /close resolved by sid alone and hit nothing whenever two hosts
+    // shared the sid.
     const reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 60_000 });
     const app = new Elysia().use(mirrorPlugin({ mirrorRegistry: reg }));
     app.listen(0);
@@ -1582,18 +1583,12 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       );
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      let agentClosed = false;
-      reg.setAgentConnection(
-        "bound-sid",
-        {
-          ws: { send: () => {} },
-          wsIdentity: {},
-          close: () => {
-            agentClosed = true;
-          },
-        },
-        "hostA",
-      );
+      // A second host holding the same sid is what made the old
+      // sid-only resolution return null and close nothing.
+      expect(
+        reg.createSession("bound:u@h2", "/bound", "bound-sid", "hostB", 4243)
+          .ok,
+      ).toBe(true);
 
       const res = await fetch(
         `http://localhost:${port}/api/mirror/bound-sid/close?host=hostA`,
@@ -1604,15 +1599,14 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(reg.hasSession("bound-sid")).toBe(true);
       const after = reg.getSession("bound-sid", "hostA");
       expect(after.ok).toBe(true);
-      if (after.ok) {
-        expect(after.entry.closedAt).not.toBe(null);
-        expect(after.entry.agent).toBe(null);
-      }
-      // The bound WS was actually disconnected, not just left dangling.
-      expect(agentClosed).toBe(true);
+      if (after.ok) expect(after.entry.closedAt).not.toBe(null);
+      // Only hostA's entry was closed.
+      const other = reg.getSession("bound-sid", "hostB");
+      expect(other.ok).toBe(true);
+      if (other.ok) expect(other.entry.closedAt).toBe(null);
 
-      // A re-POST from the SAME process (same ccPid) after the close
-      // must not resurrect it - that's the whole point of severing.
+      // A re-POST from the same process re-adopts it: this is how a
+      // restarted daemon reclaims a still-live Claude Code.
       const recreate = reg.createSession(
         "bound:u@h",
         "/bound",
@@ -1620,7 +1614,8 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
         "hostA",
         4242,
       );
-      expect(recreate.ok).toBe(false);
+      expect(recreate.ok).toBe(true);
+      if (recreate.ok) expect(recreate.entry.closedAt).toBe(null);
     } finally {
       app.stop();
     }
@@ -1696,43 +1691,6 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("createSession re-POST from a different, unrelated ccPid does not resurrect a closed sid", () => {
-    // A closed entry must not be handed back to a differently-
-    // identified process — e.g. it was deliberately dropped because
-    // the process that held it died, and the sid is now being reused
-    // (or reported) by something else entirely.
-    const quick = new MirrorRegistry({
-      transcriptRing: 10,
-      retentionMs: 60_000,
-      orphanCloseMs: 0,
-      neverActiveMs: 0,
-    });
-    try {
-      const r = quick.createSession(
-        "alice:u@h",
-        "/home/alice",
-        "closed-sid",
-        "hostA",
-        111,
-      );
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
-      quick.closeSession("closed-sid", "exit", "hostA");
-      expect(quick.hasSession("closed-sid")).toBe(true); // soft close, still in map
-
-      const reopen = quick.createSession(
-        "alice:u@h",
-        "/home/alice",
-        "closed-sid",
-        "hostA",
-        222, // different ccPid — not the same process
-      );
-      expect(reopen.ok).toBe(false);
-    } finally {
-      quick.stop();
-    }
-  });
-
   test("createSession re-POST from the same ccPid still re-opens a closed sid", () => {
     // The legitimate recovery path (mirror-agent restart re-claiming
     // its own session) must keep working: same host + same ccPid.
@@ -1770,11 +1728,11 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("createSession re-POST from the same ccPid does NOT re-open a severed sid", () => {
-    // closeAndSever (the explicit-close path) is stricter than the
-    // plain soft closeSession above: once severed, no re-POST - same
-    // ccPid or not - brings the entry back. It stays around (browsable)
-    // only until the retention window drops it.
+  test("createSession re-POST from a DIFFERENT ccPid re-opens a closed sid", () => {
+    // POST /:sid/reconnect relaunches `claude --resume <sid>`, so the
+    // resumed Claude Code carries the old sid under a new pid. Refusing
+    // the reopen on a ccPid change would leave reconnect launching a
+    // process the hub never binds a mirror session to.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -1785,23 +1743,27 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       const r = quick.createSession(
         "alice:u@h",
         "/home/alice",
-        "severed-sid",
+        "resumed-sid",
         "hostA",
         111,
       );
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      quick.closeAndSever("severed-sid", "exit", "hostA");
-      expect(quick.hasSession("severed-sid")).toBe(true); // still browsable
+      quick.closeSession("resumed-sid", "exit", "hostA");
+      expect(quick.hasSession("resumed-sid")).toBe(true); // still browsable
 
       const reopen = quick.createSession(
         "alice:u@h",
         "/home/alice",
-        "severed-sid",
+        "resumed-sid",
         "hostA",
-        111,
+        222,
       );
-      expect(reopen.ok).toBe(false);
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+      expect(reopen.entry.ccPid).toBe(222);
     } finally {
       quick.stop();
     }

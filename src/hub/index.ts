@@ -130,9 +130,9 @@ export function createHub(options: CreateHubOptions = {}): Hub {
 
   // The plugin is served as a self-contained bundle (built lazily on first
   // request from src/plugin/plugin.ts against the repo's bun.lock-pinned
-  // node_modules). Serving the bare .ts used to leave dependency resolution
-  // to each client's bun auto-install, where floating versions once paired
-  // SDK 1.29.0 with an incompatible zod and killed the MCP server at startup.
+  // node_modules), so a client's bun never re-resolves the plugin's
+  // dependencies — floating versions there can pair the MCP SDK with an
+  // incompatible zod and kill the server at startup.
   const repoRoot = `${import.meta.dir}/../..`;
   const pluginBundleRel = "bin/plugin.bundle.js";
   const pluginPath = `${repoRoot}/${pluginBundleRel}`;

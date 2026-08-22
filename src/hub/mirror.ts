@@ -123,15 +123,6 @@ export interface MirrorSessionEntry {
   closedAt: Date | null;
   retentionTimerId: ReturnType<typeof setTimeout> | null;
   /**
-   * Set by an explicit close (POST /:sid/close) as opposed to the
-   * softer internal closes (orphan sweep, /clear rotation, CC exit).
-   * A severed entry keeps its transcript around for the retention
-   * window like any other closed entry, but `createSession` refuses
-   * to reopen it - a still-connected daemon's next keepalive/hook
-   * re-POST for the same sid must not silently undo the close.
-   */
-  severed: boolean;
-  /**
    * Derived from the kinds of frames that have flowed through. A fresh
    * session is `awaiting_input` (Claude hasn't been prompted yet); a
    * UserPromptSubmit / tool call flips to `busy`; the top-level Stop
@@ -722,41 +713,14 @@ export class MirrorRegistry {
       // earlier "Session owner mismatch" 409 that permanently wedged any
       // renamed session whose ccPid couldn't vouch for identity — the
       // session showed offline/no-mirror while Claude ran fine.)
-      // Same (host, ccPid) means the same process. Only that process may
-      // reopen its own closed sid.
-      const identityMatches =
-        existing.ccPid !== null && ccPid !== null && existing.ccPid === ccPid;
       if (existing.closedAt) {
-        // A deliberately-severed entry (POST /:sid/close) never comes
-        // back, regardless of identity - that's what distinguishes an
-        // explicit close from the softer internal ones below. Without
-        // this, a still-connected daemon's next keepalive/hook re-POST
-        // for the same (host, ccPid) would silently undo the close.
-        if (existing.severed) {
-          return {
-            ok: false,
-            error: "Session was closed and cannot be reopened.",
-          };
-        }
-        // A closed sid must not be handed back to a differently-
-        // identified process: known, differing ccPids mean this re-POST is
-        // not the same process the close was for (e.g. it was deliberately
-        // dropped because the old ccPid died), so refuse to resurrect. `existing.ccPid
-        // === null` (pre-rollout) is the one case with no identity to
-        // check, so it keeps the old idempotent-reopen behaviour.
-        const ccPidMismatch =
-          existing.ccPid !== null && ccPid !== null && !identityMatches;
-        if (ccPidMismatch) {
-          return {
-            ok: false,
-            error:
-              "Session was closed and cannot be reclaimed by a different process.",
-          };
-        }
         // Re-open a closed session when the same owner comes back with
         // the same sid. Happens after mirror-agent restarts where the
         // old agent's shutdown sent a /close before the new agent had
-        // the chance to reclaim the session.
+        // the chance to reclaim the session, and after
+        // POST /:sid/reconnect relaunches `claude --resume <sid>` under a
+        // new pid. Reopening unconditionally is what makes both paths
+        // work; the sid itself is the identity on a trusted network.
         existing.closedAt = null;
         if (existing.retentionTimerId) {
           clearTimeout(existing.retentionTimerId);
@@ -814,7 +778,6 @@ export class MirrorRegistry {
       agent: null,
       nextInjectSeq: 0,
       closedAt: null,
-      severed: false,
       lastStatusline: null,
       retentionTimerId: null,
       activityState: "awaiting_input",
@@ -1090,8 +1053,8 @@ export class MirrorRegistry {
    * createSession → hub re-creates fresh entry with the same sid.
    *
    * Distinct from `closeSession` because these sweep-closed entries have
-   * no remaining user value - unlike an explicit close (see
-   * `closeAndSever`), there's no transcript worth keeping browsable.
+   * no remaining user value — there's no transcript worth keeping
+   * browsable, unlike a session that ended with real content in it.
    */
   closeAndDrop(
     sid: string,
@@ -1115,38 +1078,6 @@ export class MirrorRegistry {
         agentClose();
       } catch {
         // ignore — the agent will notice on its next ping if it didn't already
-      }
-    }
-  }
-
-  /**
-   * Close a session for an explicit, user-visible reason (POST
-   * /:sid/close) while keeping it in the registry for the retention
-   * window, same as `closeSession` - the transcript stays browsable.
-   *
-   * Unlike the plain soft close, this also severs any bound
-   * mirror-agent connection and marks the entry so `createSession`
-   * refuses to reopen it: without severing, a still-connected daemon's
-   * next keepalive/hook re-POST for the same sid would silently undo
-   * the close, making it look like a no-op.
-   */
-  closeAndSever(
-    sid: string,
-    reason: "exit" | "agent_timeout" = "exit",
-    host?: string,
-  ): void {
-    const entry = host ? this.entryByKey(host, sid) : this.entryBySid(sid);
-    const agentClose = entry?.agent?.close;
-    this.closeSession(sid, reason, host);
-    if (entry) {
-      entry.severed = true;
-      this.setAgentConnection(sid, null, host);
-    }
-    if (agentClose) {
-      try {
-        agentClose();
-      } catch {
-        // ignore - the agent will notice on its next ping if it didn't already
       }
     }
   }
@@ -2016,16 +1947,16 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           set.status = found.status;
           return { error: found.error };
         }
-        // closeAndSever (not the plain closeSession, and not
-        // closeAndDrop) so the entry is actually severed - an
-        // agent-bound entry left un-severed would have the
-        // still-connected daemon reopen it via createSession's next
-        // keepalive/hook re-POST, making /close look like a no-op -
-        // while still keeping it around, browsable, for the retention
-        // window rather than dropping it outright. Resolve with the
-        // exact entry's own host so a cross-host sid collision can't
-        // make this silently target the wrong (or no) entry.
-        mirrorRegistry.closeAndSever(params.sid, "exit", found.entry.host);
+        // Soft close, keeping the entry browsable for the retention
+        // window: this endpoint is the mirror-agent's own teardown
+        // signal (shutdown, session_end, /clear rotation, orphan), not a
+        // user action, so it must stay reopenable — a restarted daemon
+        // re-adopting the same live Claude Code, and `/:sid/reconnect`
+        // relaunching `claude --resume <sid>`, both re-POST this sid.
+        // Resolve with the exact entry's own host so a cross-host sid
+        // collision can't make this silently target the wrong (or no)
+        // entry.
+        mirrorRegistry.closeSession(params.sid, "exit", found.entry.host);
         return { closed: true };
       })
 

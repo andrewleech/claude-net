@@ -70,7 +70,7 @@ Name persistence and `/rename` sync:
 
 ## Plugin
 
-`src/plugin/plugin.ts` is a single self-contained file served by the hub at `GET /plugin.ts`. It runs on client machines as an MCP stdio subprocess, connecting back to the hub via WebSocket. It cannot import local project files — types are duplicated inline.
+`src/plugin/plugin.ts` runs on client machines as an MCP stdio subprocess, connecting back to the hub via WebSocket. `GET /plugin.ts` serves a `bun build` bundle of it (built lazily into `bin/plugin.bundle.js`, pre-built in the Dockerfile) so the client never resolves the plugin's dependencies itself. Project files are still not importable from it: `tsconfig.json` is excluded from the Docker image, so the `@/*` alias doesn't resolve at bundle time — types stay duplicated inline.
 
 The setup endpoint (`GET /setup`) generates a shell script that downloads the plugin to a temp file and registers it with Claude Code's MCP config.
 

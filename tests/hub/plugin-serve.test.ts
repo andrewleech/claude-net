@@ -1,9 +1,7 @@
 // Mirrors the /plugin.ts route in src/hub/index.ts: the hub serves a
 // self-contained bundle (built lazily via ensureBundleBuilt against the
-// repo's bun.lock-pinned node_modules), NOT the bare plugin source. Serving
-// the bare .ts left dependency resolution to each client's bun auto-install,
-// where floating versions once paired SDK 1.29.0 with an incompatible zod
-// and killed the MCP server at startup.
+// repo's bun.lock-pinned node_modules), NOT the bare plugin source, so a
+// client never re-resolves the plugin's dependencies itself.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ensureBundleBuilt } from "@/hub/bin-server";

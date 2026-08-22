@@ -62,8 +62,8 @@ export interface HostChannelOptions {
    */
   redact?: (text: string) => string;
   /**
-   * Overrides the home directory the recovery scan reads and the default
-   * workspace root (`<home>/projects`) is derived from. Defaults to
+   * Overrides the home directory the recovery scan reads
+   * (`<home>/.claude.json` and `<home>/.claude/projects`). Defaults to
    * os.homedir().
    */
   home?: string;

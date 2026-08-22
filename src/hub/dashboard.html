@@ -5102,12 +5102,12 @@
       });
       if (!fromUser) return;
       // Selecting a tab lands on that pane's latest event. Toggling pane
-      // visibility rewrites the transcript's scroll geometry, so snap
-      // across several frames with virtualization off instead of a single
-      // rAF, which can land short and read as "it scrolled up".
+      // visibility rewrites the transcript's scroll geometry, so snap now
+      // and again once it has settled — a single rAF can land short and
+      // read as "it scrolled up".
       setScrolledUp(false);
-      deferVirtualization(400);
       startTailObserver();
+      deferTailResnap(400);
     }
 
     function setAgentTabStatus(aid, status) {
@@ -5232,24 +5232,18 @@
 
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
-    // True until this attach has rendered its first init frame. Selecting
-    // a session always lands on the latest message; the saved scroll-back
-    // position is only restored when a reconnect re-inits a session the
-    // user is already reading.
-    var initSnapToTail = true;
-    // Row virtualization (content-visibility) makes scrollHeight an
-    // estimate, so it stays off while a scroll target is being applied
-    // and comes back once the position has settled. Switching it back on
-    // resizes every skipped row to its intrinsic estimate, which grows
-    // scrollHeight and leaves a tailed transcript sitting above the
-    // bottom, so re-snap afterwards unless the user has scrolled up.
-    var virtualizeTimer = null;
-    function deferVirtualization(ms) {
-      transcriptEl.classList.remove('is-virtualized');
-      if (virtualizeTimer) clearTimeout(virtualizeTimer);
-      virtualizeTimer = setTimeout(function() {
-        virtualizeTimer = null;
-        transcriptEl.classList.add('is-virtualized');
+    // Re-snap to the tail once the transcript's geometry has settled.
+    // Rows keep growing after the initial paint (images decode, markdown
+    // reflows, a hidden pane becoming visible relayouts everything), which
+    // grows scrollHeight while scrollTop stays put and leaves a tailed
+    // transcript sitting hundreds of pixels above the bottom with the
+    // jump-to-bottom button showing. Skipped when the user has since
+    // scrolled up — their position wins.
+    var resnapTimer = null;
+    function deferTailResnap(ms) {
+      if (resnapTimer) clearTimeout(resnapTimer);
+      resnapTimer = setTimeout(function() {
+        resnapTimer = null;
         if (!userScrolledUp) startTailObserver();
       }, ms);
     }
@@ -7588,11 +7582,15 @@
         // aren't the human typing — render them as a collapsed disclosure
         // box instead of a "user" message.
         var tnLive = parseTaskNotification(payload.prompt || '');
+        var isSubagentPrompt = !tagged && (inSubagent() || postSubagentCover);
+        postSubagentCover = false; // consume on every user_prompt regardless of branch
         // A genuine human prompt on the main thread starts a new turn:
         // prune finished sub-agent tabs from previous turns (running stay).
         // Harness task-notifications ride the user turn but aren't the human
-        // typing, so they don't count as a new turn.
-        if (!tagged && !tnLive) pruneDoneAgentTabs();
+        // typing, and neither is the synthetic UserPromptSubmit CC fires
+        // when packaging a sub-agent's tool results — pruning on that one
+        // would destroy the tab in the same beat it flipped to done.
+        if (!tagged && !tnLive && !isSubagentPrompt) pruneDoneAgentTabs();
         if (tnLive) {
           el = buildTaskNotifEl(tnLive, {});
           el.setAttribute('data-ts', ts);
@@ -7603,8 +7601,6 @@
           return;
         }
         el = document.createElement('div');
-        var isSubagentPrompt = !tagged && (inSubagent() || postSubagentCover);
-        postSubagentCover = false; // consume on every user_prompt regardless of branch
         if (isSubagentPrompt) {
           // The parent dispatched an Agent/Task subagent and the
           // subagent's hook stream is now flowing through the parent's
@@ -7760,7 +7756,7 @@
         // No matching call — render stand-alone result.
         if (payload.tool_name === 'SendUserFile') {
           el = renderFileDelivery(payload, ts);
-          transcriptEl.appendChild(el);
+          pane.appendChild(el);
           scrollToBottom();
           return;
         }
@@ -8208,13 +8204,11 @@
       firstRenderedTs = null;
       historyDivider = null;
       updateHistoryBtn();
-      // Turn virtualization OFF during initial replay so scrollHeight
-      // is accurate (content-visibility's estimated heights make
-      // "scroll to end" land on the wrong place — especially on
-      // mobile). 800ms is generous enough for the rAF snap loop below
-      // (≤4 frames) plus mobile paint settling, well under typical
-      // session-switch reaction time.
-      deferVirtualization(800);
+      // Replayed rows keep growing after their first paint, so the snap
+      // at the end of this function lands short. Re-snap once the layout
+      // has settled: 800ms covers mobile paint settling and is well under
+      // typical session-switch reaction time.
+      deferTailResnap(800);
       transcriptEl.innerHTML = '';
       rendered = Object.create(null);
       activeSubagents = Object.create(null);
@@ -8223,12 +8217,10 @@
       // rather than accumulating stale tabs from the previous attach.
       resetAgentTabsUi();
       disconnectTailObserver();
-      // Restore per-session scroll-back state on a reconnect re-init: if
-      // the user was scrolled up mid-read, preserve that and restore their
-      // position. The first init after selecting a session ignores the
-      // saved state and snaps to the tail.
-      var scrollState = initSnapToTail ? null : sessionScrollState.get(sid);
-      initSnapToTail = false;
+      // Restore per-session scroll-back state: if the user was scrolled up
+      // mid-read, preserve that and restore their position. Saved on
+      // teardown too, so the position survives a session switch.
+      var scrollState = sessionScrollState.get(sid);
       // Set userScrolledUp before the render loop so that scrollToBottom()
       // calls inside renderEvent no-op when we intend to restore position.
       setScrolledUp(!!(scrollState && scrollState.scrolledUp));
@@ -8265,6 +8257,13 @@
         requestAnimationFrame(function() {
           var target = transcriptEl.querySelector('[data-uuid="' + anchorUuid + '"]');
           if (target) {
+            // The anchor can belong to a sub-agent pane (captureAnchor
+            // reads the active one). resetAgentTabsUi just selected Main,
+            // and a hidden pane's rows all report offsetTop 0, so re-select
+            // the anchor's own tab before measuring.
+            var ownerPane = target.closest('.m-agent-pane');
+            var ownerAid = ownerPane && ownerPane.getAttribute('data-agent');
+            if (ownerAid && ownerAid !== activeAgentTab) selectAgentTab(ownerAid, false);
             transcriptEl.scrollTop = target.offsetTop + anchorOffset;
           } else {
             // Anchor not in current window; fall through to tail.
@@ -8917,7 +8916,10 @@
         var tx = document.createElement('span'); tx.className = 'mqf-text';
         el.appendChild(lab); el.appendChild(tx);
         queuedFeedEls[it.id] = el;
-        transcriptEl.appendChild(el);
+        // Into the main pane, not the pane container: a queued send is
+        // main-thread, and a row parked after every pane would sit pinned
+        // below all later events instead of in the feed's chronology.
+        paneFor('main').appendChild(el);
         scrollToBottom();
       }
       var labEl = el.querySelector('.mqf-label');

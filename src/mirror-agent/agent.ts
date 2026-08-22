@@ -376,12 +376,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       for (const d of discoverRunningCcSessions()) ids.add(d.sessionId);
       return ids;
     },
+    // Deliberately NOT derived from discoverRunningCcSessions: that drops
+    // any process whose sid it can't pin down, including the ambiguous
+    // fork/resume-in-one-directory case, which is exactly when a stale
+    // transcript in that directory looks recoverable while a Claude Code
+    // is live in it. The cwd is readable straight off /proc regardless.
     getLiveCwds: () => {
       const cwds = new Set<string>();
       for (const s of sessions.values()) {
         if (!s.closed && s.cwd) cwds.add(s.cwd);
       }
-      for (const d of discoverRunningCcSessions()) cwds.add(d.cwd);
+      for (const cwd of discoverRunningCcCwds()) cwds.add(cwd);
       return cwds;
     },
     redact: (text) => redactor.redactText(text),
@@ -2419,6 +2424,43 @@ function isClaudeCodeExe(exe: string): boolean {
     /\/cc-patcher\/claude-patched/.test(exe) ||
     /\/claude-channels\/claude-patched/.test(exe)
   );
+}
+
+/**
+ * Working directories of every live Claude Code process, straight from
+ * `/proc/<pid>/cwd` with no session-id resolution in between. Crash
+ * recovery uses this to rule out directories that are in use; unlike
+ * `discoverRunningCcSessions` it never drops a process just because its
+ * transcript is ambiguous.
+ *
+ * Linux-only, like the rest of the /proc discovery here — an empty set on
+ * other platforms, where the caller's own session map is the only signal.
+ */
+export function discoverRunningCcCwds(procRoot = "/proc"): Set<string> {
+  const out = new Set<string>();
+  if (process.platform !== "linux") return out;
+  let pidDirs: string[];
+  try {
+    pidDirs = fs.readdirSync(procRoot);
+  } catch {
+    return out;
+  }
+  for (const dirName of pidDirs) {
+    if (!/^\d+$/.test(dirName)) continue;
+    let exe: string;
+    try {
+      exe = fs.readlinkSync(path.join(procRoot, dirName, "exe"));
+    } catch {
+      continue;
+    }
+    if (!isClaudeCodeExe(exe)) continue;
+    try {
+      out.add(fs.readlinkSync(path.join(procRoot, dirName, "cwd")));
+    } catch {
+      // process exited mid-scan
+    }
+  }
+  return out;
 }
 
 /**

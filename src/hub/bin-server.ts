@@ -7,7 +7,7 @@
 // The file set is whitelisted: we never serve arbitrary paths from bin/.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { Elysia } from "elysia";
 
@@ -78,12 +78,16 @@ const bundlesBuilt = new Set<string>();
 
 /**
  * Ensure a self-contained JS bundle of `sourceRel` exists at `destRel`.
- * Runs `bun build` once per process per dest. If bun isn't on PATH (should
- * never happen in the hub container), logs and returns false.
+ * Runs `bun build` once per process per (repoRoot, dest).
  *
  * Bundling resolves dependencies from the repo's own node_modules (i.e.
  * bun.lock-pinned, test-covered versions) — the served artifact carries no
  * floating imports for the client's bun auto-install to re-resolve.
+ *
+ * Returns true when a usable bundle is on disk afterwards: a failed build
+ * (no bun on PATH, read-only repo root, a source that won't compile) still
+ * succeeds if a pre-built artifact is already there, which is the Docker
+ * image's case.
  *
  * When `commitHash` is given, the __MIRROR_BUILD_HASH__ placeholder is
  * substituted (mirror-agent only — the plugin has no placeholder).
@@ -94,9 +98,10 @@ export function ensureBundleBuilt(
   destRel: string,
   commitHash?: string,
 ): boolean {
-  if (bundlesBuilt.has(destRel)) return true;
   const source = path.join(repoRoot, sourceRel);
   const dest = path.join(repoRoot, destRel);
+  const cacheKey = dest;
+  if (bundlesBuilt.has(cacheKey)) return true;
   const result = spawnSync(
     "bun",
     ["build", "--target=bun", source, "--outfile", dest],
@@ -106,13 +111,20 @@ export function ensureBundleBuilt(
     process.stderr.write(
       `[claude-net] ${destRel} bundle build failed: ${result.stderr ?? result.stdout}\n`,
     );
+    if (existsSync(dest)) {
+      process.stderr.write(
+        `[claude-net] serving the pre-built ${destRel} instead\n`,
+      );
+      bundlesBuilt.add(cacheKey);
+      return true;
+    }
     return false;
   }
   if (commitHash) {
     const bundle = readFileSync(dest, "utf8");
     writeFileSync(dest, substituteBuildHash(bundle, commitHash));
   }
-  bundlesBuilt.add(destRel);
+  bundlesBuilt.add(cacheKey);
   return true;
 }
 

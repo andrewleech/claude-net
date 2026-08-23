@@ -2024,6 +2024,13 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     },
   ): void {
     if (!session.ws) return;
+    // Carry the turn's age as a duration alongside the raw start time. The
+    // subtraction happens here, where both operands come from this host's
+    // clock; a viewer on another machine cannot do it correctly.
+    const elapsedMs =
+      payload.startedAt !== undefined
+        ? Math.max(0, Date.now() - payload.startedAt)
+        : undefined;
     const frame = {
       action: "mirror_thinking" as const,
       sid: session.sid,
@@ -2031,6 +2038,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       ...(payload.startedAt !== undefined
         ? { startedAt: payload.startedAt }
         : {}),
+      ...(elapsedMs !== undefined ? { elapsed_ms: elapsedMs } : {}),
       ...(payload.tool !== undefined ? { tool: payload.tool } : {}),
     };
     session.ws.send(JSON.stringify(frame));

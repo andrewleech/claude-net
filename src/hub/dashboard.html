@@ -8004,10 +8004,20 @@
     }
 
     var thinkingEl = document.getElementById('mirror-thinking');
-    // Turn state is pushed once per transition; the elapsed-seconds
-    // counter is ticked client-side off startedAt so we don't need
-    // per-second network traffic.
-    var thinkingState = { active: false, startedAt: 0, tool: null };
+    // Turn state is pushed once per transition; the elapsed-seconds counter
+    // is ticked locally between frames so there's no per-second traffic.
+    //
+    // The agent sends the turn's age as a duration (elapsed_ms) rather than
+    // us subtracting its startedAt from our own clock: those are different
+    // machines, and one whose time is off by seconds would make the counter
+    // read wrong by that much — differently per host, so moving between
+    // sessions looks like the number jumping around. We anchor on the
+    // duration plus our own time since the frame arrived, which keeps every
+    // subtraction inside one clock.
+    //
+    // startedAt is the fallback for an agent too old to send elapsed_ms;
+    // it carries that host's skew, which is the behaviour being replaced.
+    var thinkingState = { active: false, baseMs: 0, anchoredAt: 0, tool: null };
     var thinkingTicker = null;
     function renderThinking() {
       if (!thinkingEl) return;
@@ -8016,16 +8026,23 @@
         thinkingEl.textContent = '';
         return;
       }
-      var secs = Math.max(0, Math.floor((Date.now() - thinkingState.startedAt) / 1000));
+      var ms = thinkingState.baseMs + (Date.now() - thinkingState.anchoredAt);
+      var secs = Math.max(0, Math.floor(ms / 1000));
       var verb = thinkingState.tool ? 'Running ' + thinkingState.tool : 'Thinking';
       thinkingEl.textContent = '✻ ' + verb + ' for ' + secs + 's';
       thinkingEl.classList.add('is-active');
     }
-    function updateThinkingIndicator(active, startedAt, tool) {
+    function updateThinkingIndicator(active, startedAt, tool, elapsedMs) {
       thinkingState.active = !!active;
       thinkingState.tool = typeof tool === 'string' ? tool : null;
       if (active) {
-        if (typeof startedAt === 'number') thinkingState.startedAt = startedAt;
+        if (typeof elapsedMs === 'number' && isFinite(elapsedMs)) {
+          thinkingState.baseMs = Math.max(0, elapsedMs);
+          thinkingState.anchoredAt = Date.now();
+        } else if (typeof startedAt === 'number') {
+          thinkingState.baseMs = Math.max(0, Date.now() - startedAt);
+          thinkingState.anchoredAt = Date.now();
+        }
         if (!thinkingTicker) thinkingTicker = setInterval(renderThinking, 1000);
       } else {
         if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
@@ -8363,7 +8380,7 @@
         try { msg = JSON.parse(e.data); } catch { return; }
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
-        else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool);
+        else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.startedAt, msg.tool, msg.elapsed_ms);
         else if (msg.event === 'mirror:statusline') renderStatusline(msg);
         else if (msg.event === 'mirror:history_chunk') {
           historyInflight = false;

@@ -211,8 +211,24 @@ export interface MirrorThinkingFrame {
   action: "mirror_thinking";
   sid: string;
   active: boolean;
-  /** ISO-ish epoch ms timestamp when the current turn started. */
+  /**
+   * Epoch ms when the turn started, on the agent host's clock. Only
+   * meaningful to that host — see `elapsed_ms`, which is what a viewer
+   * should render.
+   */
   startedAt?: number;
+  /**
+   * How long the turn had been running when this frame was emitted,
+   * measured entirely on the agent host.
+   *
+   * A viewer cannot subtract `startedAt` from its own clock: the two are
+   * different machines, and a host whose time is off by seconds makes the
+   * elapsed counter read wrong by that much — differently per host, so
+   * moving between sessions appears to jump. Sending a duration instead
+   * keeps the subtraction inside one clock domain; the viewer adds its own
+   * time since receipt, which only costs it the one-way network latency.
+   */
+  elapsed_ms?: number;
   /** Tool name if a tool is currently running, else null. */
   tool?: string | null;
 }

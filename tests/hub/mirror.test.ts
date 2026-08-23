@@ -2314,6 +2314,70 @@ describe("parseTaskNotification", () => {
   });
 });
 
+describe("broadcastThinking", () => {
+  let reg: MirrorRegistry;
+
+  beforeEach(() => {
+    reg = new MirrorRegistry({ transcriptRing: 10, retentionMs: 0 });
+  });
+
+  function watch(sid: string): Record<string, unknown>[] {
+    const seen: Record<string, unknown>[] = [];
+    reg.addWatcher(sid, {
+      id: "w1",
+      wsIdentity: {},
+      ws: {
+        send: (raw: string) => {
+          seen.push(JSON.parse(raw) as Record<string, unknown>);
+        },
+      },
+    });
+    return seen;
+  }
+
+  test("relays elapsed_ms so a viewer never subtracts across clocks", () => {
+    // The agent measures the turn's age on its own host; a viewer adding
+    // its time since receipt keeps the arithmetic in one clock domain.
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const seen = watch(r.entry.sid);
+    reg.broadcastThinking(r.entry.sid, {
+      active: true,
+      startedAt: 1_000,
+      elapsed_ms: 4_500,
+      tool: "Bash",
+    });
+    const msg = seen.find((m) => m.event === "mirror:thinking");
+    expect(msg).toBeDefined();
+    expect(msg?.elapsed_ms).toBe(4_500);
+    expect(msg?.startedAt).toBe(1_000);
+    expect(msg?.tool).toBe("Bash");
+  });
+
+  test("omits elapsed_ms when the agent did not send one", () => {
+    // An older agent sends only startedAt; the field must be absent
+    // rather than null so the viewer's fallback branch is taken.
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const seen = watch(r.entry.sid);
+    reg.broadcastThinking(r.entry.sid, { active: true, startedAt: 1_000 });
+    const msg = seen.find((m) => m.event === "mirror:thinking");
+    expect(msg).toBeDefined();
+    expect("elapsed_ms" in (msg ?? {})).toBe(false);
+  });
+
+  test("a turn-end frame carries neither timing field", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const seen = watch(r.entry.sid);
+    reg.broadcastThinking(r.entry.sid, { active: false });
+    const msg = seen.find((m) => m.event === "mirror:thinking");
+    expect(msg?.active).toBe(false);
+    expect("elapsed_ms" in (msg ?? {})).toBe(false);
+    expect("startedAt" in (msg ?? {})).toBe(false);
+  });
+});
+
 describe("MirrorRegistry background activity state", () => {
   let reg: MirrorRegistry;
 

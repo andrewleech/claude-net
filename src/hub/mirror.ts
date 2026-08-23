@@ -2119,7 +2119,12 @@ export class MirrorRegistry {
    *  watchers. Not stored in the transcript; purely live-view signal. */
   broadcastThinking(
     sid: string,
-    payload: { active: boolean; startedAt?: number; tool?: string | null },
+    payload: {
+      active: boolean;
+      startedAt?: number;
+      elapsed_ms?: number;
+      tool?: string | null;
+    },
   ): void {
     const entry = this.entryBySid(sid);
     if (!entry) return;
@@ -2129,6 +2134,9 @@ export class MirrorRegistry {
       active: payload.active,
       ...(typeof payload.startedAt === "number"
         ? { startedAt: payload.startedAt }
+        : {}),
+      ...(typeof payload.elapsed_ms === "number"
+        ? { elapsed_ms: payload.elapsed_ms }
         : {}),
       ...(payload.tool !== undefined ? { tool: payload.tool } : {}),
     });
@@ -3228,6 +3236,8 @@ export function wsMirrorPlugin(
           active: Boolean(frame.active),
           startedAt:
             typeof frame.startedAt === "number" ? frame.startedAt : undefined,
+          elapsed_ms:
+            typeof frame.elapsed_ms === "number" ? frame.elapsed_ms : undefined,
           tool: typeof frame.tool === "string" ? frame.tool : null,
         });
       } else if (

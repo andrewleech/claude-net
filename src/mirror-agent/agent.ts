@@ -1634,6 +1634,14 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       void handleStop(session, watcher).catch((err: unknown) => {
         log(`[${session.sid}] stop handler threw: ${String(err)}`);
       });
+    } else if (data.event === "mirror_terminate") {
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      void terminateSession(session, watcher).catch((err: unknown) => {
+        log(`[${session.sid}] terminate handler threw: ${String(err)}`);
+      });
     } else if (data.event === "mirror_keys") {
       const watcher =
         typeof data.origin?.watcher === "string"
@@ -2148,6 +2156,45 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       /* best effort */
     });
     sessions.delete(session.sid);
+  }
+
+  /**
+   * End the session's Claude Code outright, requested from the dashboard
+   * for sessions the user is done with - otherwise the process idles in
+   * a forgotten tmux pane indefinitely. SIGTERM first so Claude Code can
+   * exit cleanly and fire SessionEnd (which closes the session through
+   * the normal path); SIGKILL is the backstop for a process that ignores
+   * it. The pane kill then removes the leftover shell - a last pane takes
+   * its window with it, and a single-window tmux session ends too.
+   */
+  async function terminateSession(
+    session: SessionState,
+    watcher: string,
+  ): Promise<void> {
+    log(`[${session.sid}] terminate requested by ${watcher}`);
+    const pane = session.tmuxPane;
+    const pid = session.ccPid;
+    if (pid !== null) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already gone
+      }
+      await sleep(2_000);
+      try {
+        process.kill(pid, 0);
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // exited on SIGTERM
+      }
+    }
+    if (pane) {
+      const r = await injector.killPane(pane);
+      if (!r.ok) {
+        log(`[${session.sid}] kill-pane ${pane} failed: ${r.error}`);
+      }
+    }
+    if (!session.closed) closeSession(session, "terminated");
   }
 
   /**

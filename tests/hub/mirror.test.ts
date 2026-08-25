@@ -189,6 +189,51 @@ describe("MirrorRegistry", () => {
     expect(sent.some((s) => s.startsWith("desktop:"))).toBe(false);
   });
 
+  test("relayTerminate sends a mirror_terminate frame to the bound agent", () => {
+    const sent: string[] = [];
+    reg.createSession("t:u@h", "/t", "sid-term", "laptop", 7);
+    reg.setAgentConnection(
+      "sid-term",
+      {
+        ws: { send: (s: string) => sent.push(s) },
+        wsIdentity: {},
+        close: () => {},
+      },
+      "laptop",
+    );
+    const r = reg.relayTerminate("sid-term", "web", "laptop");
+    expect(r.ok).toBe(true);
+    const frame = JSON.parse(sent[0] ?? "{}");
+    expect(frame.event).toBe("mirror_terminate");
+    expect(frame.sid).toBe("sid-term");
+    expect(frame.origin?.watcher).toBe("web");
+  });
+
+  test("relayTerminate refuses unbound and closed sessions", () => {
+    // Own registry with a retention window so the closed entry stays
+    // resolvable as a gravestone (409) instead of vanishing (404).
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      quick.createSession("t2:u@h", "/t2", "sid-term-2", "laptop", 8);
+      // No agent bound: nothing on the host can act on the request.
+      const unbound = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(unbound.ok).toBe(false);
+      if (!unbound.ok) expect(unbound.status).toBe(503);
+      // Closed: there is no process left to signal.
+      quick.closeSession("sid-term-2", "exit", "laptop");
+      const closed = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(closed.ok).toBe(false);
+      if (!closed.ok) expect(closed.status).toBe(409);
+    } finally {
+      quick.stop();
+    }
+  });
+
   test("createSession keeps the existing owner on a same-sid re-POST (no relabel, no 409)", () => {
     // A re-POST for an existing (host, sid) is the same session — accepted
     // as an idempotent keep-alive regardless of the incoming owner or

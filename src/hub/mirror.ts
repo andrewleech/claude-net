@@ -17,6 +17,7 @@ import type {
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorStopFrame,
+  MirrorTerminateFrame,
   ScheduledInjectInfo,
   ScheduledInjectStatus,
   SidSource,
@@ -1657,6 +1658,43 @@ export class MirrorRegistry {
     return { ok: true };
   }
 
+  /** Relay a terminate request to the session's agent: end the Claude
+   *  Code process and remove its tmux pane. Fire and forget - the close
+   *  flows back through the agent's normal close path once the process
+   *  is gone. */
+  relayTerminate(
+    sid: string,
+    watcher: string,
+    host?: string,
+  ): { ok: true } | { ok: false; error: string; status: number } {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is already closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const frame: MirrorTerminateFrame = {
+      event: "mirror_terminate",
+      sid,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true };
+  }
+
   /**
    * Stash a blob too large for tmux inject as a file on the agent's host.
    * Sends a MirrorPasteFrame and awaits the agent's MirrorPasteDoneFrame
@@ -2374,6 +2412,44 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         // entry.
         mirrorRegistry.closeSession(params.sid, "exit", found.entry.host);
         return { closed: true };
+      })
+
+      /**
+       * POST /:sid/terminate - end the session's Claude Code outright.
+       * Relays to the mirror-agent, which SIGTERMs the process (SIGKILL
+       * as backstop) and removes its tmux pane. The session close itself
+       * flows back through the normal SessionEnd / close path once the
+       * process exits, so this returns "accepted", not "closed".
+       */
+      .post("/:sid/terminate", ({ params, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const watcher = sanitizeWatcher(
+          request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayTerminate(params.sid, watcher, host);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true };
+      })
+
+      /**
+       * POST /:sid/forget - drop a session from the registry immediately,
+       * skipping the retention window. For closed gravestones the user is
+       * done with; on a still-open entry it also force-closes any bound
+       * agent WS (the daemon then recovers and re-creates, so the UI only
+       * offers this on closed rows).
+       */
+      .post("/:sid/forget", ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        mirrorRegistry.closeAndDrop(params.sid, "exit", found.entry.host);
+        return { removed: true };
       })
 
       /**

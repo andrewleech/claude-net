@@ -4197,6 +4197,46 @@
       cnToast('Reconnect failed: ' + (err && err.message ? err.message : 'network error'), 'err');
     });
   }
+  function terminateSession(sid, host, label) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    cnToast('Closing ' + (label || sid) + '…', '');
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/terminate' + q, {
+      method: 'POST',
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        cnToast('Close signal sent - the row ends once the process exits.', 'ok');
+      } else {
+        cnToast('Close failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Close failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
+  function forgetSession(sid, host, label) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/forget' + q, {
+      method: 'POST',
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        // Drop the row locally too - the hub deleted its entry, so no
+        // session_ended broadcast will follow for dashboards that already
+        // saw this sid as closed.
+        mirrorBySid.forEach(function(s, key) {
+          if (s.sid === sid && (!host || s.host === host)) mirrorBySid.delete(key);
+        });
+        renderAgentsDebounced();
+        cnToast('Removed ' + (label || sid) + ' from the list.', 'ok');
+      } else {
+        cnToast('Remove failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Remove failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text)
@@ -4283,7 +4323,21 @@
         closeCtxMenu();
         reconnectSession(sid, host, label);
       });
-      if (!dead) addCtxNote(cnCtxMenu, 'session appears live');
+      if (dead) {
+        // Gravestone: the process is already gone, just drop the row
+        // instead of waiting out the retention window.
+        addCtxItem(cnCtxMenu, '✕ Remove from list', function() {
+          closeCtxMenu();
+          forgetSession(sid, host, label);
+        });
+      } else {
+        addCtxItem(cnCtxMenu, '✕ Close session', function() {
+          closeCtxMenu();
+          if (!window.confirm('Close ' + label + '? This ends its Claude Code process and removes its tmux pane (if it has one).')) return;
+          terminateSession(sid, host, label);
+        });
+        addCtxNote(cnCtxMenu, 'session appears live');
+      }
     } else if (cwd && hostId) {
       // Registered agent with no mirror session (e.g. launched outside
       // claude-channels) — relaunch in its cwd to get a mirrored session.

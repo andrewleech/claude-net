@@ -473,6 +473,18 @@ export interface MirrorControlFrame {
   op: "pause" | "resume" | "close";
 }
 
+/**
+ * Hub → agent request to end the session's Claude Code outright: SIGTERM
+ * the process (SIGKILL as backstop) and remove its tmux pane, so a
+ * forgotten session doesn't idle in tmux forever. Fire and forget - the
+ * session close flows back through the normal SessionEnd / close path.
+ */
+export interface MirrorTerminateFrame {
+  event: "mirror_terminate";
+  sid: string;
+  origin: { watcher: string; ts: number };
+}
+
 export type HubFrame =
   | ResponseFrame
   | InboundMessageFrame
@@ -485,7 +497,8 @@ export type HubFrame =
   | MirrorHistoryRequestFrame
   | MirrorStopFrame
   | MirrorKeysFrame
-  | MirrorControlFrame;
+  | MirrorControlFrame
+  | MirrorTerminateFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────
 

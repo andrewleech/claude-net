@@ -189,6 +189,51 @@ describe("MirrorRegistry", () => {
     expect(sent.some((s) => s.startsWith("desktop:"))).toBe(false);
   });
 
+  test("relayTerminate sends a mirror_terminate frame to the bound agent", () => {
+    const sent: string[] = [];
+    reg.createSession("t:u@h", "/t", "sid-term", "laptop", 7);
+    reg.setAgentConnection(
+      "sid-term",
+      {
+        ws: { send: (s: string) => sent.push(s) },
+        wsIdentity: {},
+        close: () => {},
+      },
+      "laptop",
+    );
+    const r = reg.relayTerminate("sid-term", "web", "laptop");
+    expect(r.ok).toBe(true);
+    const frame = JSON.parse(sent[0] ?? "{}");
+    expect(frame.event).toBe("mirror_terminate");
+    expect(frame.sid).toBe("sid-term");
+    expect(frame.origin?.watcher).toBe("web");
+  });
+
+  test("relayTerminate refuses unbound and closed sessions", () => {
+    // Own registry with a retention window so the closed entry stays
+    // resolvable as a gravestone (409) instead of vanishing (404).
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      quick.createSession("t2:u@h", "/t2", "sid-term-2", "laptop", 8);
+      // No agent bound: nothing on the host can act on the request.
+      const unbound = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(unbound.ok).toBe(false);
+      if (!unbound.ok) expect(unbound.status).toBe(503);
+      // Closed: there is no process left to signal.
+      quick.closeSession("sid-term-2", "exit", "laptop");
+      const closed = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(closed.ok).toBe(false);
+      if (!closed.ok) expect(closed.status).toBe(409);
+    } finally {
+      quick.stop();
+    }
+  });
+
   test("createSession keeps the existing owner on a same-sid re-POST (no relabel, no 409)", () => {
     // A re-POST for an existing (host, sid) is the same session — accepted
     // as an idempotent keep-alive regardless of the incoming owner or
@@ -1767,6 +1812,121 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(reopen.restored).toBe(true);
       expect(reopen.entry.closedAt).toBe(null);
       expect(reopen.entry.ccPid).toBe(222);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession refuses to reopen a closed sid on an mtime guess from a different pid", () => {
+    // The revival bug: a fresh Claude Code starts in a directory whose
+    // previous session already ended, the daemon's newest-mtime scan
+    // finds the dead session's transcript, and the re-POST would
+    // resurrect its gravestone relabelled onto the new process.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "dead-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("dead-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "dead-sid",
+        "hostA",
+        222,
+        "mtime",
+      );
+      expect(reopen.ok).toBe(false);
+      const after = quick.getSession("dead-sid", "hostA");
+      expect(after.ok).toBe(true);
+      if (after.ok) expect(after.entry.closedAt).not.toBe(null);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession reopens a closed sid on an mtime re-POST from the SAME pid", () => {
+    // The same process re-asserting its own session (daemon restart
+    // rediscovery) is fine however weak the sid evidence is - the pid
+    // match is the identity proof.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "same-pid-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("same-pid-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "same-pid-sid",
+        "hostA",
+        111,
+        "mtime",
+      );
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession reopens a closed sid from a different pid with strong evidence", () => {
+    // POST /:sid/reconnect relaunches `claude --resume <sid>`: new pid,
+    // but the sid is named on the command line, which is authoritative.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "resumed-strong-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("resumed-strong-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "resumed-strong-sid",
+        "hostA",
+        333,
+        "cmdline",
+      );
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+      expect(reopen.entry.ccPid).toBe(333);
     } finally {
       quick.stop();
     }

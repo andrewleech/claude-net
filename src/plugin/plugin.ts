@@ -345,17 +345,194 @@ export interface DiscoveredSession {
 }
 
 /**
- * Locate the most recently-modified JSONL transcript for the given cwd
- * under ~/.claude/projects/<encoded>/. Returns null when the dir is
- * absent, empty, or unreadable. The filename's UUID portion is the
- * session_id Claude Code uses for this session.
+ * Argv of a process, from /proc/<pid>/cmdline (NUL-separated). Returns
+ * null when unreadable (process gone, no permission, non-Linux).
+ * Mirrors the mirror-agent helper of the same name.
+ */
+function readCmdlineArgs(pid: number): string[] | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return null;
+  }
+  return raw.split("\0").filter((a) => a.length > 0);
+}
+
+/**
+ * Extract an explicit session id from a command line (`--resume`/`-r`,
+ * `--session-id`). `--fork-session` disqualifies the id on the command
+ * line: it names the session being forked FROM, not this process's.
+ */
+function sidFromCmdlineArgs(args: string[] | null): string | null {
+  if (!args) return null;
+  if (args.includes("--fork-session")) return null;
+  for (let i = 0; i < args.length - 1; i++) {
+    const flag = args[i];
+    if (flag === "--resume" || flag === "-r" || flag === "--session-id") {
+      const candidate = args[i + 1];
+      if (candidate && /^[0-9a-f-]{32,40}$/i.test(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/** True when the command line declares `--continue`/`-c`, whose semantics
+ *  are exactly "adopt the newest transcript in this cwd". */
+function cmdlineHasContinueFlag(args: string[] | null): boolean {
+  if (!args) return false;
+  if (args.includes("--fork-session")) return false;
+  return args.includes("--continue") || args.includes("-c");
+}
+
+/**
+ * True when `exe` (the target of /proc/<pid>/exe) looks like a Claude
+ * Code binary. Mirrors the mirror-agent helper of the same name.
+ */
+function isClaudeCodeExe(exe: string): boolean {
+  return (
+    /\/claude\/versions\//.test(exe) ||
+    /\/claude$/.test(exe) ||
+    /\/cc-patcher\/claude-patched/.test(exe) ||
+    /\/claude-channels\/claude-patched/.test(exe)
+  );
+}
+
+/**
+ * Count live Claude Code processes whose cwd is exactly `cwd`. Linux
+ * only; returns 0 when /proc can't be listed, which callers treat as
+ * "can't tell". Mirrors the mirror-agent helper of the same name.
+ */
+function countLiveCcProcessesForCwd(cwd: string): number {
+  let pidDirs: string[];
+  try {
+    pidDirs = fs.readdirSync("/proc");
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const dirName of pidDirs) {
+    if (!/^\d+$/.test(dirName)) continue;
+    let exe: string;
+    try {
+      exe = fs.readlinkSync(`/proc/${dirName}/exe`);
+    } catch {
+      continue;
+    }
+    if (!isClaudeCodeExe(exe)) continue;
+    let pcwd: string;
+    try {
+      pcwd = fs.readlinkSync(`/proc/${dirName}/cwd`);
+    } catch {
+      continue;
+    }
+    if (pcwd === cwd) count++;
+  }
+  return count;
+}
+
+/**
+ * The transcript JSONL under `projectDir` that process `ccPid` currently
+ * holds open, via /proc/<pid>/fd. Returns null on non-Linux, a dead pid,
+ * or when the process holds no matching fd at this instant. Mirrors the
+ * mirror-agent helper of the same name.
+ */
+function findOpenJsonlForPid(
+  ccPid: number,
+  projectDir: string,
+): DiscoveredSession | null {
+  if (!Number.isFinite(ccPid) || ccPid <= 0) return null;
+  let fds: string[];
+  try {
+    fds = fs.readdirSync(`/proc/${ccPid}/fd`);
+  } catch {
+    return null;
+  }
+  let canonicalDir = projectDir;
+  try {
+    canonicalDir = fs.realpathSync(projectDir);
+  } catch {
+    // dir may not exist yet; fall back to the literal path.
+  }
+  let best: DiscoveredSession | null = null;
+  let bestMtime = -1;
+  for (const fd of fds) {
+    let target: string;
+    try {
+      target = fs.readlinkSync(path.join(`/proc/${ccPid}/fd`, fd));
+    } catch {
+      continue;
+    }
+    if (!target.endsWith(".jsonl")) continue;
+    if (path.dirname(target) !== canonicalDir) continue;
+    const sessionId = path.basename(target).slice(0, -".jsonl".length);
+    if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) continue;
+    let mtime: number;
+    try {
+      mtime = fs.statSync(target).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (mtime > bestMtime) {
+      bestMtime = mtime;
+      best = { sessionId, transcriptPath: target };
+    }
+  }
+  return best;
+}
+
+/**
+ * Epoch ms at which a process started, from /proc/<pid>/stat field 22
+ * (starttime, in USER_HZ = 100 ticks since boot) plus /proc/stat's
+ * btime. Returns null when either file is unreadable or unparsable.
+ * Mirrors the mirror-agent helper of the same name.
+ */
+function processStartMs(pid: number): number | null {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const fields = stat.slice(close + 2).split(" ");
+    const startTicks = Number(fields[19]);
+    if (!Number.isFinite(startTicks)) return null;
+    const btimeLine = fs
+      .readFileSync("/proc/stat", "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("btime "));
+    if (!btimeLine) return null;
+    const btime = Number(btimeLine.slice("btime ".length).trim());
+    if (!Number.isFinite(btime)) return null;
+    return btime * 1000 + (startTicks / 100) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the transcript JSONL (and so the session_id) for the Claude
+ * Code process `ccPid` running in `cwd`. Progressively weaker signals,
+ * abstaining rather than guessing (mirrors the mirror-agent helper of
+ * the same name):
  *
- * `ccPid` is currently unused but kept on the signature so a future
- * refinement (e.g. /proc/<pid>/fd scan on Linux) can land without
- * touching call sites. Mirrors the mirror-agent helper of the same name.
+ *   1. An explicit `--resume <uuid>` / `--session-id <uuid>` on the
+ *      process's own command line. Authoritative.
+ *   2. The transcript the process actually holds open (/proc fd scan).
+ *   3. Newest-mtime file in the project dir, but only when no other
+ *      live Claude Code shares the cwd AND the file was written after
+ *      this process started (`--continue` bypasses the age comparison:
+ *      adopting the newest transcript is its documented behaviour).
+ *      A transcript older than the process belongs to an earlier
+ *      session; adopting it would resurrect that session's identity
+ *      (name, /rename title) onto this fresh one.
+ *
+ * All /proc reads degrade to null/0 off Linux, where only the mtime
+ * scan remains, matching this function's original behaviour.
  */
 export function findActiveSessionForCcPid(
-  _ccPid: number,
+  ccPid: number,
   cwd: string,
   home: string = os.homedir(),
 ): DiscoveredSession | null {
@@ -372,6 +549,21 @@ export function findActiveSessionForCcPid(
   } catch {
     return null;
   }
+
+  const args = readCmdlineArgs(ccPid);
+  const cmdlineSid = sidFromCmdlineArgs(args);
+  if (cmdlineSid && entries.includes(`${cmdlineSid}.jsonl`)) {
+    return {
+      sessionId: cmdlineSid,
+      transcriptPath: path.join(projectDir, `${cmdlineSid}.jsonl`),
+    };
+  }
+
+  const held = findOpenJsonlForPid(ccPid, projectDir);
+  if (held) return held;
+
+  if (countLiveCcProcessesForCwd(cwd) >= 2) return null;
+
   let best: { name: string; mtimeMs: number } | null = null;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
@@ -385,6 +577,10 @@ export function findActiveSessionForCcPid(
     }
   }
   if (!best) return null;
+  if (!cmdlineHasContinueFlag(args)) {
+    const startedAt = processStartMs(ccPid);
+    if (startedAt !== null && best.mtimeMs < startedAt) return null;
+  }
   const sessionId = best.name.slice(0, -".jsonl".length);
   if (!/^[0-9a-f-]{32,40}$/i.test(sessionId)) return null;
   return {
@@ -1637,15 +1833,33 @@ export class Plugin {
    * stat the file once and only read when it grew.
    */
   private startRenameWatch(): void {
-    if (!this.transcriptPath) return;
-    let lastSize = 0;
-    try {
-      lastSize = fs.statSync(this.transcriptPath).size;
-    } catch {
-      // file gone between resolveInitialName and here — skip the watch
-      return;
+    let lastSize = -1;
+    if (this.transcriptPath) {
+      try {
+        lastSize = fs.statSync(this.transcriptPath).size;
+      } catch {
+        // file gone between resolveInitialName and here; the timer's
+        // stat below keeps retrying.
+      }
     }
     this.renameWatchTimer = setInterval(() => {
+      if (!this.transcriptPath) {
+        // Fresh session: no transcript existed at startup, and discovery
+        // abstained rather than adopt an older session's file. Keep
+        // retrying until Claude Code writes this session's own JSONL,
+        // then bind the rename watch and name persistence to it.
+        const found = findActiveSessionForCcPid(
+          process.ppid,
+          this.discoveredCwd || process.cwd(),
+        );
+        if (!found) return;
+        this.discoveredSid = found.sessionId;
+        this.transcriptPath = found.transcriptPath;
+        log(`Late-discovered session transcript (sid=${this.discoveredSid})`);
+        // Persist the current name against the real sid so a later
+        // /mcp reconnect restores it.
+        if (this.registeredName) this.persistName(this.registeredName);
+      }
       let size: number;
       try {
         size = fs.statSync(this.transcriptPath).size;

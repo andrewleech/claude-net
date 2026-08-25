@@ -32,6 +32,32 @@ describe("ingestHook", () => {
     });
   });
 
+  test("SessionEnd → session_end payload, /clear reason preserved", () => {
+    const out = ingestHook({
+      hook_event_name: "SessionEnd",
+      session_id: "s-1",
+      reason: "clear",
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.kind).toBe("session_end");
+    expect(out.frame.payload).toEqual({ kind: "session_end", reason: "clear" });
+  });
+
+  test("SessionEnd collapses non-clear reasons to 'exit'", () => {
+    for (const reason of ["logout", "prompt_input_exit", "other", undefined]) {
+      const out = ingestHook({
+        hook_event_name: "SessionEnd",
+        session_id: "s-1",
+        ...(reason ? { reason } : {}),
+      });
+      expect(out?.frame.payload).toEqual({
+        kind: "session_end",
+        reason: "exit",
+      });
+    }
+  });
+
   test("SessionStart coerces invalid source to 'startup'", () => {
     const out = ingestHook({
       hook_event_name: "SessionStart",

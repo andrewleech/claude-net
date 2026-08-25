@@ -152,6 +152,15 @@ function hookToPayload(
         cwd: stringField(p.cwd) ?? "",
       };
 
+    case "SessionEnd":
+      // Claude Code reports reasons like "clear", "logout",
+      // "prompt_input_exit", "other". Everything that isn't a /clear
+      // rotation collapses to "exit" for the wire payload.
+      return {
+        kind: "session_end",
+        reason: stringField(p.reason) === "clear" ? "clear" : "exit",
+      };
+
     case "UserPromptSubmit": {
       const { value, truncated } = clamp(stringField(p.prompt) ?? "");
       return {

@@ -17,8 +17,10 @@ import type {
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorStopFrame,
+  MirrorTerminateFrame,
   ScheduledInjectInfo,
   ScheduledInjectStatus,
+  SidSource,
 } from "@/shared/types";
 
 interface SlashCommand {
@@ -37,9 +39,19 @@ import type { Scheduler } from "./scheduler";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const INIT_TRANSCRIPT_WINDOW = 200;
+
+/** Accepted `sid_source` values on POST /api/mirror/session. Anything
+ *  else (or nothing, from pre-rollout daemons) is treated as unknown. */
+const VALID_SID_SOURCES: ReadonlySet<SidSource> = new Set([
+  "hook",
+  "cmdline",
+  "fd",
+  "index",
+  "mtime",
+]);
 /**
  * How long a closed session stays in the registry's in-memory map before
- * being dropped. Default 1 hour — long enough for the user to revisit a
+ * being dropped. Default 6 hours — long enough for the user to revisit a
  * transcript after close, short enough that orphan-swept gravestones
  * don't accumulate in the dashboard sidebar. Closed sessions stay listed
  * (dimmed, offline) for this long so they remain reconnectable from the
@@ -1036,6 +1048,7 @@ export class MirrorRegistry {
     sid?: string,
     host = "",
     ccPid: number | null = null,
+    sidSource?: SidSource,
   ):
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
@@ -1070,8 +1083,27 @@ export class MirrorRegistry {
         // old agent's shutdown sent a /close before the new agent had
         // the chance to reclaim the session, and after
         // POST /:sid/reconnect relaunches `claude --resume <sid>` under a
-        // new pid. Reopening unconditionally is what makes both paths
-        // work; the sid itself is the identity on a trusted network.
+        // new pid (the relaunch names the sid on its command line, so the
+        // daemon re-POSTs with strong evidence).
+        //
+        // The one refusal: a newest-mtime guess from a different pid.
+        // That is exactly the shape of a fresh Claude Code starting in a
+        // directory whose previous session already ended - the daemon's
+        // scan finds the dead session's transcript and would resurrect
+        // its gravestone here, relabelled onto the new process. The same
+        // pid re-asserting its own session is fine (mtime or not);
+        // clients that predate sid_source keep the old reopen behaviour.
+        if (
+          sidSource === "mtime" &&
+          ccPid !== null &&
+          existing.ccPid !== null &&
+          ccPid !== existing.ccPid
+        ) {
+          return {
+            ok: false,
+            error: `Session '${actualSid}' is closed; a newest-mtime scan from a different pid is not enough evidence to reopen it.`,
+          };
+        }
         existing.closedAt = null;
         if (existing.retentionTimerId) {
           clearTimeout(existing.retentionTimerId);
@@ -1611,6 +1643,43 @@ export class MirrorRegistry {
       };
     const frame: MirrorStopFrame = {
       event: "mirror_stop",
+      sid,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** Relay a terminate request to the session's agent: end the Claude
+   *  Code process and remove its tmux pane. Fire and forget - the close
+   *  flows back through the agent's normal close path once the process
+   *  is gone. */
+  relayTerminate(
+    sid: string,
+    watcher: string,
+    host?: string,
+  ): { ok: true } | { ok: false; error: string; status: number } {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is already closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const frame: MirrorTerminateFrame = {
+      event: "mirror_terminate",
       sid,
       origin: { watcher, ts: Date.now() },
     };
@@ -2217,6 +2286,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           sid?: string;
           host?: string;
           cc_pid?: number | null;
+          sid_source?: string;
         };
         if (!payload.owner_agent || !payload.cwd) {
           set.status = 400;
@@ -2255,12 +2325,16 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           typeof payload.cc_pid === "number" && Number.isFinite(payload.cc_pid)
             ? payload.cc_pid
             : null;
+        const sidSource = VALID_SID_SOURCES.has(payload.sid_source as SidSource)
+          ? (payload.sid_source as SidSource)
+          : undefined;
         const result = mirrorRegistry.createSession(
           payload.owner_agent,
           payload.cwd,
           payload.sid,
           host,
           ccPid,
+          sidSource,
         );
         if (!result.ok) {
           set.status = 409;
@@ -2338,6 +2412,44 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         // entry.
         mirrorRegistry.closeSession(params.sid, "exit", found.entry.host);
         return { closed: true };
+      })
+
+      /**
+       * POST /:sid/terminate - end the session's Claude Code outright.
+       * Relays to the mirror-agent, which SIGTERMs the process (SIGKILL
+       * as backstop) and removes its tmux pane. The session close itself
+       * flows back through the normal SessionEnd / close path once the
+       * process exits, so this returns "accepted", not "closed".
+       */
+      .post("/:sid/terminate", ({ params, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const watcher = sanitizeWatcher(
+          request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayTerminate(params.sid, watcher, host);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true };
+      })
+
+      /**
+       * POST /:sid/forget - drop a session from the registry immediately,
+       * skipping the retention window. For closed gravestones the user is
+       * done with; on a still-open entry it also force-closes any bound
+       * agent WS (the daemon then recovers and re-creates, so the UI only
+       * offers this on closed rows).
+       */
+      .post("/:sid/forget", ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        mirrorRegistry.closeAndDrop(params.sid, "exit", found.entry.host);
+        return { removed: true };
       })
 
       /**

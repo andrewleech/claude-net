@@ -19,6 +19,7 @@ import type {
   MirrorStopFrame,
   ScheduledInjectInfo,
   ScheduledInjectStatus,
+  SidSource,
 } from "@/shared/types";
 
 interface SlashCommand {
@@ -37,9 +38,19 @@ import type { Scheduler } from "./scheduler";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const INIT_TRANSCRIPT_WINDOW = 200;
+
+/** Accepted `sid_source` values on POST /api/mirror/session. Anything
+ *  else (or nothing, from pre-rollout daemons) is treated as unknown. */
+const VALID_SID_SOURCES: ReadonlySet<SidSource> = new Set([
+  "hook",
+  "cmdline",
+  "fd",
+  "index",
+  "mtime",
+]);
 /**
  * How long a closed session stays in the registry's in-memory map before
- * being dropped. Default 1 hour — long enough for the user to revisit a
+ * being dropped. Default 6 hours — long enough for the user to revisit a
  * transcript after close, short enough that orphan-swept gravestones
  * don't accumulate in the dashboard sidebar. Closed sessions stay listed
  * (dimmed, offline) for this long so they remain reconnectable from the
@@ -1036,6 +1047,7 @@ export class MirrorRegistry {
     sid?: string,
     host = "",
     ccPid: number | null = null,
+    sidSource?: SidSource,
   ):
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
@@ -1070,8 +1082,27 @@ export class MirrorRegistry {
         // old agent's shutdown sent a /close before the new agent had
         // the chance to reclaim the session, and after
         // POST /:sid/reconnect relaunches `claude --resume <sid>` under a
-        // new pid. Reopening unconditionally is what makes both paths
-        // work; the sid itself is the identity on a trusted network.
+        // new pid (the relaunch names the sid on its command line, so the
+        // daemon re-POSTs with strong evidence).
+        //
+        // The one refusal: a newest-mtime guess from a different pid.
+        // That is exactly the shape of a fresh Claude Code starting in a
+        // directory whose previous session already ended - the daemon's
+        // scan finds the dead session's transcript and would resurrect
+        // its gravestone here, relabelled onto the new process. The same
+        // pid re-asserting its own session is fine (mtime or not);
+        // clients that predate sid_source keep the old reopen behaviour.
+        if (
+          sidSource === "mtime" &&
+          ccPid !== null &&
+          existing.ccPid !== null &&
+          ccPid !== existing.ccPid
+        ) {
+          return {
+            ok: false,
+            error: `Session '${actualSid}' is closed; a newest-mtime scan from a different pid is not enough evidence to reopen it.`,
+          };
+        }
         existing.closedAt = null;
         if (existing.retentionTimerId) {
           clearTimeout(existing.retentionTimerId);
@@ -2217,6 +2248,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           sid?: string;
           host?: string;
           cc_pid?: number | null;
+          sid_source?: string;
         };
         if (!payload.owner_agent || !payload.cwd) {
           set.status = 400;
@@ -2255,12 +2287,16 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           typeof payload.cc_pid === "number" && Number.isFinite(payload.cc_pid)
             ? payload.cc_pid
             : null;
+        const sidSource = VALID_SID_SOURCES.has(payload.sid_source as SidSource)
+          ? (payload.sid_source as SidSource)
+          : undefined;
         const result = mirrorRegistry.createSession(
           payload.owner_agent,
           payload.cwd,
           payload.sid,
           host,
           ccPid,
+          sidSource,
         );
         if (!result.ok) {
           set.status = 409;

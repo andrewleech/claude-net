@@ -16,6 +16,7 @@ import type {
   MirrorEventFrame,
   MirrorKeyPart,
   MirrorStatuslineFrame,
+  SidSource,
 } from "@/shared/types";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
@@ -55,6 +56,10 @@ interface SessionState {
   /** PID of the Claude Code process that owns this session. null if the
    *  hook wrapper didn't supply it (pre-CC_PID rollout). */
   ccPid: number | null;
+  /** Evidence behind the sid, sent with every session POST so the hub
+   *  can refuse to reopen a closed session on a weak (mtime) guess.
+   *  Upgrades to "hook" the first time a hook names this sid. */
+  sidSource: SidSource;
   transcriptPath: string | null;
   ws: HubClient | null;
   seenUuids: Set<string>;
@@ -412,17 +417,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // Skip if a probe is in-flight or recently failed (cooldown).
       if (probeAttempts.shouldSkip(ccPid)) return;
       // Discover the CC's real session_id + transcript path from disk
-      // so the probe row converges with the hook-fired session. Without
-      // this the probe mints a fresh UUID and the dashboard ends up
-      // with two rows per CC — a placeholder probe row that never gets
-      // events, and a separate hook-created row that does.
+      // so the probe row converges with the hook-fired session. Only a
+      // confident discovery creates a session; anything weaker abstains
+      // below and defers to the CC's first hook.
       let discovered = findActiveSessionForCcPid(ccPid, cwd);
       // Guard the mtime-fallback collision: two CC processes in one cwd can
       // resolve to the same transcript. If the discovered sid is already
       // live-bound to a DIFFERENT pid, don't reuse it (that would silently
       // attach this pid to the other's session and leave this one
-      // unmirrored). Fall back to a fresh sid so this pid gets its own row;
-      // its next hook carries the real sid + transcript path.
+      // unmirrored).
       if (discovered) {
         const bound = sessions.get(discovered.sessionId);
         if (
@@ -434,6 +437,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           discovered = null;
         }
       }
+      // No confident sid → don't create anything. Minting a placeholder
+      // UUID here used to produce hub rows no hook could ever match:
+      // they sat open + agent-bound forever (the hub skips bound entries,
+      // this daemon saw a live pid) while the pid's real session went
+      // unmirrored. The CC's first hook names the true sid and creates
+      // the session properly; until then, absence is the honest state.
+      if (!discovered) {
+        probeAttempts.abstained(ccPid);
+        log(
+          `[probe] no confident sid for ccPid=${ccPid} cwd=${cwd}; waiting for a hook`,
+        );
+        return;
+      }
       // Also pull TMUX_PANE from the CC process's environ so probe-
       // created sessions can be inject targets without waiting for a
       // hook to bring TMUX_PANE through. Hooks remain the source of
@@ -441,13 +457,18 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       // hook handler's tmuxPane field — but the agent has the pane on
       // hand from session-open onwards instead of "until first hook".
       const tmuxPane = readTmuxPaneFromCcEnv(ccPid);
-      const sid = probeAttempts.begin(ccPid, discovered?.sessionId);
+      const sid = probeAttempts.begin(ccPid, discovered.sessionId);
       log(
-        `[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid}${
-          discovered ? " (from disk)" : ""
-        }${tmuxPane ? ` pane=${tmuxPane}` : ""}`,
+        `[probe] creating session for ccPid=${ccPid} cwd=${cwd} sid=${sid} (${discovered.source})${tmuxPane ? ` pane=${tmuxPane}` : ""}`,
       );
-      openSession(sid, cwd, discovered?.transcriptPath, tmuxPane, ccPid)
+      openSession(
+        sid,
+        cwd,
+        discovered.transcriptPath,
+        tmuxPane,
+        ccPid,
+        discovered.source,
+      )
         .then((session) => {
           if (session) {
             probeAttempts.succeeded(ccPid);
@@ -494,6 +515,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           c.transcriptPath,
           c.tmuxPane,
           c.ccPid,
+          c.source,
         );
       } catch (err) {
         log(
@@ -569,6 +591,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           closeSession(s, "orphan");
         }
         // EPERM means the process exists but we can't signal it — still alive.
+        continue;
+      }
+      // The pid answers, but pids recycle (fast on WSL2's small pid
+      // space): confirm it still names a Claude Code binary. An
+      // unreadable exe link (non-Linux, zombie) proves nothing, so only
+      // a positive it-is-something-else read closes the session.
+      try {
+        const exe = fs.readlinkSync(`/proc/${s.ccPid}/exe`);
+        if (!isClaudeCodeExe(exe)) {
+          closeSession(s, "orphan-pid-reused");
+        }
+      } catch {
+        // /proc unavailable or link unreadable - treat as alive.
       }
     }
     // Process-level idle shutdown.
@@ -723,12 +758,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     const sid = ingested.sid;
     let session = sessions.get(sid);
     if (!session) {
+      // A SessionEnd for a session this daemon isn't tracking has nothing
+      // to close - don't open a hub session just to end it, which would
+      // resurrect a gravestone for one frame.
+      if (ingested.frame.kind === "session_end") {
+        return new Response("ignored", { status: 202 });
+      }
       session = await openSession(
         sid,
         ingested.cwd,
         ingested.transcriptPath,
         ingested.tmuxPane,
         ingested.ccPid,
+        "hook",
       );
       if (!session) {
         return new Response("hub unavailable", { status: 503 });
@@ -778,6 +820,15 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
             session.pendingPidUpdate = false;
           });
       }
+    }
+
+    // A SessionEnd hook is a close signal, not transcript content. The
+    // hub synthesizes its own session_end marker inside closeSession, so
+    // forwarding this frame too would give watchers two "session ended"
+    // rows. Close and stop here.
+    if (ingested.frame.kind === "session_end") {
+      closeSession(session, "session-end-hook");
+      return new Response("ok", { status: 202 });
     }
 
     // /clear handling. A fresh session_id arrives for a Claude Code we
@@ -886,17 +937,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         onToolStart(session, toolName);
       } else if (ingested.frame.kind === "tool_result") {
         onToolEnd(session);
-      } else if (
-        ingested.frame.kind === "assistant_message" ||
-        ingested.frame.kind === "session_end"
-      ) {
+      } else if (ingested.frame.kind === "assistant_message") {
         onTurnEnd(session);
       }
-    }
-
-    // Close on session_end.
-    if (ingested.frame.kind === "session_end") {
-      closeSession(session, "event");
     }
 
     return new Response("ok", { status: 202 });
@@ -908,6 +951,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     transcriptPath: string | undefined,
     tmuxPane: string | undefined,
     ccPid: number | undefined,
+    sidSource: SidSource,
   ): Promise<SessionState | null> {
     // Already tracking this session — never re-create it, which would
     // orphan the live tail + HubClient. Reuse the existing state, moving
@@ -915,6 +959,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     const live = sessions.get(sid);
     if (live && !live.closed) {
       if (transcriptPath) retargetTail(live, transcriptPath);
+      // A hook naming the sid is the strongest evidence there is -
+      // upgrade a derivation-opened session so its future re-assert
+      // POSTs can reopen it on the hub.
+      if (sidSource === "hook") live.sidSource = "hook";
       // The transcript may have moved (a --resume under a different cwd
       // reuses the sid), so keep the index pointing at the current file.
       sessionIndex.record(
@@ -928,7 +976,14 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // Coalesce concurrent opens for the same sid onto one create POST.
     const inflight = openingSessions.get(sid);
     if (inflight) return inflight;
-    const p = doOpenSession(sid, cwd, transcriptPath, tmuxPane, ccPid);
+    const p = doOpenSession(
+      sid,
+      cwd,
+      transcriptPath,
+      tmuxPane,
+      ccPid,
+      sidSource,
+    );
     openingSessions.set(sid, p);
     try {
       return await p;
@@ -943,6 +998,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     transcriptPath: string | undefined,
     tmuxPane: string | undefined,
     ccPid: number | undefined,
+    sidSource: SidSource,
   ): Promise<SessionState | null> {
     let ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
     const host = os.hostname() || "host";
@@ -958,6 +1014,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           sid,
           host,
           cc_pid: resolvedPid,
+          sid_source: sidSource,
         }),
       });
       if (!res.ok) {
@@ -983,6 +1040,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       cwd: cwd ?? "",
       host,
       ccPid: resolvedPid,
+      sidSource,
       transcriptPath: transcriptPath ?? null,
       ws: null,
       seenUuids: new Set(),
@@ -1083,6 +1141,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
               sid: session.sid,
               host: session.host,
               cc_pid: session.ccPid,
+              sid_source: session.sidSource,
             }),
           });
           // Superseded while awaiting the reopen — bail without clearing
@@ -1180,6 +1239,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
               sid: session.sid,
               host: session.host,
               cc_pid: session.ccPid,
+              sid_source: session.sidSource,
             }),
           });
           if (res.ok) {
@@ -2298,6 +2358,8 @@ export { encodeProjectDirName };
 export interface DiscoveredSession {
   sessionId: string;
   transcriptPath: string;
+  /** Which signal produced the sid - see `SidSource` in shared/types. */
+  source: "cmdline" | "fd" | "mtime";
 }
 
 /**
@@ -2353,10 +2415,45 @@ function findOpenJsonlForPid(
     }
     if (mtime > bestMtime) {
       bestMtime = mtime;
-      best = { sessionId, transcriptPath: target };
+      best = { sessionId, transcriptPath: target, source: "fd" };
     }
   }
   return best;
+}
+
+/**
+ * Epoch ms at which a process started, from /proc/<pid>/stat field 22
+ * (starttime, in USER_HZ ticks since boot) plus /proc/stat's btime.
+ * USER_HZ is fixed at 100 by the Linux userland ABI regardless of the
+ * kernel's HZ. Returns null when either file is unreadable (non-Linux,
+ * dead pid) or unparsable - callers treat null as "can't tell".
+ */
+export function processStartMs(pid: number, procRoot = "/proc"): number | null {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const stat = fs.readFileSync(
+      path.join(procRoot, String(pid), "stat"),
+      "utf8",
+    );
+    // comm (field 2) is parenthesised and may itself contain spaces or
+    // parens; the numeric fields resume after the LAST ')'.
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const fields = stat.slice(close + 2).split(" ");
+    // Field 3 (state) is fields[0], so field 22 (starttime) is fields[19].
+    const startTicks = Number(fields[19]);
+    if (!Number.isFinite(startTicks)) return null;
+    const btimeLine = fs
+      .readFileSync(path.join(procRoot, "stat"), "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("btime "));
+    if (!btimeLine) return null;
+    const btime = Number(btimeLine.slice("btime ".length).trim());
+    if (!Number.isFinite(btime)) return null;
+    return btime * 1000 + (startTicks / 100) * 1000;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2409,22 +2506,30 @@ export function findActiveSessionForCcPid(
     return null;
   }
 
-  const cmdlineSid = readSidFromCmdline(ccPid, procRoot);
+  const args = readCmdlineArgs(ccPid, procRoot);
+  const cmdlineSid = sidFromCmdlineArgs(args);
   if (cmdlineSid && entries.includes(`${cmdlineSid}.jsonl`)) {
     return {
       sessionId: cmdlineSid,
       transcriptPath: path.join(projectDir, `${cmdlineSid}.jsonl`),
+      source: "cmdline",
     };
   }
 
   const held = findOpenJsonlForPid(ccPid, projectDir, procRoot);
   if (held) return held;
 
-  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
-  if (jsonlNames.length > 1 && countLiveCcProcessesForCwd(cwd, procRoot) >= 2) {
+  // From here on the only signal left is file mtime, which cannot
+  // attribute a transcript to a process. Two or more live Claude Codes
+  // in this cwd make the newest file's owner genuinely undecidable, so
+  // abstain even when the dir holds a single transcript - that one file
+  // may belong to the *other* process, and adopting it would hijack a
+  // running session's sid.
+  if (countLiveCcProcessesForCwd(cwd, procRoot) >= 2) {
     return null;
   }
 
+  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
   let best: { name: string; mtimeMs: number } | null = null;
   for (const name of jsonlNames) {
     try {
@@ -2437,6 +2542,18 @@ export function findActiveSessionForCcPid(
     }
   }
   if (!best) return null;
+  // A transcript last written before this process started belongs to an
+  // earlier session - a brand-new Claude Code has not created its own
+  // JSONL yet, and adopting the previous session's file here is what
+  // used to revive dead sessions on the hub. `--continue` is the one
+  // legitimate case of owning a transcript older than the process (its
+  // documented behaviour is "resume the most recent session in this
+  // cwd"), so it bypasses the age comparison. An unknown start time
+  // (non-Linux, dead pid) keeps the pre-check behaviour.
+  if (!cmdlineHasContinueFlag(args)) {
+    const startedAt = processStartMs(ccPid, procRoot);
+    if (startedAt !== null && best.mtimeMs < startedAt) return null;
+  }
   const sessionId = best.name.slice(0, -".jsonl".length);
   // Belt-and-braces: the session_id should be a UUID. If the filename
   // doesn't look like one, treat the discovery as a miss so we don't
@@ -2445,25 +2562,32 @@ export function findActiveSessionForCcPid(
   return {
     sessionId,
     transcriptPath: path.join(projectDir, best.name),
+    source: "mtime",
   };
 }
 
 /**
- * Extract an explicit session id from a process's command line, for the
- * flags that take a uuid argument (`--resume`/`-r`, `--session-id`).
- * NUL (\x00) is the field separator in /proc/PID/cmdline on Linux -
- * argv[0] ends in NUL, not whitespace. Returns null when the cmdline
- * is unreadable (process gone, no permission, non-Linux) or names no
- * such flag.
+ * Argv of a process, from /proc/<pid>/cmdline. NUL (\x00) is the field
+ * separator on Linux - argv[0] ends in NUL, not whitespace. Returns null
+ * when the cmdline is unreadable (process gone, no permission, non-Linux).
  */
-function readSidFromCmdline(pid: number, procRoot: string): string | null {
+function readCmdlineArgs(pid: number, procRoot: string): string[] | null {
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(procRoot, String(pid), "cmdline"), "utf8");
   } catch {
     return null;
   }
-  const args = raw.split("\0").filter((a) => a.length > 0);
+  return raw.split("\0").filter((a) => a.length > 0);
+}
+
+/**
+ * Extract an explicit session id from a command line, for the flags that
+ * take a uuid argument (`--resume`/`-r`, `--session-id`). Returns null
+ * when the args are unavailable or name no such flag.
+ */
+function sidFromCmdlineArgs(args: string[] | null): string | null {
+  if (!args) return null;
   // --fork-session resumes a transcript under a freshly generated session
   // id, so the id on the command line belongs to the session being forked
   // from, not to this process. Treating it as authoritative would bind a
@@ -2479,6 +2603,14 @@ function readSidFromCmdline(pid: number, procRoot: string): string | null {
     }
   }
   return null;
+}
+
+/** True when the command line declares `--continue`/`-c`, whose semantics
+ *  are exactly "adopt the newest transcript in this cwd". */
+function cmdlineHasContinueFlag(args: string[] | null): boolean {
+  if (!args) return false;
+  if (args.includes("--fork-session")) return false;
+  return args.includes("--continue") || args.includes("-c");
 }
 
 /**
@@ -2585,6 +2717,9 @@ export interface DiscoveredCcProcess {
    *  originally learned from a hook) rather than being derived from
    *  /proc and the on-disk transcripts. */
   fromIndex: boolean;
+  /** Evidence behind the sid - "index" when fromIndex, else whatever
+   *  signal the /proc derivation resolved on. */
+  source: SidSource;
 }
 
 /**
@@ -2651,7 +2786,11 @@ export function discoverRunningCcSessions(
     // projects unmirrored until their next hook.
     const indexed = lookupIndex?.(pid, cwd);
     const discovered = indexed
-      ? { sessionId: indexed.sid, transcriptPath: indexed.transcriptPath }
+      ? {
+          sessionId: indexed.sid,
+          transcriptPath: indexed.transcriptPath,
+          source: "index" as const,
+        }
       : findActiveSessionForCcPid(pid, cwd, home, procRoot);
     if (!discovered) continue;
     // Two CC processes can share a sid only across hosts (impossible
@@ -2665,6 +2804,7 @@ export function discoverRunningCcSessions(
       sessionId: discovered.sessionId,
       transcriptPath: discovered.transcriptPath,
       fromIndex: indexed !== undefined,
+      source: discovered.source,
     });
   }
   return out;

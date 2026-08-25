@@ -152,8 +152,9 @@ with open(settings_path) as f:
     d = json.load(f)
 d.setdefault("hooks", {})
 entry = {"hooks": [{"type": "command", "command": push_bin, "timeout": 1}]}
-for ev in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-           "Stop", "SubagentStop", "Notification", "PreCompact", "PostCompact"):
+for ev in ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+           "PostToolUse", "Stop", "SubagentStop", "Notification", "PreCompact",
+           "PostCompact"):
     existing = d["hooks"].get(ev)
     if isinstance(existing, list):
         already = any(

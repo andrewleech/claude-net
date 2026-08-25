@@ -62,13 +62,30 @@ export class ProbeAttemptTracker {
    */
   begin(ccPid: number, preassignedSid?: string): string {
     const existing = this.attempts.get(ccPid);
-    const sid = existing?.sid ?? preassignedSid ?? this.genSid();
+    // An abstain record has an empty sid - it must not shadow a real
+    // discovered sid on a later attempt, hence || rather than ??.
+    const sid = (existing?.sid || preassignedSid) ?? this.genSid();
     this.attempts.set(ccPid, {
       sid,
       pending: true,
       lastFailureAt: existing?.lastFailureAt ?? 0,
     });
     return sid;
+  }
+
+  /**
+   * Discovery found no confident sid for this ccPid, so no session was
+   * created. Records a cooldown entry (with no sid) so hub
+   * probe re-sends don't re-run the disk scan every few seconds while
+   * the situation that made discovery abstain persists.
+   */
+  abstained(ccPid: number): void {
+    const existing = this.attempts.get(ccPid);
+    this.attempts.set(ccPid, {
+      sid: existing?.sid ?? "",
+      pending: false,
+      lastFailureAt: this.now(),
+    });
   }
 
   /** Probe completed successfully — drop the record so future probes

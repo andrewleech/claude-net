@@ -6,8 +6,32 @@ import {
   discoverRunningCcSessions,
   encodeProjectDirName,
   findActiveSessionForCcPid,
+  processStartMs,
   readTmuxPaneFromCcEnv,
 } from "@/mirror-agent/agent";
+
+/** Fake /proc/<pid>/stat + /proc/stat pair so processStartMs resolves to
+ *  `startMs` for `pid` under `procRoot`. USER_HZ is 100, so ticks are
+ *  (startMs - btime*1000) / 10. */
+function plantProcessStart(
+  procRoot: string,
+  pid: number,
+  startMs: number,
+  btimeSec: number = Math.floor(startMs / 1000) - 3600,
+): void {
+  const dir = path.join(procRoot, String(pid));
+  fs.mkdirSync(dir, { recursive: true });
+  const ticks = Math.round((startMs - btimeSec * 1000) / 10);
+  const fields = ["S", ...Array(18).fill("0"), String(ticks), "0", "0"];
+  fs.writeFileSync(
+    path.join(dir, "stat"),
+    `${pid} (claude) ${fields.join(" ")}\n`,
+  );
+  fs.writeFileSync(
+    path.join(procRoot, "stat"),
+    `cpu  0 0 0 0\nbtime ${btimeSec}\nprocesses 1\n`,
+  );
+}
 
 describe("encodeProjectDirName", () => {
   test("replaces slashes with hyphens", () => {
@@ -269,6 +293,99 @@ describe("findActiveSessionForCcPid", () => {
       fs.rmSync(tmpProc, { recursive: true, force: true });
     }
   });
+
+  test("abstains when the newest transcript predates the process start", () => {
+    // A brand-new Claude Code has not written its own JSONL yet; the
+    // newest file in the dir belongs to an earlier, ended session.
+    // Adopting it revived dead sessions on the hub.
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now - 60_000);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-start-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 5_000);
+      expect(findActiveSessionForCcPid(321, cwd, tmpHome, tmpProc)).toBe(null);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("adopts the newest transcript when written after the process started", () => {
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-start-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 60_000);
+      const found = findActiveSessionForCcPid(321, cwd, tmpHome, tmpProc);
+      expect(found?.sessionId).toBe(sampleSid);
+      expect(found?.source).toBe("mtime");
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("--continue adopts the newest transcript even when older than the process", () => {
+    // `--continue`'s documented behaviour IS "resume the most recent
+    // session in this cwd", so an old transcript legitimately belongs
+    // to the new process.
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now - 60_000);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-cont-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 5_000);
+      fs.writeFileSync(
+        path.join(tmpProc, "321", "cmdline"),
+        "/path/claude-patched\0--continue\0",
+      );
+      const found = findActiveSessionForCcPid(321, cwd, tmpHome, tmpProc);
+      expect(found?.sessionId).toBe(sampleSid);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("processStartMs", () => {
+  test("derives epoch ms from starttime ticks plus btime", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      const startMs = 1_700_000_123_450;
+      plantProcessStart(tmpProc, 42, startMs, 1_700_000_000);
+      expect(processStartMs(42, tmpProc)).toBe(startMs);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("handles a comm containing spaces and parens", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      const dir = path.join(tmpProc, "43");
+      fs.mkdirSync(dir, { recursive: true });
+      const fields = ["S", ...Array(18).fill("0"), "500", "0", "0"];
+      fs.writeFileSync(
+        path.join(dir, "stat"),
+        `43 (weird) name)) ${fields.join(" ")}\n`,
+      );
+      fs.writeFileSync(path.join(tmpProc, "stat"), "btime 1000\n");
+      expect(processStartMs(43, tmpProc)).toBe(1000 * 1000 + 5000);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("returns null for missing stat files or bogus pids", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      expect(processStartMs(99, tmpProc)).toBe(null);
+      expect(processStartMs(0, tmpProc)).toBe(null);
+      expect(processStartMs(Number.NaN, tmpProc)).toBe(null);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("readTmuxPaneFromCcEnv", () => {
@@ -345,6 +462,12 @@ describe("discoverRunningCcSessions", () => {
     const fdDir = path.join(tmpProc, String(pid), "fd");
     fs.mkdirSync(fdDir, { recursive: true });
     fs.symlinkSync(target, path.join(fdDir, String(fd)));
+  }
+
+  function makeFakeCmdline(pid: number, args: string[]): void {
+    const dir = path.join(tmpProc, String(pid));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "cmdline"), `${args.join("\0")}\0`);
   }
 
   test("returns [] on non-Linux platforms", () => {
@@ -433,13 +556,28 @@ describe("discoverRunningCcSessions", () => {
     const cwd = path.join(tmpHome, "shared-cwd");
     fs.mkdirSync(cwd, { recursive: true });
     plantJsonl(cwd, matchingSid);
-    // Two processes share the same cwd (fork-session); both resolve
-    // to the same JSONL. We dedup so the agent doesn't open the
-    // session twice.
+    // Two processes name the same sid explicitly (e.g. the same
+    // `--resume` command pasted into two shells). Both resolve to the
+    // same JSONL; dedup so the agent doesn't open the session twice.
     makeFakePid(4444, { exe: "/usr/local/bin/claude", cwd });
     makeFakePid(4445, { exe: "/usr/local/bin/claude", cwd });
+    makeFakeCmdline(4444, ["claude", "--resume", matchingSid]);
+    makeFakeCmdline(4445, ["claude", "--resume", matchingSid]);
     const found = discoverRunningCcSessions(tmpProc, tmpHome);
     expect(found).toHaveLength(1);
+  });
+
+  test("abstains for two live processes sharing a cwd even with a single transcript", () => {
+    if (process.platform !== "linux") return;
+    // The single transcript belongs to ONE of the two processes; the
+    // other adopting it would hijack a running session's sid. Neither
+    // has a stronger signal, so both must abstain.
+    const cwd = path.join(tmpHome, "shared-single");
+    fs.mkdirSync(cwd, { recursive: true });
+    plantJsonl(cwd, matchingSid);
+    makeFakePid(4446, { exe: "/usr/local/bin/claude", cwd });
+    makeFakePid(4447, { exe: "/usr/local/bin/claude", cwd });
+    expect(discoverRunningCcSessions(tmpProc, tmpHome)).toEqual([]);
   });
 
   test("resolves fork siblings sharing a cwd to their own distinct held transcripts", () => {

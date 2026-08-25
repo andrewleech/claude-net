@@ -895,6 +895,19 @@ export type MirrorEventKind =
 
 export type MirrorSessionSource = "startup" | "resume" | "clear" | "compact";
 
+/**
+ * How the mirror-agent learned a session's sid, sent as `sid_source` on
+ * POST /api/mirror/session. Ordered by evidence strength:
+ * - "hook": the sid arrived in a hook payload from Claude Code itself.
+ * - "cmdline": an explicit `--resume <uuid>` / `--session-id <uuid>` on
+ *   the process's command line.
+ * - "fd": the process holds the transcript open (/proc/<pid>/fd).
+ * - "index": the daemon's persisted session index, originally hook-fed.
+ * - "mtime": newest-mtime transcript in the project dir - a guess. The
+ *   hub refuses to reopen a closed session on this evidence alone.
+ */
+export type SidSource = "hook" | "cmdline" | "fd" | "index" | "mtime";
+
 export interface MirrorSessionStartPayload {
   kind: "session_start";
   source: MirrorSessionSource;

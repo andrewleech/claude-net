@@ -208,7 +208,9 @@ class SessionChannelListPatch:
     region.
 
     Anchored on the body signature rather than the minified function
-    name (`IRt` in 2.1.229), which drifts every release.
+    name (`IRt` in 2.1.229, `Z` in 2.1.246) or the lambda's parameter
+    name (`n` in 2.1.229, `i` in 2.1.246), both of which drift every
+    release.
     """
 
     name = "Session channel list fallback (IRt)"
@@ -222,7 +224,7 @@ class SessionChannelListPatch:
     diag_anchor = b"not in --channels list for this session"
     ANCHOR_RX = (
         rb'function [\w$]{1,6}\(e,t\)\{'
-        rb'(?=let r=e\.split\(":"\);return t\.find\(\(n\)=>n\.kind==="server")'
+        rb'(?=let r=e\.split\(":"\);return t\.find\(\(([\w$])\)=>\1\.kind==="server")'
     )
     FALLBACK = b'??{kind:"server",name:e,dev:!0}'
 

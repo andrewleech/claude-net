@@ -77,6 +77,30 @@ describe("Teams", () => {
     expect(teams.teams.has("frontend")).toBe(false);
   });
 
+  describe("renameMember", () => {
+    test("swaps the member key in every team it belongs to", () => {
+      teams.join("backend", "old:alice@host");
+      teams.join("frontend", "old:alice@host");
+      teams.join("backend", "proj:bob@host");
+
+      teams.renameMember("old:alice@host", "new:alice@host");
+
+      expect(teams.getMembers("backend")?.has("old:alice@host")).toBe(false);
+      expect(teams.getMembers("backend")?.has("new:alice@host")).toBe(true);
+      expect(teams.getMembers("frontend")?.has("new:alice@host")).toBe(true);
+      // Unrelated member untouched.
+      expect(teams.getMembers("backend")?.has("proj:bob@host")).toBe(true);
+    });
+
+    test("is a no-op for teams the old name never belonged to", () => {
+      teams.join("backend", "proj:bob@host");
+      expect(() =>
+        teams.renameMember("old:alice@host", "new:alice@host"),
+      ).not.toThrow();
+      expect(teams.getMembers("backend")?.has("proj:bob@host")).toBe(true);
+    });
+  });
+
   test("list returns all teams with member status", () => {
     registry.register("proj:alice@host", mockWs());
     teams.join("backend", "proj:alice@host");

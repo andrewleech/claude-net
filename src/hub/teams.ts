@@ -45,6 +45,22 @@ export class Teams {
     return this.teams.get(teamName) ?? null;
   }
 
+  /**
+   * Swap a renamed agent's membership key in every team it belongs to.
+   * Without this, a rename leaves each team's member set pointing at
+   * the dead name — team sends would resolve the stale identity via
+   * seenNames and deposit into its mailbox slot instead of the agent's
+   * current one, and the renamed agent's own re-broadcast wouldn't be
+   * recognized as "self" and skipped.
+   */
+  renameMember(oldName: string, newName: string): void {
+    for (const members of this.teams.values()) {
+      if (members.delete(oldName)) {
+        members.add(newName);
+      }
+    }
+  }
+
   removeFromAllTeams(agentFullName: string): void {
     const toDelete: string[] = [];
     for (const [teamName, members] of this.teams) {

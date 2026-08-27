@@ -115,7 +115,8 @@ The system comprises four runtime participants:
 |-----------|------|---------------|
 | **Registry** | `registry.ts` | Agent registration, name uniqueness enforcement, full/short name resolution, disconnect timeout tracking (configurable grace window for team membership restoration) |
 | **Teams** | `teams.ts` | Team implicit creation/deletion, join/leave operations, membership queries, timeout-based cleanup |
-| **Router** | `router.ts` | Message routing for direct and team targets. Generates `message_id` (UUID), stamps `from` and `timestamp` on all messages. Returns structured outcome (delivered / nak with reason) |
+| **Router** | `router.ts` | Message routing for direct and team targets. Generates `message_id` (UUID), stamps `from` and `timestamp` on all messages. Returns structured outcome (delivered / nak with reason), including whether the content was deposited to the recipient's mailbox |
+| **Mailbox** | `mailbox.ts` | Single-slot-per-recipient store for the most recently sent message addressed to them, keyed by fullName. Bounded capacity (FIFO eviction) and per-field length caps on `content` and `reply_to` |
 | **Plugin WS Handler** | `ws-plugin.ts` | WebSocket endpoint at `/ws`. Parses incoming JSON frames, dispatches to Registry/Teams/Router/EventLog/MirrorRegistry, sends response and message frames. Manages WS ping/pong liveness and stale-connection eviction |
 | **Dashboard WS Handler** | `ws-dashboard.ts` | WebSocket endpoint at `/ws/dashboard`. Pushes `agent:connected`, `agent:disconnected`, `message:routed`, `team:changed`, `system:event`, `mirror:*`, and `host:*` events. Sends initial state on connection. Acts as virtual `dashboard@hub` agent |
 | **Mirror WS Handler** | `mirror.ts` (wsMirrorPlugin) | WebSocket endpoint at `/ws/mirror/{sid}`. Registers watchers; replays transcript on connect; forwards new events live |
@@ -164,6 +165,7 @@ All frames are JSON with an optional `requestId` for request-response correlatio
 | `list_teams` | Query all teams with membership |
 | `ping` | Test channel round-trip. Hub echoes back as an inbound message notification |
 | `query_events` | Query the event log. Carries optional `event` (prefix filter), `since` (epoch ms), `limit`, `agent` (substring match) |
+| `get_mailbox` | Read an agent's single-slot mailbox. Carries optional `agent` (defaults to caller) |
 | `mirror_event` | Stream a Claude Code hook event for a session (sent by mirror-agent). Carries `sid`, `uuid`, `kind`, `ts`, `payload` |
 | `mirror_paste_done` | Reply to a paste RPC. Carries `sid`, `requestId`, optional `path` or `error` |
 | `mirror_commands_done` | Reply to a list-commands RPC. Carries `sid`, `requestId`, optional `commands` array |
@@ -227,9 +229,10 @@ Every entry: `{ ts: number, event: string, data: Record<string, unknown> }`
 | `agent.disconnected` | WS close | `fullName`, `reason: "close" \| "evicted" \| "renamed"` |
 | `agent.evicted` | Ping tick stale threshold | `fullName`, `lastPongAt`, `silentForMs` |
 | `agent.upgraded` | Version mismatch on register | `fullName`, `reportedVersion`, `currentVersion` |
-| `message.sent` | routeDirect completes | `from`, `to`, `messageId`, `outcome`, `reason?`, `elapsedMs` |
+| `message.sent` | routeDirect completes | `from`, `to`, `messageId`, `outcome`, `reason?`, `mailbox?`, `elapsedMs` |
 | `message.team` | routeTeam completes | `from`, `team`, `messageId`, `deliveredTo`, `skippedNoChannel` |
 | `ping.tick` | Ping interval fires | `agentCount`, `evictedCount` |
+| `dispatch.error` | An action handler throws | `action`, `error` |
 
 ### 5.6 MCP Tools
 
@@ -245,6 +248,7 @@ Every entry: `{ ts: number, event: string, data: Record<string, unknown> }`
 | `list_teams` | `list_teams` |
 | `ping` | `ping` |
 | `hub_events` | `query_events` |
+| `mailbox` | `get_mailbox` |
 
 ## 6. Data Model
 
@@ -268,6 +272,15 @@ Map<string, {
 ```
 
 Keyed by `fullName`. Supports lookup by full name (exact), `session:user` (cross-host), `user@host` (cross-session), or plain name (ambiguous if multiple matches).
+
+The registry also retains, independent of live/disconnected state:
+
+```
+seenNames: Set<string>                          // every fullName ever registered, FIFO-bounded (5,000)
+onlineIntervals: Map<string, {start, end}[]>     // per-fullName live-registration spans, bounded per name (8)
+```
+
+`seenNames` backs `resolveSeenNameOrAmbiguous`, which lets an offline recipient still be addressed by a partial name for mailbox purposes (see 6.7). `onlineIntervals` disambiguates multiple seen names sharing a partial address: they collapse to the most recent one only if their online spans never overlapped, otherwise the query is reported ambiguous.
 
 ### 6.2 Disconnected Agents
 
@@ -327,6 +340,26 @@ One entry per connected host daemon. Cleared on daemon disconnect.
 ### 6.6 Event Log
 
 In-memory ring buffer, default capacity 10,000 entries. FIFO eviction when full. Not persisted across hub restart. Configurable via `eventLogCapacity` in `createHub`. Exposes `push`, `query` (with prefix event filter, `since` timestamp, `limit`, and agent substring filters), `summary` (counts by type), and `oldestTs`.
+
+### 6.7 Mailbox
+
+```
+Map<string, {
+  message_id: string
+  from: string
+  to: string
+  type: MessageType
+  content: string           // capped; truncated with a marker over the limit
+  reply_to?: string         // capped independently of content
+  team?: string
+  outcome: "delivered" | "nak" | "skipped"
+  reason?: SendNakReason
+  sent_at: string
+  read_at: string | null
+}>
+```
+
+One slot per recipient fullName, overwritten by the next message addressed to them — not a queue or history. Bounded capacity (FIFO eviction by least-recently-deposited-to recipient). A rename moves the slot to the agent's new name. Populated by `routeDirect`, `routeTeam`, and `routeSystemNotification` whenever live delivery isn't confirmed (or, for direct/team sends, always alongside a live delivery) and the recipient's identity is known to the hub (`seenNames`).
 
 ## 7. Deployment
 

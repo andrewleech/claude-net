@@ -1,6 +1,7 @@
 import type {
   DashboardEvent,
   ErrorFrame,
+  GetMailboxResponseData,
   InboundMessageFrame,
   PluginFrame,
   RegisterResponseData,
@@ -48,7 +49,7 @@ function sendFrame(ws: ElysiaWs, frame: object): void {
   ws.send(JSON.stringify(frame));
 }
 
-function sendResponse(
+function sendResponseFrame(
   ws: ElysiaWs,
   requestId: string | undefined,
   ok: boolean,
@@ -72,7 +73,7 @@ function requireRegistered(
 ): string | null {
   const name = getSenderName(ws);
   if (!name) {
-    sendResponse(
+    sendResponseFrame(
       ws,
       requestId,
       false,
@@ -156,373 +157,533 @@ export function wsPlugin(
           ? (data.requestId as string | undefined)
           : undefined;
 
-      switch (data.action) {
-        case "register": {
-          // Missing channel_capable field is treated as `false` — old plugins
-          // are visibly broken at send time rather than silently half-broken.
-          const channelCapable =
-            typeof data.channel_capable === "boolean"
-              ? data.channel_capable
-              : false;
+      // Tracks whether a handler already sent a response for this frame,
+      // so the catch below never sends a second, contradictory one (e.g.
+      // a throw from `emit`/`dashboardBroadcastFn` after a case already
+      // reported success). Shadows the module-level sendResponseFrame —
+      // every call inside `dispatch` resolves to this wrapper.
+      let responded = false;
+      const sendResponse = (
+        wsArg: ElysiaWs,
+        reqId: string | undefined,
+        ok: boolean,
+        respData?: unknown,
+        error?: string,
+      ): void => {
+        responded = true;
+        sendResponseFrame(wsArg, reqId, ok, respData, error);
+      };
 
-          // Plugins from before the (host, cc_pid) join landed don't
-          // send `cc_pid`. Treat as null — the rename-join silently
-          // no-ops for that session until the plugin upgrades.
-          const ccPid =
-            typeof data.cc_pid === "number" && Number.isFinite(data.cc_pid)
-              ? data.cc_pid
-              : null;
+      // A field a handler assumes is a given type (e.g. `to`/`agent`
+      // being a string) can throw when the client sends something else,
+      // and that must not crash the whole WS connection — catch here and
+      // answer with an error response instead of letting it propagate
+      // out of the WS callback. The label is deliberately generic: this
+      // catches both malformed client input and genuine handler bugs,
+      // and callers can't distinguish the two from the message alone.
+      try {
+        dispatch(data, requestId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // sendResponse is a no-op without a requestId (fire-and-forget
+        // frames get no reply) — log to the event log too, or a thrown
+        // handler error on one of those frames would vanish with no
+        // trace anywhere. Guarded on its own: a throw from eventLog.push
+        // here must not escape this catch — that would defeat the very
+        // guard this try/catch exists to provide.
+        try {
+          emit("dispatch.error", { action: data.action, error: message });
+        } catch {
+          // best-effort logging only
+        }
+        if (!responded) {
+          sendResponse(
+            ws,
+            requestId,
+            false,
+            undefined,
+            `Internal error handling '${data.action}': ${message}`,
+          );
+        }
+      }
 
-          const cwd =
-            typeof data.cwd === "string" && data.cwd.length > 0
-              ? data.cwd
-              : null;
+      function dispatch(data: PluginFrame, requestId: string | undefined) {
+        switch (data.action) {
+          case "register": {
+            // Missing channel_capable field is treated as `false` — old plugins
+            // are visibly broken at send time rather than silently half-broken.
+            const channelCapable =
+              typeof data.channel_capable === "boolean"
+                ? data.channel_capable
+                : false;
 
-          // Use ws itself as the sendable reference — it persists and can send.
-          // Use ws.raw for identity comparison in registry.
-          const result = registry.register(data.name, ws, ws.raw, {
-            channelCapable,
-            ccPid,
-            cwd,
-          });
-          if (!result.ok) {
-            sendResponse(ws, requestId, false, undefined, result.error);
-            return;
-          }
-          wsToAgent.set(ws.raw, data.name);
+            // Plugins from before the (host, cc_pid) join landed don't
+            // send `cc_pid`. Treat as null — the rename-join silently
+            // no-ops for that session until the plugin upgrades.
+            const ccPid =
+              typeof data.cc_pid === "number" && Number.isFinite(data.cc_pid)
+                ? data.cc_pid
+                : null;
 
-          const registeredFrame: RegisteredFrame = {
-            event: "registered",
-            name: result.entry.shortName,
-            full_name: result.entry.fullName,
-          };
-          sendFrame(ws, registeredFrame);
+            const cwd =
+              typeof data.cwd === "string" && data.cwd.length > 0
+                ? data.cwd
+                : null;
 
-          // Compare plugin's self-reported version against the hub's
-          // canonical version. On mismatch or missing field, include an
-          // upgrade_hint the plugin will surface on the next tool result.
-          const reportedVersion =
-            typeof data.plugin_version === "string"
-              ? data.plugin_version
-              : undefined;
-          const registerResponse: RegisterResponseData = {
-            name: result.entry.shortName,
-            full_name: result.entry.fullName,
-          };
-          if (reportedVersion !== PLUGIN_VERSION_CURRENT) {
-            registerResponse.upgrade_hint = buildUpgradeHint(
-              resolveHubUrlForHint(port),
-              reportedVersion,
-            );
-            emit("agent.upgraded", {
-              fullName: result.entry.fullName,
-              reportedVersion: reportedVersion ?? null,
-              currentVersion: PLUGIN_VERSION_CURRENT,
-            });
-          }
-          sendResponse(ws, requestId, true, registerResponse);
-
-          emit("agent.registered", {
-            fullName: result.entry.fullName,
-            channelCapable: result.entry.channelCapable,
-            pluginVersion: reportedVersion ?? null,
-            restored: result.restored,
-            ...(result.renamedFrom ? { renamedFrom: result.renamedFrom } : {}),
-          });
-
-          // If this was a rename (same WS, new name), tell every
-          // dashboard to drop the old agent name. Mirror-session
-          // relabel happens via the (host, cc_pid) join below — the
-          // old wsIdentity-based renameOwner path is gone because it
-          // matched by ownerAgent string and would broad-rename fork
-          // siblings sharing a cwd-derived owner.
-          if (result.renamedFrom) {
-            dashboardBroadcastFn({
-              event: "agent:disconnected",
-              name: parseName(result.renamedFrom).session,
-              full_name: result.renamedFrom,
-            });
-            emit("agent.disconnected", {
-              fullName: result.renamedFrom,
-              reason: "renamed",
-            });
-          }
-
-          // (host, cc_pid) join: rewrite every mirror session whose
-          // identity matches this agent's, so a rename via register()
-          // propagates to the dashboard's mirror-row label even after
-          // a hub restart (where wsIdentity-based rename detection
-          // can't fire). Silent no-op when ccPid is null.
-          if (mirrorRegistry && ccPid !== null) {
-            mirrorRegistry.attachAgent(
-              result.entry.host,
+            // Use ws itself as the sendable reference — it persists and can send.
+            // Use ws.raw for identity comparison in registry.
+            const result = registry.register(data.name, ws, ws.raw, {
+              channelCapable,
               ccPid,
-              result.entry.fullName,
-            );
-            // If no mirror session exists yet for this (host, ccPid),
-            // probe the mirror-agent daemon to create one. Covers the
-            // common case where the mirror-agent restarted and lost its
-            // in-memory sessions while Claude Code was still running.
-            if (
-              cwd !== null &&
-              !mirrorRegistry.hasSessionForHostPid(result.entry.host, ccPid)
-            ) {
-              const hostEntry = hostRegistry?.get(
-                `${result.entry.user}@${result.entry.host}`,
+              cwd,
+            });
+            if (!result.ok) {
+              sendResponse(ws, requestId, false, undefined, result.error);
+              return;
+            }
+            wsToAgent.set(ws.raw, data.name);
+
+            const registeredFrame: RegisteredFrame = {
+              event: "registered",
+              name: result.entry.shortName,
+              full_name: result.entry.fullName,
+            };
+            sendFrame(ws, registeredFrame);
+
+            // Compare plugin's self-reported version against the hub's
+            // canonical version. On mismatch or missing field, include an
+            // upgrade_hint the plugin will surface on the next tool result.
+            const reportedVersion =
+              typeof data.plugin_version === "string"
+                ? data.plugin_version
+                : undefined;
+            const registerResponse: RegisterResponseData = {
+              name: result.entry.shortName,
+              full_name: result.entry.fullName,
+            };
+            if (reportedVersion !== PLUGIN_VERSION_CURRENT) {
+              registerResponse.upgrade_hint = buildUpgradeHint(
+                resolveHubUrlForHint(port),
+                reportedVersion,
               );
-              if (hostEntry) {
-                hostEntry.send(
-                  JSON.stringify({
-                    action: "host_session_probe",
-                    cc_pid: ccPid,
-                    cwd,
-                  }),
+              emit("agent.upgraded", {
+                fullName: result.entry.fullName,
+                reportedVersion: reportedVersion ?? null,
+                currentVersion: PLUGIN_VERSION_CURRENT,
+              });
+            }
+            sendResponse(ws, requestId, true, registerResponse);
+
+            emit("agent.registered", {
+              fullName: result.entry.fullName,
+              channelCapable: result.entry.channelCapable,
+              pluginVersion: reportedVersion ?? null,
+              restored: result.restored,
+              ...(result.renamedFrom
+                ? { renamedFrom: result.renamedFrom }
+                : {}),
+            });
+
+            // If this was a rename (same WS, new name), tell every
+            // dashboard to drop the old agent name. Mirror-session
+            // relabel happens via the (host, cc_pid) join below — the
+            // old wsIdentity-based renameOwner path is gone because it
+            // matched by ownerAgent string and would broad-rename fork
+            // siblings sharing a cwd-derived owner.
+            if (result.renamedFrom) {
+              // Carry any mailbox slot deposited under the old name
+              // forward, the same way team memberships and mirror-session
+              // labels already follow a rename.
+              router.mailbox.rekey(result.renamedFrom, result.entry.fullName);
+              // AgentEntry.teams (which team names this agent is in) was
+              // already carried forward by registry.register(); this
+              // updates the other side — each team's *membership set*,
+              // which otherwise would still list the dead name.
+              teams.renameMember(result.renamedFrom, result.entry.fullName);
+              // Tell dashboards about the membership-key swap on every team
+              // the renamed agent belongs to, the same as join_team/
+              // leave_team do — otherwise a live dashboard keeps showing
+              // the dead name in that team's member list.
+              for (const teamName of result.entry.teams) {
+                const members = teams.getMembers(teamName);
+                if (!members) continue;
+                dashboardBroadcastFn({
+                  event: "team:changed",
+                  team: teamName,
+                  members: [...members],
+                  action: "renamed",
+                });
+              }
+              dashboardBroadcastFn({
+                event: "agent:disconnected",
+                name: parseName(result.renamedFrom).session,
+                full_name: result.renamedFrom,
+              });
+              emit("agent.disconnected", {
+                fullName: result.renamedFrom,
+                reason: "renamed",
+              });
+            }
+
+            // (host, cc_pid) join: rewrite every mirror session whose
+            // identity matches this agent's, so a rename via register()
+            // propagates to the dashboard's mirror-row label even after
+            // a hub restart (where wsIdentity-based rename detection
+            // can't fire). Silent no-op when ccPid is null.
+            if (mirrorRegistry && ccPid !== null) {
+              mirrorRegistry.attachAgent(
+                result.entry.host,
+                ccPid,
+                result.entry.fullName,
+              );
+              // If no mirror session exists yet for this (host, ccPid),
+              // probe the mirror-agent daemon to create one. Covers the
+              // common case where the mirror-agent restarted and lost its
+              // in-memory sessions while Claude Code was still running.
+              if (
+                cwd !== null &&
+                !mirrorRegistry.hasSessionForHostPid(result.entry.host, ccPid)
+              ) {
+                const hostEntry = hostRegistry?.get(
+                  `${result.entry.user}@${result.entry.host}`,
                 );
+                if (hostEntry) {
+                  hostEntry.send(
+                    JSON.stringify({
+                      action: "host_session_probe",
+                      cc_pid: ccPid,
+                      cwd,
+                    }),
+                  );
+                }
               }
             }
+
+            dashboardBroadcastFn({
+              event: "agent:connected",
+              name: result.entry.shortName,
+              full_name: result.entry.fullName,
+              channel_capable: result.entry.channelCapable,
+            });
+            break;
           }
 
-          dashboardBroadcastFn({
-            event: "agent:connected",
-            name: result.entry.shortName,
-            full_name: result.entry.fullName,
-            channel_capable: result.entry.channelCapable,
-          });
-          break;
-        }
+          case "send": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
 
-        case "send": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          const startedAt = Date.now();
-          const result = router.routeDirect(
-            senderName,
-            data.to,
-            data.content,
-            data.type,
-            data.reply_to,
-          );
-          const elapsedMs = Date.now() - startedAt;
-          if (!result.ok) {
-            // Structured NAK carries `outcome` + `reason` so
-            // tools processing the response programmatically can
-            // distinguish offline / no-channel / unknown / no-dashboard.
-            sendResponse(
-              ws,
-              requestId,
-              false,
-              { outcome: "nak", reason: result.reason },
-              result.error,
+            const startedAt = Date.now();
+            const result = router.routeDirect(
+              senderName,
+              data.to,
+              data.content,
+              data.type,
+              data.reply_to,
             );
-            emit("message.sent", {
-              from: senderName,
-              to: data.to,
-              messageId: null,
-              outcome: "nak",
-              reason: result.reason,
-              elapsedMs,
-            });
-          } else {
-            // Keep `delivered: true` alongside the new `outcome` field
-            // so existing dashboard parsers that only inspect `delivered`
-            // continue to work.
+            const elapsedMs = Date.now() - startedAt;
+            if (!result.ok) {
+              // Structured NAK carries `outcome` + `reason` + `mailbox` so
+              // tools processing the response programmatically can
+              // distinguish offline / no-channel / transport-error /
+              // no-dashboard / ambiguous / invalid-content, and tell
+              // whether the content actually landed in the recipient's
+              // mailbox slot rather than nowhere at all.
+              sendResponse(
+                ws,
+                requestId,
+                false,
+                {
+                  outcome: "nak",
+                  reason: result.reason,
+                  mailbox: result.mailbox,
+                },
+                result.error,
+              );
+              emit("message.sent", {
+                from: senderName,
+                to: data.to,
+                messageId: null,
+                outcome: "nak",
+                reason: result.reason,
+                mailbox: result.mailbox,
+                elapsedMs,
+              });
+            } else {
+              // Keep `delivered: true` alongside the new `outcome` field
+              // so existing dashboard parsers that only inspect `delivered`
+              // continue to work.
+              sendResponse(ws, requestId, true, {
+                message_id: result.message_id,
+                delivered: true,
+                outcome: "delivered",
+                ...(result.to_dashboard ? { to_dashboard: true } : {}),
+              });
+              dashboardBroadcastFn({
+                event: "message:routed",
+                message_id: result.message_id,
+                from: senderName,
+                to: data.to,
+                type: data.type,
+                content: data.content,
+                reply_to: data.reply_to,
+                timestamp: new Date().toISOString(),
+              });
+              emit("message.sent", {
+                from: senderName,
+                to: data.to,
+                messageId: result.message_id,
+                outcome: "delivered",
+                elapsedMs,
+              });
+            }
+            break;
+          }
+
+          case "send_team": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+
+            const result = router.routeTeam(
+              senderName,
+              data.team,
+              data.content,
+              data.type,
+              data.reply_to,
+            );
+            if (!result.ok) {
+              sendResponse(
+                ws,
+                requestId,
+                false,
+                { mailbox: result.mailbox },
+                result.error,
+              );
+            } else {
+              sendResponse(ws, requestId, true, {
+                message_id: result.message_id,
+                delivered_to: result.delivered_to,
+                skipped_no_channel: result.skipped_no_channel,
+                mailbox: result.mailbox,
+              });
+              dashboardBroadcastFn({
+                event: "message:routed",
+                message_id: result.message_id,
+                from: senderName,
+                to: `team:${data.team}`,
+                type: data.type,
+                content: data.content,
+                team: data.team,
+                reply_to: data.reply_to,
+                timestamp: new Date().toISOString(),
+              });
+              emit("message.team", {
+                from: senderName,
+                team: data.team,
+                messageId: result.message_id,
+                deliveredTo: result.delivered_to,
+                skippedNoChannel: result.skipped_no_channel,
+              });
+            }
+            break;
+          }
+
+          case "join_team": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+
+            const members = teams.join(data.team, senderName);
+            const agentEntry = registry.getByFullName(senderName);
+            if (agentEntry) {
+              agentEntry.teams.add(data.team);
+            }
             sendResponse(ws, requestId, true, {
-              message_id: result.message_id,
-              delivered: true,
-              outcome: "delivered",
-              ...(result.to_dashboard ? { to_dashboard: true } : {}),
+              team: data.team,
+              members,
             });
             dashboardBroadcastFn({
-              event: "message:routed",
-              message_id: result.message_id,
-              from: senderName,
-              to: data.to,
-              type: data.type,
-              content: data.content,
-              reply_to: data.reply_to,
-              timestamp: new Date().toISOString(),
+              event: "team:changed",
+              team: data.team,
+              members,
+              action: members.length === 1 ? "created" : "joined",
             });
-            emit("message.sent", {
-              from: senderName,
-              to: data.to,
-              messageId: result.message_id,
-              outcome: "delivered",
-              elapsedMs,
-            });
+            break;
           }
-          break;
-        }
 
-        case "send_team": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
+          case "leave_team": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
 
-          const result = router.routeTeam(
-            senderName,
-            data.team,
-            data.content,
-            data.type,
-            data.reply_to,
-          );
-          if (!result.ok) {
-            sendResponse(ws, requestId, false, undefined, result.error);
-          } else {
+            const remaining = teams.leave(data.team, senderName);
+            const agentEntry = registry.getByFullName(senderName);
+            if (agentEntry) {
+              agentEntry.teams.delete(data.team);
+            }
             sendResponse(ws, requestId, true, {
-              message_id: result.message_id,
-              delivered_to: result.delivered_to,
-              skipped_no_channel: result.skipped_no_channel,
+              team: data.team,
+              remaining_members: remaining,
             });
             dashboardBroadcastFn({
-              event: "message:routed",
-              message_id: result.message_id,
-              from: senderName,
-              to: `team:${data.team}`,
-              type: data.type,
-              content: data.content,
+              event: "team:changed",
               team: data.team,
-              reply_to: data.reply_to,
+              members:
+                remaining === 0 ? [] : [...(teams.getMembers(data.team) ?? [])],
+              action: remaining === 0 ? "deleted" : "left",
+            });
+            break;
+          }
+
+          case "list_agents": {
+            const agents = registry.list();
+            sendResponse(ws, requestId, true, agents);
+            break;
+          }
+
+          case "list_teams": {
+            const teamList = teams.list();
+            sendResponse(ws, requestId, true, teamList);
+            break;
+          }
+
+          case "query_events": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+
+            const events = eventLog.query({
+              event: data.event,
+              since: data.since,
+              limit: data.limit,
+              agent: data.agent,
+            });
+            sendResponse(ws, requestId, true, {
+              events,
+              count: events.length,
+              oldest_ts: eventLog.oldestTs(),
+              capacity: eventLog.capacity,
+            });
+            break;
+          }
+
+          case "get_mailbox": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+
+            let targetFullName = senderName;
+            // Whether the caller named a target at all — as opposed to
+            // the implicit "my own mailbox" default. Used below to gate
+            // markRead: a *resolved* match against the caller's own name
+            // doesn't mean the caller *asked* for their own name (e.g. a
+            // partial address whose only remaining match happens to be
+            // the caller itself after a sibling session went offline).
+            const explicitAgent =
+              data.agent !== undefined && data.agent !== null;
+            if (explicitAgent) {
+              if (typeof data.agent !== "string") {
+                sendResponse(
+                  ws,
+                  requestId,
+                  false,
+                  undefined,
+                  "agent must be a string",
+                );
+                return;
+              }
+              const resolved = registry.resolve(data.agent);
+              if (resolved.ok) {
+                targetFullName = resolved.entry.fullName;
+              } else if (resolved.ambiguous) {
+                // Multiple *online* agents match `data.agent` right now —
+                // report the live collision directly, the same as
+                // routeDirect does. Falling through to
+                // resolveSeenNameOrAmbiguous here would apply a different
+                // match priority over a different (all-time-seen)
+                // population and could silently collapse to a third,
+                // unrelated agent's mailbox.
+                sendResponse(ws, requestId, false, undefined, resolved.error);
+                return;
+              } else {
+                const seen = registry.resolveSeenNameOrAmbiguous(data.agent);
+                // An ambiguous partial name (matches >1 seen fullName) must
+                // surface as an error, not a silent `found: false` — that
+                // would be indistinguishable from "this agent exists and
+                // has an empty mailbox".
+                if (seen && "error" in seen) {
+                  sendResponse(ws, requestId, false, undefined, seen.error);
+                  return;
+                }
+                targetFullName = seen ? seen.fullName : data.agent;
+              }
+            }
+
+            const entry = router.mailbox.get(targetFullName);
+            const response: GetMailboxResponseData = entry
+              ? { found: true, entry: { ...entry } }
+              : { found: false };
+            // Mark read whenever the resolved target IS the caller,
+            // regardless of what address form they used to name
+            // themselves — resolve()/resolveSeenNameOrAmbiguous only land
+            // on senderName when the caller's own identity is the sole
+            // referent, so this is never a sibling's peek landing on the
+            // caller by coincidence.
+            if (entry && targetFullName === senderName) {
+              router.mailbox.markRead(targetFullName);
+            }
+            sendResponse(ws, requestId, true, response);
+            break;
+          }
+
+          case "ping": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+
+            // Echo back as an inbound message so it arrives as a channel notification
+            const pingFrame: InboundMessageFrame = {
+              event: "message",
+              message_id: crypto.randomUUID(),
+              from: "hub@claude-net",
+              to: senderName,
+              type: "message",
+              content: `claude-net channel active. Registered as ${senderName}.`,
               timestamp: new Date().toISOString(),
-            });
-            emit("message.team", {
-              from: senderName,
-              team: data.team,
-              messageId: result.message_id,
-              deliveredTo: result.delivered_to,
-              skippedNoChannel: result.skipped_no_channel,
-            });
+            };
+            ws.send(JSON.stringify(pingFrame));
+            sendResponse(ws, requestId, true, { pong: true });
+            break;
           }
-          break;
-        }
 
-        case "join_team": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          const members = teams.join(data.team, senderName);
-          const agentEntry = registry.getByFullName(senderName);
-          if (agentEntry) {
-            agentEntry.teams.add(data.team);
-          }
-          sendResponse(ws, requestId, true, {
-            team: data.team,
-            members,
-          });
-          dashboardBroadcastFn({
-            event: "team:changed",
-            team: data.team,
-            members,
-            action: members.length === 1 ? "created" : "joined",
-          });
-          break;
-        }
-
-        case "leave_team": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          const remaining = teams.leave(data.team, senderName);
-          const agentEntry = registry.getByFullName(senderName);
-          if (agentEntry) {
-            agentEntry.teams.delete(data.team);
-          }
-          sendResponse(ws, requestId, true, {
-            team: data.team,
-            remaining_members: remaining,
-          });
-          dashboardBroadcastFn({
-            event: "team:changed",
-            team: data.team,
-            members:
-              remaining === 0 ? [] : [...(teams.getMembers(data.team) ?? [])],
-            action: remaining === 0 ? "deleted" : "left",
-          });
-          break;
-        }
-
-        case "list_agents": {
-          const agents = registry.list();
-          sendResponse(ws, requestId, true, agents);
-          break;
-        }
-
-        case "list_teams": {
-          const teamList = teams.list();
-          sendResponse(ws, requestId, true, teamList);
-          break;
-        }
-
-        case "query_events": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          const events = eventLog.query({
-            event: data.event,
-            since: data.since,
-            limit: data.limit,
-            agent: data.agent,
-          });
-          sendResponse(ws, requestId, true, {
-            events,
-            count: events.length,
-            oldest_ts: eventLog.oldestTs(),
-            capacity: eventLog.capacity,
-          });
-          break;
-        }
-
-        case "ping": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-
-          // Echo back as an inbound message so it arrives as a channel notification
-          const pingFrame: InboundMessageFrame = {
-            event: "message",
-            message_id: crypto.randomUUID(),
-            from: "hub@claude-net",
-            to: senderName,
-            type: "message",
-            content: `claude-net channel active. Registered as ${senderName}.`,
-            timestamp: new Date().toISOString(),
-          };
-          ws.send(JSON.stringify(pingFrame));
-          sendResponse(ws, requestId, true, { pong: true });
-          break;
-        }
-
-        case "update_channel_capable": {
-          const senderName = requireRegistered(ws, requestId);
-          if (!senderName) return;
-          if (typeof data.channel_capable !== "boolean") {
-            sendResponse(
-              ws,
-              requestId,
-              false,
-              undefined,
-              "channel_capable must be a boolean",
+          case "update_channel_capable": {
+            const senderName = requireRegistered(ws, requestId);
+            if (!senderName) return;
+            if (typeof data.channel_capable !== "boolean") {
+              sendResponse(
+                ws,
+                requestId,
+                false,
+                undefined,
+                "channel_capable must be a boolean",
+              );
+              return;
+            }
+            const ok = registry.setChannelCapable(
+              senderName,
+              data.channel_capable,
             );
-            return;
+            if (!ok) {
+              sendResponse(ws, requestId, false, undefined, "Agent not found");
+              return;
+            }
+            emit("agent.channel_capable_changed", {
+              fullName: senderName,
+              channelCapable: data.channel_capable,
+            });
+            sendResponse(ws, requestId, true, {
+              channel_capable: data.channel_capable,
+            });
+            break;
           }
-          const ok = registry.setChannelCapable(
-            senderName,
-            data.channel_capable,
-          );
-          if (!ok) {
-            sendResponse(ws, requestId, false, undefined, "Agent not found");
-            return;
-          }
-          emit("agent.channel_capable_changed", {
-            fullName: senderName,
-            channelCapable: data.channel_capable,
-          });
-          sendResponse(ws, requestId, true, {
-            channel_capable: data.channel_capable,
-          });
-          break;
-        }
 
-        default: {
-          sendResponse(ws, requestId, false, undefined, "Unknown action");
+          default: {
+            sendResponse(ws, requestId, false, undefined, "Unknown action");
+          }
         }
       }
     },

@@ -257,6 +257,7 @@ export type PluginFrame =
   | ListTeamsFrame
   | PingFrame
   | QueryEventsFrame
+  | GetMailboxFrame
   | MirrorEventFrame
   | MirrorPasteDoneFrame
   | MirrorFileDoneFrame
@@ -286,7 +287,9 @@ export type SendNakReason =
   | "offline"
   | "no-channel"
   | "transport-error"
-  | "no-dashboard";
+  | "no-dashboard"
+  | "ambiguous"
+  | "invalid-content";
 
 export type SendDirectResponseData =
   | {
@@ -296,14 +299,52 @@ export type SendDirectResponseData =
       delivered: true;
       to_dashboard?: boolean;
     }
-  | { outcome: "nak"; reason: SendNakReason };
+  | {
+      outcome: "nak";
+      reason: SendNakReason;
+      /** Whether the content was recorded to the recipient's mailbox. */
+      mailbox: boolean;
+    };
 
 export interface SendTeamResponseData {
   message_id: string;
   delivered_to: number;
   /** Count of online team members skipped because `channel_capable` is false. */
   skipped_no_channel: number;
+  /** Whether any member who didn't get live delivery still got a mailbox deposit. */
+  mailbox: boolean;
 }
+
+export interface GetMailboxFrame {
+  action: "get_mailbox";
+  /** Target agent's mailbox to read; defaults to the caller's own identity when omitted. */
+  agent?: string;
+  requestId?: string;
+}
+
+export interface MailboxEntryData {
+  message_id: string;
+  from: string;
+  to: string;
+  type: MessageType;
+  content: string;
+  reply_to?: string;
+  team?: string;
+  /**
+   * `nak` is an agent-to-agent send the hub declined to live-deliver.
+   * `skipped` is a hub-originated notification (routeSystemNotification)
+   * that wasn't live-delivered — there's no sender to NAK, so it isn't
+   * a rejected send.
+   */
+  outcome: "delivered" | "nak" | "skipped";
+  reason?: SendNakReason;
+  sent_at: string;
+  read_at: string | null;
+}
+
+export type GetMailboxResponseData =
+  | { found: true; entry: MailboxEntryData }
+  | { found: false };
 
 export interface InboundMessageFrame {
   event: "message";
@@ -522,7 +563,7 @@ export interface TeamChangedEvent {
   event: "team:changed";
   team: string;
   members: string[];
-  action: "joined" | "left" | "created" | "deleted";
+  action: "joined" | "left" | "created" | "deleted" | "renamed";
 }
 
 export interface MirrorSessionStartedEvent {

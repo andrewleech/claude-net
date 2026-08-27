@@ -301,6 +301,16 @@ describe("plugin helpers", () => {
       expect(frame.agent).toBe("alice");
     });
 
+    test("mailbox: no args produces get_mailbox with no agent", () => {
+      const frame = plugin.mapToolToFrame("mailbox", {});
+      expect(frame).toEqual({ action: "get_mailbox" });
+    });
+
+    test("mailbox: agent is forwarded", () => {
+      const frame = plugin.mapToolToFrame("mailbox", { agent: "alice" });
+      expect(frame).toEqual({ action: "get_mailbox", agent: "alice" });
+    });
+
     test("unknown tool: returns null", () => {
       const frame = plugin.mapToolToFrame("unknown_tool", {});
       expect(frame).toBeNull();
@@ -649,9 +659,9 @@ describe("plugin helpers", () => {
       }
     });
 
-    test("TOOL_DEFINITIONS has 11 well-formed entries", () => {
+    test("TOOL_DEFINITIONS has 12 well-formed entries", () => {
       expect(Array.isArray(TOOL_DEFINITIONS)).toBe(true);
-      expect(TOOL_DEFINITIONS.length).toBe(11);
+      expect(TOOL_DEFINITIONS.length).toBe(12);
       const names = new Set<string>();
       for (const tool of TOOL_DEFINITIONS as Array<{
         name: string;
@@ -676,6 +686,7 @@ describe("plugin helpers", () => {
           "leave_team",
           "list_agents",
           "list_teams",
+          "mailbox",
           "ping",
           "register",
           "send_message",

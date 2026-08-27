@@ -221,6 +221,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
             messageId: null,
             outcome: result.outcome,
             reason: result.reason,
+            mailbox: result.mailbox,
             elapsedMs,
           });
           set.status = 400;
@@ -228,6 +229,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
             error: result.error,
             outcome: result.outcome,
             reason: result.reason,
+            mailbox: result.mailbox,
           };
         }
         eventLog.push("message.sent", {
@@ -265,7 +267,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
         );
         if (!result.ok) {
           set.status = 400;
-          return { error: result.error };
+          return { error: result.error, mailbox: result.mailbox };
         }
         eventLog.push("message.team", {
           from: "dashboard@hub",
@@ -278,6 +280,7 @@ export function apiPlugin(deps: ApiDeps): Elysia {
           message_id: result.message_id,
           delivered_to: result.delivered_to,
           skipped_no_channel: result.skipped_no_channel,
+          mailbox: result.mailbox,
         };
       })
 

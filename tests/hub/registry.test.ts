@@ -622,4 +622,106 @@ describe("Registry", () => {
     expect(registry.findByHostPid("host", Number.NaN)).toBeNull();
     expect(registry.findByHostPid("host", Number.POSITIVE_INFINITY)).toBeNull();
   });
+
+  // ── resolve(): ambiguous flag ────────────────────────────────────────────
+
+  test("resolve() sets ambiguous:true when a partial name matches more than one online agent", () => {
+    registry.register("sessA:same@host1", mockWs());
+    registry.register("sessB:same@host2", mockWs());
+    const result = registry.resolve("same");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.ambiguous).toBe(true);
+  });
+
+  test("resolve() does not set ambiguous for a plain not-online lookup", () => {
+    const result = registry.resolve("nobody");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.ambiguous).toBeUndefined();
+  });
+
+  // ── seenNames + resolveSeenNameOrAmbiguous ──────────────────────────────
+
+  describe("seenNames / resolveSeenNameOrAmbiguous", () => {
+    test("a registered fullName is seen even after it disconnects", () => {
+      const ws = mockWs();
+      const identity = {};
+      registry.register("seen:alice@host", ws, identity);
+      expect(registry.seenNames.has("seen:alice@host")).toBe(true);
+      registry.unregister("seen:alice@host", identity);
+      expect(registry.seenNames.has("seen:alice@host")).toBe(true);
+      expect(registry.resolveSeenNameOrAmbiguous("seen:alice@host")).toEqual({
+        fullName: "seen:alice@host",
+      });
+    });
+
+    test("a name that was never registered resolves to null", () => {
+      expect(registry.resolveSeenNameOrAmbiguous("ghost:nobody@host")).toBe(
+        null,
+      );
+    });
+
+    test("a rename drops the old name from seenNames", () => {
+      const ws = mockWs();
+      const identity = {};
+      registry.register("old:alice@host", ws, identity);
+      registry.register("new:alice@host", ws, identity);
+      expect(registry.seenNames.has("old:alice@host")).toBe(false);
+      expect(registry.seenNames.has("new:alice@host")).toBe(true);
+      expect(registry.resolveSeenNameOrAmbiguous("old:alice@host")).toBe(null);
+    });
+
+    test("a partial address matching two seenNames that were never concurrently online collapses to the most recent", () => {
+      const wsA = mockWs();
+      const identityA = {};
+      registry.register("sessA:mb@host", wsA, identityA);
+      registry.unregister("sessA:mb@host", identityA);
+
+      const wsB = mockWs();
+      registry.register("sessB:mb@host", wsB, {});
+
+      // "mb@host" (user@host) matches both sessA:mb@host and sessB:mb@host,
+      // but sessA had already disconnected before sessB ever registered —
+      // their online intervals never overlapped, so this collapses to the
+      // most-recently-seen one instead of reporting ambiguous.
+      expect(registry.resolveSeenNameOrAmbiguous("mb@host")).toEqual({
+        fullName: "sessB:mb@host",
+      });
+    });
+
+    test("a partial address matching two seenNames that were concurrently online reports ambiguous", () => {
+      registry.register("sessA:mb@host", mockWs(), {});
+      registry.register("sessB:mb@host", mockWs(), {});
+
+      const result = registry.resolveSeenNameOrAmbiguous("mb@host");
+      expect(result).not.toBeNull();
+      expect(result && "error" in result).toBe(true);
+    });
+
+    test("a plain single-component query reports ambiguous on multiple matches even without overlap", () => {
+      const wsA = mockWs();
+      const identityA = {};
+      registry.register("dup:alice@host1", wsA, identityA);
+      registry.unregister("dup:alice@host1", identityA);
+      registry.register("dup:bob@host2", mockWs(), {});
+
+      // Both online intervals are sequential, not overlapping — but a
+      // plain query ("dup") has no pinned components, so ambiguity is
+      // always reported on multiple matches regardless of overlap.
+      const result = registry.resolveSeenNameOrAmbiguous("dup");
+      expect(result).not.toBeNull();
+      expect(result && "error" in result).toBe(true);
+    });
+
+    test("seenNames evicts the oldest entry once over capacity", () => {
+      const small = new Registry({ seenNamesCapacity: 2 });
+      small.register("a:one@host", mockWs(), {});
+      small.register("b:two@host", mockWs(), {});
+      small.register("c:three@host", mockWs(), {});
+      expect(small.seenNames.has("a:one@host")).toBe(false);
+      expect(small.seenNames.has("b:two@host")).toBe(true);
+      expect(small.seenNames.has("c:three@host")).toBe(true);
+    });
+  });
 });

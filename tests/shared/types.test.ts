@@ -5,12 +5,15 @@ import type {
   AgentInfo,
   DashboardEvent,
   ErrorFrame,
+  GetMailboxFrame,
+  GetMailboxResponseData,
   HubFrame,
   InboundMessageFrame,
   JoinTeamFrame,
   LeaveTeamFrame,
   ListAgentsFrame,
   ListTeamsFrame,
+  MailboxEntryData,
   MessageRoutedEvent,
   MessageType,
   PluginFrame,
@@ -96,6 +99,21 @@ describe("shared types", () => {
     test("ListTeamsFrame", () => {
       const frame: PluginFrame = { action: "list_teams" };
       expect(frame.action).toBe("list_teams");
+    });
+
+    test("GetMailboxFrame", () => {
+      const frame: PluginFrame = {
+        action: "get_mailbox",
+        agent: "bob@host",
+        requestId: "r1",
+      };
+      if (frame.action === "get_mailbox") {
+        expect(frame.agent).toBe("bob@host");
+        expect(frame.requestId).toBe("r1");
+      }
+
+      const selfFrame: PluginFrame = { action: "get_mailbox" };
+      expect(selfFrame.action).toBe("get_mailbox");
     });
 
     test("discriminated union narrows correctly", () => {
@@ -250,6 +268,41 @@ describe("shared types", () => {
         ],
       };
       expect(team.members).toHaveLength(2);
+    });
+
+    test("MailboxEntryData", () => {
+      const entry: MailboxEntryData = {
+        message_id: "m1",
+        from: "a@h",
+        to: "b@h",
+        type: "message",
+        content: "hi",
+        outcome: "nak",
+        reason: "offline",
+        sent_at: "2026-01-01T00:00:00Z",
+        read_at: null,
+      };
+      expect(entry.outcome).toBe("nak");
+      expect(entry.reason).toBe("offline");
+    });
+
+    test("GetMailboxResponseData", () => {
+      const found: GetMailboxResponseData = {
+        found: true,
+        entry: {
+          message_id: "m1",
+          from: "a@h",
+          to: "b@h",
+          type: "message",
+          content: "hi",
+          outcome: "delivered",
+          sent_at: "2026-01-01T00:00:00Z",
+          read_at: null,
+        },
+      };
+      const empty: GetMailboxResponseData = { found: false };
+      if (found.found) expect(found.entry.content).toBe("hi");
+      expect(empty.found).toBe(false);
     });
   });
 });

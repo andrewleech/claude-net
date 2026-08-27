@@ -211,6 +211,45 @@ describe("REST API endpoints", () => {
     expect(body.error).toBeTruthy();
   });
 
+  test("POST /api/send NAK body carries the mailbox field, matching the WS send response", async () => {
+    const wsBob = await connect();
+    await registerAgent(wsBob, "api-mb1:tester@host");
+    wsBob.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const resp = await fetch(`${baseUrl}/api/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: "api-mb1:tester@host",
+        content: "for the offline api recipient",
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.outcome).toBe("nak");
+    expect(body.reason).toBe("offline");
+    expect(body.mailbox).toBe(true);
+  });
+
+  test("POST /api/send with non-string content returns 400 instead of throwing", async () => {
+    const ws = await connect();
+    await registerAgent(ws, "api-badcontent:tester@host");
+
+    const resp = await fetch(`${baseUrl}/api/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: "api-badcontent:tester@host",
+        content: 123,
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.reason).toBe("invalid-content");
+    expect(body.mailbox).toBe(false);
+  });
+
   test("POST /api/send with missing fields returns 400", async () => {
     const resp = await fetch(`${baseUrl}/api/send`, {
       method: "POST",
@@ -261,6 +300,7 @@ describe("REST API endpoints", () => {
     const body = (await resp.json()) as Msg;
     expect(body.message_id).toBeTruthy();
     expect(body.delivered_to).toBe(2);
+    expect(body.mailbox).toBe(false);
 
     const [a, b] = await Promise.all([msgA, msgB]);
     expect(a.from).toBe("dashboard@hub");
@@ -276,6 +316,61 @@ describe("REST API endpoints", () => {
     expect(resp.status).toBe(400);
     const body = (await resp.json()) as Msg;
     expect(body.error).toBeTruthy();
+  });
+
+  test("POST /api/send_team error body carries the mailbox field, matching the WS send_team response", async () => {
+    const wsBob = await connect();
+    await registerAgent(wsBob, "api-mb2:tester@host");
+    const j = waitForMessage(wsBob);
+    wsBob.send(
+      JSON.stringify({
+        action: "join_team",
+        team: "api-mb-team",
+        requestId: "j-mb",
+      }),
+    );
+    await j;
+    wsBob.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const resp = await fetch(`${baseUrl}/api/send_team`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        team: "api-mb-team",
+        content: "team msg, nobody online",
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.mailbox).toBe(true);
+  });
+
+  test("POST /api/send_team with non-string content returns 400 instead of throwing", async () => {
+    const ws = await connect();
+    await registerAgent(ws, "api-team-badcontent:tester@host");
+
+    const j = waitForMessage(ws);
+    ws.send(
+      JSON.stringify({
+        action: "join_team",
+        team: "api-badcontent-team",
+        requestId: "j1",
+      }),
+    );
+    await j;
+
+    const resp = await fetch(`${baseUrl}/api/send_team`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        team: "api-badcontent-team",
+        content: { not: "a string" },
+      }),
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as Msg;
+    expect(body.mailbox).toBe(false);
   });
 
   test("POST /api/send_team with missing fields returns 400", async () => {

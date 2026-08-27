@@ -326,6 +326,40 @@ describe("Dashboard WebSocket (/ws/dashboard)", () => {
     expect(leaveEvent.members).toEqual([]);
   });
 
+  test("dashboard receives team:changed when a team member renames", async () => {
+    const agentWs = await agent();
+    await registerAgent(agentWs, "old:tr@host");
+
+    const joinP = waitForMessage(agentWs);
+    agentWs.send(
+      JSON.stringify({
+        action: "join_team",
+        team: "rename-notify",
+        requestId: "jt-rn",
+      }),
+    );
+    await joinP;
+
+    const d = await dash();
+    await drainMessages(d, 150);
+
+    // Re-register on the same socket under a new name — a rename.
+    const teamChangedP = waitForEvent(d, "team:changed");
+    agentWs.send(
+      JSON.stringify({
+        action: "register",
+        name: "new:tr@host",
+        channel_capable: false,
+        requestId: "rn-1",
+      }),
+    );
+
+    const teamChanged = await teamChangedP;
+    expect(teamChanged.team).toBe("rename-notify");
+    expect(teamChanged.action).toBe("renamed");
+    expect(teamChanged.members).toEqual(["new:tr@host"]);
+  });
+
   test("multiple dashboard connections receive same events", async () => {
     const d1 = await dash();
     const d2 = await dash();

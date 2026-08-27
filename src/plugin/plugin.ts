@@ -137,6 +137,7 @@ Available tools:
 - list_agents() — list all agents with status
 - list_teams() — list all teams with members
 - hub_events(filter?, since_minutes?, limit?, agent?) — query recent hub events. Use to diagnose delivery failures: e.g. filter="message.sent" agent="recipient-name" since_minutes=5
+- mailbox(agent?) — read an agent's single-slot mailbox (most recent message sent to them). Omit agent to read your own (marks it read); pass a name to peek at anyone's without marking it read.
 - _ack_channel() — channel self-test ack. Call in response to EVERY probe notification from "system@claude-net" — probes repeat after restarts/reconnects and each one requires a fresh ack (see CHANNEL CAPABILITY SELF-TEST below). Never call in response to agent messages.
 
 IDENTITY AND REGISTRATION:
@@ -213,19 +214,31 @@ If you never see the startup probe, channels may not be loaded — the
 MCP tools still work but inbound messages won't appear. Ask the user
 to run \`install-channels\` on this host to enable inbound delivery.
 
-MESSAGES ARE EPHEMERAL — NO QUEUE:
-claude-net is strictly live delivery. There is NO message queue, NO
-store-and-forward, NO retry, and NO offline delivery of any kind.
+MESSAGES ARE EPHEMERAL — NO QUEUE (except the one-slot mailbox):
+claude-net is still live-delivery-first. There is NO multi-message
+queue, NO retry, and NO general offline delivery of any kind.
 
 - If a recipient is offline, send_message returns an error and the
-  message is dropped. It will NOT be delivered when they come back.
+  message is dropped from live delivery. It will NOT be delivered when
+  they come back.
 - Team sends only reach agents online AT THE MOMENT of send. Agents
   that join later do not get replayed messages.
+- However: every send also writes into the recipient's single-slot
+  mailbox (overwritten by the next send to them), even on a NAK'd
+  send — UNLESS the recipient has never been seen this hub lifetime,
+  the name is ambiguous (matches more than one agent), or the target
+  is the dashboard virtual agent. This exists because live "delivered"
+  can silently fail on the receiver's side (broken channel render,
+  un-acked _ack_channel probe, transport blip). Call mailbox(agent?)
+  to read your own (marks read) or peek at anyone else's (does not
+  mark read, no access restriction).
 - Do NOT tell the user "I'll send it and they'll get it when they come
-  back online" or "the message is queued". That is not how this works.
+  back online" or "the message is queued" — that is not how this
+  works. Only the one-slot mailbox above exists; there is no general
+  queue for arbitrary offline periods.
 - When a send fails because the recipient is offline, report that
   directly to the user and ask what they'd like to do (wait, pick
-  another agent, try later manually, etc.).
+  another agent, check their mailbox, try later manually, etc.).
 
 Always include reply_to when responding to a specific message.
 The from field on all messages is your full session:user@host identity, set by the hub.`;
@@ -665,7 +678,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "send_message",
     description:
-      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name. Live delivery only — fails if the recipient is offline, no queuing. Returns an error with a `reason` field (`offline` / `no-channel` / `unknown` / `no-dashboard`) if delivery cannot be confirmed.',
+      'Send a message to an agent by name. Accepts full "session:user@host", partial "session:user", "user@host", or plain session/user/host name. Live delivery only — fails if the recipient is offline, no queuing. Returns an error with a `reason` field (`offline` / `no-channel` / `transport-error` / `ambiguous` / `invalid-content` / `no-dashboard`) if delivery cannot be confirmed — `ambiguous` means the partial name matches more than one agent; resend with the full name instead of waiting or checking their mailbox. Whenever the recipient\'s identity is known to the hub, the content is also recorded to their single-slot mailbox (overwritten by the next send to them) — including on a NAK — so a silent live-delivery failure can be recovered with the `mailbox` tool. (The dashboard virtual target is not a real agent identity and is excluded from this — nothing is recorded for it.)',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -687,7 +700,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "send_team",
     description:
-      "Send a message to currently-online members of a team. Offline members are skipped — the message is NOT delivered when they reconnect.",
+      "Send a message to currently-online members of a team. Offline members are skipped — the message is NOT delivered when they reconnect. Each member's single-slot mailbox is still written when their identity is known to the hub, even if they were skipped for live delivery, so the `mailbox` tool can recover it.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -787,6 +800,22 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Substring filter on agent name (from/to/fullName fields).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "mailbox",
+    description:
+      "Read an agent's mailbox — a single slot per agent holding only the most recently sent message addressed to them, overwritten by the next send. Exists because live delivery can silently fail even when the hub reports success (broken channel render, incomplete _ack_channel probe, transport blip); this recovers the actual content without asking the sender to resend. The slot mirrors the last send regardless of whether live delivery actually succeeded — `outcome: \"delivered\"` only means the hub handed it to the socket, not that the recipient rendered or acted on it — so the message may be one you already saw and handled in-channel; don't blindly reprocess it. Omit `agent` (or pass your own exact name) to read your own mailbox (marks it read). Pass a partial address or another agent's name to peek at their mailbox without marking it read — anyone can peek at anyone's mailbox, there is no access restriction.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        agent: {
+          type: "string",
+          description:
+            "Agent whose mailbox to read (full, partial, or plain name). Omit to read your own.",
         },
       },
       required: [],
@@ -1017,6 +1046,11 @@ export class Plugin {
           ...(args.agent ? { agent: args.agent } : {}),
         };
       }
+      case "mailbox":
+        return {
+          action: "get_mailbox",
+          ...(args.agent ? { agent: args.agent } : {}),
+        };
       default:
         return null;
     }

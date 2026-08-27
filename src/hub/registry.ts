@@ -98,14 +98,17 @@ export class Registry {
     }
 
     // Detect rename: same wsIdentity, different name. At most one match
-    // is possible because register() maintains the invariant.
+    // is possible because register() maintains the invariant. Detection
+    // only — no mutation yet. Every rejection path below must run before
+    // the renamer's original identity is touched, so a rejected rename
+    // leaves that identity fully intact (still registered under its old
+    // name) rather than orphaned.
     let renamedFrom: string | undefined;
     let inheritedTeams: Set<string> | null = null;
     for (const [existingName, entry] of this.agents) {
       if (entry.wsIdentity === identity && existingName !== fullName) {
         renamedFrom = existingName;
         inheritedTeams = new Set(entry.teams);
-        this.agents.delete(existingName);
         break;
       }
     }
@@ -131,6 +134,11 @@ export class Registry {
         };
       }
       inheritedTeams = inheritedTeams ?? new Set(existing.teams);
+    }
+
+    // Every rejection path has now passed — safe to mutate.
+    if (renamedFrom) this.agents.delete(renamedFrom);
+    if (existing && existing.wsIdentity !== identity) {
       this.agents.delete(fullName);
     }
 

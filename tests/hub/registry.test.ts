@@ -461,6 +461,27 @@ describe("Registry", () => {
     expect(result.ok).toBe(false);
   });
 
+  test("a rejected rename onto a name held by a different session leaves the renamer's original identity intact", () => {
+    const wsA = mockWs();
+    const wsB = mockWs();
+    const identityA = {};
+    registry.register("a:alice@host", wsA, identityA, { ccPid: 100 });
+    registry.register("b:bob@host", wsB, {}, { ccPid: 200 });
+
+    // Same wsIdentity as the "a:alice@host" registration (a rename
+    // attempt), but the target name is already held by a genuinely
+    // different session (different ccPid) — must be rejected.
+    const result = registry.register("b:bob@host", wsA, identityA, {
+      ccPid: 100,
+    });
+    expect(result.ok).toBe(false);
+
+    // The rejected rename must not have erased the renamer's original
+    // identity — it should still be registered under its old name.
+    expect(registry.getByFullName("a:alice@host")).not.toBeNull();
+    expect(registry.getByFullName("b:bob@host")?.ccPid).toBe(200);
+  });
+
   // ── lastPongAt (WS liveness) ───────────────────────────────────────────
 
   test("register initializes lastPongAt close to now", () => {

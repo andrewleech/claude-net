@@ -4,13 +4,14 @@
 `parity_harness.py` and `ceremony_tests.py` invoke the mcp runtime as an
 interpreter against the source-tree `plugin.py` (`[MPY_BINARY,
 "plugin.py"]`) -- that is the P7 parity gate for plugin behaviour, and
-this script does not replace it. `scripts/package-plugin.py` instead
-appends the plugin's own romfs to the runtime and produces a
-single-file, argument-less executable (app-runner mode: the runtime
-auto-runs `/rom/main.py`). This script is the packaging-specific
-counterpart: it drives the packaged artifact through an MCP handshake to
-confirm the appended romfs resolves `import plugin` / `import mpyfastmcp`
-/ `import mpyws` etc. with no sys.path hacks, and that tool/prompt
+this script does not replace it. `picolet build` (driven by
+`picolet.toml` in this directory) instead appends the plugin's own romfs,
+compiled to `.mpy`, to the runtime and produces a single-file,
+argument-less executable (app-runner mode: the runtime auto-runs
+`/rom/main.mpy`). This script is the packaging-specific counterpart: it
+drives the packaged artifact through an MCP handshake to confirm the
+appended romfs resolves `import plugin` / `import mpyfastmcp` /
+`import mpyws` etc. with no sys.path hacks, and that tool/prompt
 registration survives the packaging step unchanged.
 
 Runs fully offline (no CLAUDE_NET_HUB) -- tool calls that need the hub are
@@ -26,7 +27,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_BINARY = Path(__file__).resolve().parents[3] / "build" / "claude-net-plugin-linux-x64"
+DEFAULT_BINARY = (
+    Path(__file__).resolve().parents[1] / "target" / "linux-x64" / "claude-net-plugin"
+)
 
 EXPECTED_TOOL_NAMES = {
     "whoami",

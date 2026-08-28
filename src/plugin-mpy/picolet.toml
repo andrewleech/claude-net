@@ -1,0 +1,38 @@
+[app]
+name = "claude-net-plugin"
+version = "0.2.0"
+entry = "plugin.py"
+
+[build]
+variant = "mcp"
+
+[romfs]
+# "." covers the whole app directory: isrg_root_x1.der is the one asset it
+# needs to bring in. exclude applies to BOTH the entry tree (_compile_mpy)
+# and this include (_copy_includes), so it can't blanket-exclude *.py here
+# without also hiding the app's real source from _compile_mpy — its .py
+# files get walked (and cross-compiled to .mpy) by both, harmlessly
+# recompiling the same handful of small files twice at build time.
+include = ["."]
+exclude = [
+    "picolet.toml",
+    "test_*.py", "tests", "proof_taxonomy.py",
+    "example_echo.py", "example_*.py", "demo_server.py", "mock_hub.py",
+    "README.md", "__pycache__", ".pytest_cache", "*.pyc",
+    "localhost_cert.der", "localhost_cert.pem", "localhost_key.pem",
+]
+
+# Keeps the plugin's version literal in lockstep across the MicroPython and
+# bun runtimes (docs/proposals: closes the known gap where plugin.ts's copy
+# went unchecked by the old two-way package-plugin.py comparison).
+[[version_check]]
+path = "_version.py"
+pattern = 'PLUGIN_VERSION = "([^"]+)"'
+
+[[version_check]]
+path = "../../package.json"
+pattern = '"version": "([^"]+)"'
+
+[[version_check]]
+path = "../plugin/plugin.ts"
+pattern = 'PLUGIN_VERSION = "([^"]+)"'

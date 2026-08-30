@@ -208,9 +208,14 @@ class SessionChannelListPatch:
     region.
 
     Anchored on the body signature rather than the minified function
-    name (`IRt` in 2.1.229, `Z` in 2.1.246) or the lambda's parameter
-    name (`n` in 2.1.229, `i` in 2.1.246), both of which drift every
-    release.
+    name (`IRt` in 2.1.229, `Z` in 2.1.246, `CZ` in 2.1.251), the
+    outer function's second parameter (`t` in 2.1.229/2.1.246, `r` in
+    2.1.251), the split-result variable (`r` in 2.1.229/2.1.246, `o`
+    in 2.1.251), or the lambda's parameter name (`n` in 2.1.229, `i`
+    in 2.1.246, `a` in 2.1.251) — all of which drift every release.
+    2.1.251 also extended the lambda body with a plugin-vs-server
+    ternary the anchor never needed to match in the first place, since
+    it only anchors on the shared `kind==="server"` prefix.
     """
 
     name = "Session channel list fallback (IRt)"
@@ -223,8 +228,8 @@ class SessionChannelListPatch:
     expect_count = 1
     diag_anchor = b"not in --channels list for this session"
     ANCHOR_RX = (
-        rb'function [\w$]{1,6}\(e,t\)\{'
-        rb'(?=let r=e\.split\(":"\);return t\.find\(\(([\w$])\)=>\1\.kind==="server")'
+        rb'function [\w$]{1,6}\(e,([\w$])\)\{'
+        rb'(?=let [\w$]{1,3}=e\.split\(":"\);return \1\.find\(\(([\w$])\)=>\2\.kind==="server")'
     )
     FALLBACK = b'??{kind:"server",name:e,dev:!0}'
 

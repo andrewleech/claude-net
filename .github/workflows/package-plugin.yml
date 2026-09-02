@@ -25,13 +25,14 @@ env:
   # Pin the picolet ref this pipeline builds the mcp runtime AND picolet-cli
   # from, to an immutable commit SHA. Bump deliberately, not implicitly via
   # `dev`'s moving HEAD, so a plugin-repo CI run is reproducible independent
-  # of concurrent picolet work. This is "runtime: vendor libffi's configure
-  # instead of regenerating per-host" -- the runner's cold-cache libffi build
-  # was failing on "possibly undefined macro: LT_SYS_SYMBOL_USCORE" even with
-  # the right package versions installed (some other automake/aclocal earlier
-  # in PATH, not a missing package); this commit sidesteps that by shipping a
-  # working configure instead of regenerating one on every runner.
-  PICOLET_REF: bd585a8c09d1c738be2eaa0ec7b14dbfb210dd02
+  # of concurrent picolet work. This is "runtime: vendor libffi's complete
+  # autogen output, not just configure" -- the previous pin's vendored
+  # configure alone got past the LT_SYS_SYMBOL_USCORE autogen failure but
+  # then hit "cannot find required auxiliary files: ltmain.sh compile
+  # missing install-sh" on the runner's genuinely fresh checkout (a gap
+  # invisible locally, where those files persisted from earlier autogen.sh
+  # runs). This pin vendors the complete generated tree.
+  PICOLET_REF: ae30ec484bd3d38ef2e1da17cfc7e4576a699047
 
 jobs:
   version-lockstep:

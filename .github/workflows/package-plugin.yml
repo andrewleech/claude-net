@@ -76,13 +76,29 @@ jobs:
           repository: andrewleech/picolet
           ref: ${{ env.PICOLET_REF }}
           path: picolet
-          submodules: recursive
+          # No recursive submodule checkout: the micropython submodule
+          # pointer picolet's dev branch records is a rebuild-integration.sh
+          # merge commit, local to whichever machine last ran it, never
+          # pushed anywhere fetchable -- actions/checkout's direct-commit
+          # fetch for it fails outright ("not our ref"). Clone it fresh and
+          # recompose the integration branch from mbm.toml instead, below.
 
       - name: Install host build prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip libtool automake autoconf
           pip3 install --user mpremote
+
+      - name: Clone micropython submodule fresh
+        run: |
+          cd picolet/packages/picolet-runtime
+          rmdir micropython
+          git clone https://github.com/andrewleech/micropython.git micropython
+
+      - name: Rebuild integration branch from mbm.toml
+        run: |
+          cd picolet/packages/picolet-runtime
+          ./scripts/rebuild-integration.sh
 
       - name: Build linux-x64/mcp runtime
         run: |

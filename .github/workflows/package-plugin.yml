@@ -22,16 +22,18 @@ on:
   workflow_dispatch:
 
 env:
-  # Pin the picolet ref this pipeline builds the mcp runtime from to an
-  # immutable commit SHA. Bump deliberately, not implicitly via `dev`'s
-  # moving HEAD, so a plugin-repo CI run is reproducible independent of
-  # concurrent picolet work (e.g. the micropython submodule rebuild
-  # tracked separately from this packaging effort). This is "Add
-  # linux-x64/mcp variant: cli baseline + static mbedtls TLS", the commit
-  # that both introduces the `mcp` variant and produced the reviewed
-  # 899,384 B binary this pipeline packages -- earlier picolet commits
-  # predate variants/mcp/ and cannot build it at all.
-  PICOLET_REF: be86d845af4556dcea501bb4aebb2dca651ea165
+  # Pin the picolet ref this pipeline builds the mcp runtime AND picolet-cli
+  # from, to an immutable commit SHA. Bump deliberately, not implicitly via
+  # `dev`'s moving HEAD, so a plugin-repo CI run is reproducible independent
+  # of concurrent picolet work (e.g. the micropython submodule rebuild
+  # tracked separately from this packaging effort). This is "cli: generalize
+  # .mpy packaging with variant override + exclude + version_check" -- the
+  # commit that adds [build].variant, [romfs].exclude and [[version_check]]
+  # to picolet-cli's schema, all of which src/plugin-mpy/picolet.toml uses.
+  # Any earlier picolet-cli predates that schema and hard-fails toml
+  # validation on this app's picolet.toml (unknown top-level section
+  # "version_check" is an error, not a warning).
+  PICOLET_REF: 5ccce34a1ad3b44501b4c196f394d08856393b6d
 
 jobs:
   version-lockstep:

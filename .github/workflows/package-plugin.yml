@@ -110,6 +110,18 @@ jobs:
           path: picolet/packages/picolet-runtime/build/picolet-runtime-linux-x64-mcp
           retention-days: 14
 
+      # picolet build (package-and-smoke, below) needs a version-matched
+      # mpy-cross on PATH -- it doesn't check out the micropython submodule
+      # (that's the whole runtime source tree, only needed here to build the
+      # runtime itself), so the one build-runtime.sh already built above,
+      # from the exact same integration composition the runtime binary just
+      # came from, has to travel with it as its own artifact.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mpy-cross-linux-x64
+          path: picolet/packages/picolet-runtime/micropython/mpy-cross/build/mpy-cross
+          retention-days: 14
+
   package-and-smoke:
     # Builds the single-file artifact via picolet-cli's own `picolet build`
     # (src/plugin-mpy/picolet.toml drives it: variant = "mcp", [romfs]
@@ -136,8 +148,18 @@ jobs:
           name: picolet-runtime-linux-x64-mcp
           path: runtime
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: mpy-cross-linux-x64
+          path: mpy-cross-bin
+
       - name: Install picolet-cli's runtime dependency (mpremote)
         run: pip3 install --user mpremote
+
+      - name: Put the version-matched mpy-cross on PATH
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/mpy-cross-bin/mpy-cross"
+          echo "$GITHUB_WORKSPACE/mpy-cross-bin" >> "$GITHUB_PATH"
 
       - name: Build packaged plugin binary
         env:

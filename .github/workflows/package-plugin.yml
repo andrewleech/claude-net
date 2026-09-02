@@ -25,15 +25,15 @@ env:
   # Pin the picolet ref this pipeline builds the mcp runtime AND picolet-cli
   # from, to an immutable commit SHA. Bump deliberately, not implicitly via
   # `dev`'s moving HEAD, so a plugin-repo CI run is reproducible independent
-  # of concurrent picolet work. This is "runtime: recompose integration with
-  # the submodule-fetch ordering fix" -- needs BOTH picolet-cli's
-  # [build].variant / [romfs].exclude / [[version_check]] schema (an earlier
-  # picolet-cli hard-fails toml validation without it) AND
-  # rebuild-integration.sh's fix for lib/micropython-lib's submodule-merge
-  # ordering (a machine that has never fetched its andrewleech remote fails
-  # the very first mbm.toml branch merge without it -- true of every CI
-  # runner, not just some).
-  PICOLET_REF: 71d3fe69595877143fa8193461ead220a733d9d6
+  # of concurrent picolet work. This is "runtime: surface libffi autogen.sh's
+  # real error on failure" -- needs picolet-cli's toml schema, the
+  # lib/micropython-lib submodule-merge ordering fix, the rebased
+  # pr/lib-pyusb-windows + newly-pushed pr/unix-select-ioctl-period-
+  # configurable (every mbm.toml branch is now origin-reachable), and this
+  # commit's un-suppressed autogen.sh output, needed to actually diagnose
+  # the current libffi bootstrap failure on the runner instead of guessing
+  # again.
+  PICOLET_REF: e10a98268a8c8cb8dfbd5ef3da4e980f4965be6d
 
 jobs:
   version-lockstep:

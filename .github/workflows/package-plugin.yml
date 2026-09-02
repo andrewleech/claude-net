@@ -25,15 +25,15 @@ env:
   # Pin the picolet ref this pipeline builds the mcp runtime AND picolet-cli
   # from, to an immutable commit SHA. Bump deliberately, not implicitly via
   # `dev`'s moving HEAD, so a plugin-repo CI run is reproducible independent
-  # of concurrent picolet work (e.g. the micropython submodule rebuild
-  # tracked separately from this packaging effort). This is "cli: generalize
-  # .mpy packaging with variant override + exclude + version_check" -- the
-  # commit that adds [build].variant, [romfs].exclude and [[version_check]]
-  # to picolet-cli's schema, all of which src/plugin-mpy/picolet.toml uses.
-  # Any earlier picolet-cli predates that schema and hard-fails toml
-  # validation on this app's picolet.toml (unknown top-level section
-  # "version_check" is an error, not a warning).
-  PICOLET_REF: 5ccce34a1ad3b44501b4c196f394d08856393b6d
+  # of concurrent picolet work. This is "runtime: recompose integration with
+  # the submodule-fetch ordering fix" -- needs BOTH picolet-cli's
+  # [build].variant / [romfs].exclude / [[version_check]] schema (an earlier
+  # picolet-cli hard-fails toml validation without it) AND
+  # rebuild-integration.sh's fix for lib/micropython-lib's submodule-merge
+  # ordering (a machine that has never fetched its andrewleech remote fails
+  # the very first mbm.toml branch merge without it -- true of every CI
+  # runner, not just some).
+  PICOLET_REF: 71d3fe69595877143fa8193461ead220a733d9d6
 
 jobs:
   version-lockstep:

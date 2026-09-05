@@ -567,11 +567,18 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ESRCH") {
           closeSession(s, "orphan");
-          // Confirmed dead, not just this session's local record of it —
-          // tell the hub so it drops the matching plugin registration too.
-          // Without this, host_register's probe-on-reconnect loop (hub
-          // ws-host.ts) re-sends host_session_probe for this ccPid forever.
-          hostChannel.reportOrphan(s.ccPid);
+          // Deliberately NOT calling hostChannel.reportOrphan(s.ccPid)
+          // here (see host-channel.ts's reportOrphan doc comment): an
+          // agent's self-reported name embeds a host string that can be
+          // stale relative to where its process actually now runs (e.g.
+          // its ~/.claude/projects/<sid> directory — including the
+          // persisted-name cache — was copied to another host to
+          // continue the session there). ws-host.ts's host_register
+          // probe loop matches by that self-reported host, not by which
+          // machine actually opened the WS, so "ESRCH on THIS host" does
+          // not imply "dead everywhere" and must not be reported as
+          // such: it force-closes a still-live agent's real connection,
+          // which immediately reconnects and repeats every sweep tick.
         }
         // EPERM means the process exists but we can't signal it — still alive.
       }

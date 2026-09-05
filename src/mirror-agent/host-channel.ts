@@ -117,6 +117,19 @@ export interface HostChannelHandle {
    * can drop the corresponding plugin registration. No-op if the channel
    * isn't currently connected — the hub re-probes on the next reconnect
    * regardless, so a dropped report here just means one more retry.
+   *
+   * CAUTION — currently unused by agent.ts's orphan sweep. A registered
+   * agent's `host` is a client-self-reported string, not the network
+   * origin of its WS — a session whose ~/.claude/projects/<sid> (and its
+   * persisted-name cache) was copied to another host to continue there
+   * still reports the OLD host in its name. That makes "ESRCH on THIS
+   * host" not the same claim as "dead everywhere": ws-host.ts's
+   * host_register probe loop matches by the self-reported host, so
+   * calling this for such an agent force-closes its real, live
+   * connection, which immediately reconnects and repeats every sweep
+   * tick. Only call this once a caller can rule out that case (e.g. the
+   * daemon owns the persisted-name cache for `cwd` and can confirm it
+   * was never migrated), which nothing here currently attempts.
    */
   reportOrphan(ccPid: number): void;
 }

@@ -275,6 +275,35 @@ describe("resolveStartupName", () => {
       }),
     ).toBe("my-test-thing:alice@host");
   });
+
+  test("rebuilds a persisted name against the current host on mismatch", () => {
+    // The ~/.claude/projects/<sid> directory (persisted-name cache
+    // included) was copied to a different machine than the one that
+    // wrote it — the session label survives, the stale host doesn't.
+    expect(
+      resolveStartupName(
+        defaultName,
+        { name: "reviewer:bob@otherhost", ts: 1000 },
+        null,
+      ),
+    ).toBe("reviewer:alice@host");
+  });
+
+  test("mismatched persisted name still loses to a fresher custom title", () => {
+    expect(
+      resolveStartupName(
+        defaultName,
+        { name: "reviewer:bob@otherhost", ts: 1000 },
+        { title: "renamed", ts: 2000 },
+      ),
+    ).toBe("renamed:alice@host");
+  });
+
+  test("persisted name with no user@host segment rebuilds rather than matching", () => {
+    expect(
+      resolveStartupName(defaultName, { name: "justasession", ts: 1000 }, null),
+    ).toBe("justasession:alice@host");
+  });
 });
 
 describe("PROMPT_DEFINITIONS", () => {

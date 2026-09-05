@@ -511,6 +511,17 @@ export function writePersistedAgentName(
  * Claude Code custom-title carry timestamps; the freshest wins. The
  * returned name is always a full `session:user@host` string ready to
  * register.
+ *
+ * A persisted name is only trusted verbatim when its `user@host` still
+ * matches `defaultName`'s (i.e. the current machine). The persisted-name
+ * file lives inside `~/.claude/projects/<sid>` — if that whole directory
+ * was copied to a different host to continue the session there, the
+ * file still names the OLD host. Registering under a name that claims
+ * to be on a machine it isn't leaves that identity permanently
+ * unreachable there and makes the hub re-probe a pid that will never
+ * exist on the host it names. On a mismatch, keep the persisted
+ * session label (the human-meaningful part) but rebuild it against the
+ * current, real user@host instead of discarding the choice entirely.
  */
 export function resolveStartupName(
   defaultName: string,
@@ -523,7 +534,23 @@ export function resolveStartupName(
   },
 ): string {
   const candidates: Array<{ name: string; ts: number }> = [];
-  if (persisted) candidates.push({ name: persisted.name, ts: persisted.ts });
+  if (persisted) {
+    const defaultColon = defaultName.indexOf(":");
+    const hostSuffix = defaultColon >= 0 ? defaultName.slice(defaultColon) : "";
+    if (hostSuffix && persisted.name.endsWith(hostSuffix)) {
+      candidates.push({ name: persisted.name, ts: persisted.ts });
+    } else {
+      const persistedColon = persisted.name.indexOf(":");
+      const sessionPart =
+        persistedColon >= 0
+          ? persisted.name.slice(0, persistedColon)
+          : persisted.name;
+      candidates.push({
+        name: buildFullName(sessionPart),
+        ts: persisted.ts,
+      });
+    }
+  }
   if (customTitle) {
     const clean = sanitizeSessionPart(customTitle.title);
     if (clean)

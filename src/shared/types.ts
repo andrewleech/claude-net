@@ -845,6 +845,20 @@ export interface HostSessionProbeFrame {
   cwd: string;
 }
 
+/**
+ * Daemon → hub: the daemon confirmed (via `kill(pid, 0)` → ESRCH) that no
+ * process with this pid exists on its host. Lets the hub drop a plugin
+ * registration whose underlying Claude Code is gone but whose WS never
+ * closed cleanly (e.g. the process was killed before it could disconnect,
+ * or its transcript/project directory was moved to another host) — without
+ * this, `host_register`'s probe-on-reconnect loop re-probes the same dead
+ * (host, ccPid) forever.
+ */
+export interface HostSessionOrphanFrame {
+  action: "host_session_orphan";
+  cc_pid: number;
+}
+
 export interface HostConnectedEvent {
   event: "host:connected";
   host_id: string;

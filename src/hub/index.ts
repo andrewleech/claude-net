@@ -17,7 +17,7 @@ import { setupPlugin } from "./setup";
 import { Teams } from "./teams";
 import { UploadsRegistry, uploadsPlugin } from "./uploads";
 import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
-import { wsHostPlugin } from "./ws-host";
+import { setHostWsDashboardBroadcast, wsHostPlugin } from "./ws-host";
 import { markEvicting, setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
 export interface CreateHubOptions {
@@ -141,6 +141,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   setDashboardBroadcast(broadcastToDashboards);
   mirrorRegistry.setDashboardBroadcast(broadcastToDashboards);
   hostRegistry.setDashboardBroadcast(broadcastToDashboards);
+  setHostWsDashboardBroadcast(broadcastToDashboards);
 
   // Forward half of the (host, cc_pid) join: when a mirror-agent opens
   // a session, the hub looks up whether an MCP agent has already
@@ -339,7 +340,14 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   );
   app = wsDashboardPlugin(app, registry, teams, hostRegistry);
   app = wsMirrorPlugin(app, mirrorRegistry);
-  app = wsHostPlugin(app, hostRegistry, registry, mirrorRegistry, commitHash);
+  app = wsHostPlugin(
+    app,
+    hostRegistry,
+    registry,
+    mirrorRegistry,
+    commitHash,
+    eventLog,
+  );
 
   // Periodic native WS ping + stale-WS eviction. Reuses the existing
   // close handler in ws-plugin to unregister and broadcast

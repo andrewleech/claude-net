@@ -567,6 +567,11 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ESRCH") {
           closeSession(s, "orphan");
+          // Confirmed dead, not just this session's local record of it —
+          // tell the hub so it drops the matching plugin registration too.
+          // Without this, host_register's probe-on-reconnect loop (hub
+          // ws-host.ts) re-sends host_session_probe for this ccPid forever.
+          hostChannel.reportOrphan(s.ccPid);
         }
         // EPERM means the process exists but we can't signal it — still alive.
       }

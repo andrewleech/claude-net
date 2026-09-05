@@ -21,6 +21,7 @@ import type {
   HostRestoreDoneFrame,
   HostRestoreRequest,
   HostRestoreResult,
+  HostSessionOrphanFrame,
   HostSessionProbeFrame,
   RecoverableSession,
 } from "@/shared/types";
@@ -111,6 +112,13 @@ function deriveHostId(): string {
 
 export interface HostChannelHandle {
   stop(): void;
+  /**
+   * Tell the hub this pid is confirmed gone (`kill(pid, 0)` → ESRCH) so it
+   * can drop the corresponding plugin registration. No-op if the channel
+   * isn't currently connected — the hub re-probes on the next reconnect
+   * regardless, so a dropped report here just means one more retry.
+   */
+  reportOrphan(ccPid: number): void;
 }
 
 export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
@@ -211,6 +219,13 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
 
   return {
     stop: () => client.stop(),
+    reportOrphan: (ccPid: number) => {
+      const frame: HostSessionOrphanFrame = {
+        action: "host_session_orphan",
+        cc_pid: ccPid,
+      };
+      client.send(JSON.stringify(frame));
+    },
   };
 }
 

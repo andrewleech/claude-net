@@ -1,4 +1,6 @@
+import type { DashboardEvent } from "@/shared/types";
 import type { Elysia } from "elysia";
+import type { EventLog } from "./event-log";
 import type { HostRegistry } from "./host-registry";
 import type { MirrorRegistry } from "./mirror";
 import type { Registry } from "./registry";
@@ -15,9 +17,21 @@ interface HostWs {
  */
 interface HostConnMeta {
   hostId: string;
+  /** Plain hostname (not `user@host`) — matches AgentEntry.host, so
+   *  host_session_orphan can look agents up by it. */
+  hostname: string;
 }
 
 const connMeta = new WeakMap<object, HostConnMeta>();
+
+let dashboardBroadcastFn: (event: DashboardEvent) => void = () => {};
+
+/** Wired from index.ts alongside the other modules' broadcast setters. */
+export function setHostWsDashboardBroadcast(
+  fn: (event: DashboardEvent) => void,
+): void {
+  dashboardBroadcastFn = fn;
+}
 
 function safeJsonParse(s: string): unknown {
   try {
@@ -40,7 +54,11 @@ export function wsHostPlugin(
   registry?: Registry,
   mirrorRegistry?: MirrorRegistry,
   commitHash?: string,
+  eventLog?: EventLog,
 ): Elysia {
+  const emit = (event: string, data: Record<string, unknown>): void => {
+    eventLog?.push(event, data);
+  };
   return app.ws("/ws/host", {
     open(ws: HostWs) {
       // Wait for the daemon to send host_register before adding to the
@@ -95,7 +113,10 @@ export function wsHostPlugin(
             },
           },
         );
-        connMeta.set(ws.raw, { hostId: entry.hostId });
+        connMeta.set(ws.raw, {
+          hostId: entry.hostId,
+          hostname: entry.hostname,
+        });
         ws.send(
           JSON.stringify({
             event: "host_registered",
@@ -144,6 +165,34 @@ export function wsHostPlugin(
         if (meta && typeof frame.request_id === "string") {
           // biome-ignore lint/suspicious/noExplicitAny: validated at runtime by resolveRpc's key check
           hostRegistry.resolveRpc(meta.hostId, frame as any);
+        }
+        return;
+      }
+
+      if (frame.action === "host_session_orphan") {
+        const ccPid =
+          typeof frame.cc_pid === "number" && Number.isFinite(frame.cc_pid)
+            ? frame.cc_pid
+            : null;
+        const meta = connMeta.get(ws.raw);
+        if (ccPid !== null && meta && registry) {
+          const removed = registry.unregisterByHostPid(meta.hostname, ccPid);
+          if (removed) {
+            try {
+              (removed.wsIdentity as { close?: () => void }).close?.();
+            } catch {
+              // Already closed/closing — nothing more to do.
+            }
+            dashboardBroadcastFn({
+              event: "agent:disconnected",
+              name: removed.shortName,
+              full_name: removed.fullName,
+            });
+            emit("agent.disconnected", {
+              fullName: removed.fullName,
+              reason: "orphaned",
+            });
+          }
         }
         return;
       }

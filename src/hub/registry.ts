@@ -332,6 +332,24 @@ export class Registry {
     return null;
   }
 
+  /**
+   * Force-remove the agent registered for (host, ccPid), regardless of
+   * transport state. Used when a mirror-agent daemon reports (via
+   * `host_session_orphan`) that it confirmed the pid doesn't exist on its
+   * host — the WS never closed cleanly, so nothing else would ever evict
+   * this entry. Returns the removed entry, or null if none matched.
+   */
+  unregisterByHostPid(host: string, ccPid: number): AgentEntry | null {
+    if (!host || !Number.isFinite(ccPid)) return null;
+    for (const entry of this.agents.values()) {
+      if (entry.host === host && entry.ccPid === ccPid) {
+        this.unregister(entry.fullName);
+        return entry;
+      }
+    }
+    return null;
+  }
+
   unregister(fullName: string, wsIdentity?: object): void {
     const entry = this.agents.get(fullName);
     if (!entry) return;

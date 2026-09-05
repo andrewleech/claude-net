@@ -623,6 +623,41 @@ describe("Registry", () => {
     expect(registry.findByHostPid("host", Number.POSITIVE_INFINITY)).toBeNull();
   });
 
+  test("unregisterByHostPid removes the matching entry and returns it", () => {
+    const ws = mockWs();
+    registry.register("a:alice@host1", ws, {}, { ccPid: 1000 });
+    const removed = registry.unregisterByHostPid("host1", 1000);
+    expect(removed?.fullName).toBe("a:alice@host1");
+    expect(registry.getByFullName("a:alice@host1")).toBeNull();
+    expect(registry.findByHostPid("host1", 1000)).toBeNull();
+  });
+
+  test("unregisterByHostPid ignores which transport owns the name", () => {
+    // Mirrors the real scenario: the daemon confirms the pid is gone even
+    // though the hub's WS for it never closed (no clean disconnect).
+    const ws = mockWs();
+    registry.register("a:alice@host1", ws, {}, { ccPid: 1000 });
+    const removed = registry.unregisterByHostPid("host1", 1000);
+    expect(removed).not.toBeNull();
+    expect(registry.resolve("a:alice@host1").ok).toBe(false);
+  });
+
+  test("unregisterByHostPid returns null when no entry matches", () => {
+    const ws = mockWs();
+    registry.register("a:alice@host1", ws, {}, { ccPid: 1000 });
+    expect(registry.unregisterByHostPid("host1", 9999)).toBeNull();
+    expect(registry.unregisterByHostPid("other", 1000)).toBeNull();
+    expect(registry.getByFullName("a:alice@host1")).not.toBeNull();
+  });
+
+  test("unregisterByHostPid rejects empty host and non-finite ccPid", () => {
+    const ws = mockWs();
+    registry.register("a:alice@host1", ws, {}, { ccPid: 1000 });
+    expect(registry.unregisterByHostPid("", 1000)).toBeNull();
+    expect(registry.unregisterByHostPid("host1", Number.NaN)).toBeNull();
+    expect(registry.getByFullName("a:alice@host1")).not.toBeNull();
+  });
+
   // ── resolve(): ambiguous flag ────────────────────────────────────────────
 
   test("resolve() sets ambiguous:true when a partial name matches more than one online agent", () => {

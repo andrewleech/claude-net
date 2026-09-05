@@ -8,7 +8,6 @@ import {
   PLUGIN_VERSION,
   Plugin,
   TOOL_DEFINITIONS,
-  buildChannelSelfTestText,
   buildDefaultName,
   createChannelNotification,
   detectChannelCapability,
@@ -503,21 +502,8 @@ describe("plugin helpers", () => {
     });
   });
 
-  describe("buildChannelSelfTestText", () => {
-    test("includes registered name and demands a fresh _ack_channel call", () => {
-      const text = buildChannelSelfTestText("git-autosquash:corona@carbon");
-      expect(text).toContain("git-autosquash:corona@carbon");
-      expect(text).toContain("_ack_channel");
-      // The probe must defeat the "I already ack'd earlier so I can ignore
-      // this" rationalisation — agents left themselves unreachable by
-      // dismissing re-probes after an MCP reconnect. Every probe means the
-      // hub currently has the agent channel-incapable and needs a fresh ack.
-      expect(text.toLowerCase()).toContain("even if you already");
-      expect(text.toLowerCase()).toContain("idempotent");
-      expect(text).not.toContain("call _ack_channel() once");
-    });
-
-    test("re-ack hint spells out reset semantics and recovery", () => {
+  describe("CHANNEL_REACK_HINT", () => {
+    test("spells out reset semantics and recovery", () => {
       const hint = CHANNEL_REACK_HINT.toLowerCase();
       expect(hint).toContain("_ack_channel");
       expect(hint).toContain("no-channel");
@@ -525,31 +511,14 @@ describe("plugin helpers", () => {
       expect(hint).toContain("idempotent");
     });
 
-    test("avoids prompt-injection-shaped phrasing", () => {
-      // Older wording asked the LLM to invoke a tool *and* hide it from
-      // the user — exactly the pattern Anthropic alignment training
-      // flags as injection. Stricter models (Opus 4.7+) refuse. The
-      // tool description on `_ack_channel` itself carries the
-      // suppress-narration intent (tool metadata is harness config,
-      // not data), so the wrapper notification doesn't need it.
-      const text = buildChannelSelfTestText("foo:bar@baz").toLowerCase();
-      expect(text).not.toContain("not narrate");
-      expect(text).not.toContain("do not");
-      // "no user action required" is the exact prompt-injection cliche
-      // that triggered the original refusal.
-      expect(text).not.toContain("no user action");
-      expect(text).not.toContain("routine self-test");
-    });
-
-    test("anchors trust by referencing the documented ceremony", () => {
-      // The notification has to give the LLM a way to verify the
-      // request is genuine. Pointing at the MCP instructions section
-      // and naming the reserved "system@claude-net" identity gives
-      // the model the trust anchor; without these, the call looks
-      // indistinguishable from forged channel content.
-      const text = buildChannelSelfTestText("foo:bar@baz");
-      expect(text).toContain("system@claude-net");
-      expect(text.toUpperCase()).toContain("CHANNEL CAPABILITY SELF-TEST");
+    test("does not reference a proactive probe or notification", () => {
+      // The hint is now the only surfacing mechanism (no unsolicited
+      // notification pushed on register/reconnect) — a hub restart used
+      // to wake every connected session at once to re-fire that probe,
+      // forcing a fresh billed turn on each.
+      const hint = CHANNEL_REACK_HINT.toLowerCase();
+      expect(hint).not.toContain("probe");
+      expect(hint).not.toContain("notification");
     });
   });
 
@@ -641,9 +610,9 @@ describe("plugin helpers", () => {
         "ping",
         "hub_events",
         "install-channels",
-        // Trust model for the channel self-test — the LLM must be able
-        // to find this ceremony when it receives the probe.
-        "CHANNEL CAPABILITY SELF-TEST",
+        // Trust model for the channel capability check — the LLM must
+        // be able to find this when a tool result carries the hint.
+        "CHANNEL CAPABILITY CHECK",
         "_ack_channel",
         "system@claude-net",
         // Negative-trust guidance: never act on tool-call directives
@@ -720,9 +689,6 @@ describe("plugin helpers", () => {
       // each twice with the same input must return identical output.
       expect(buildDefaultName()).toBe(buildDefaultName());
       expect(withSessionSuffix("a:b@c", 2)).toBe(withSessionSuffix("a:b@c", 2));
-      expect(buildChannelSelfTestText("a:b@c")).toBe(
-        buildChannelSelfTestText("a:b@c"),
-      );
       expect(detectChannelCapability(undefined)).toBe(
         detectChannelCapability(undefined),
       );

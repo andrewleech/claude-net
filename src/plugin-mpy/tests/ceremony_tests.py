@@ -175,21 +175,25 @@ import os
 cwd_ok = session == os.path.basename(os.getcwd())
 
 # Freshest-of-{persisted, custom-title} resolution: persisted newer wins.
+# The persisted name here matches the current machine's user@host (as a
+# real persisted-name file always does absent a cross-host copy) so this
+# exercises the freshness rule, not the host-mismatch rebuild path -- see
+# test_persisted_name_host_mismatch for that.
 def build_full(session_part):
     return session_part + ":user@host"
 
 resolved_persisted_newer = identity.resolve_startup_name(
-    "default:user@host", ("persisted-name", 200.0), ("custom-title", 100.0), build_full
+    "default:user@host", ("persisted-name:user@host", 200.0), ("custom-title", 100.0), build_full
 )
 resolved_title_newer = identity.resolve_startup_name(
-    "default:user@host", ("persisted-name", 100.0), ("custom-title", 200.0), build_full
+    "default:user@host", ("persisted-name:user@host", 100.0), ("custom-title", 200.0), build_full
 )
 resolved_neither = identity.resolve_startup_name("default:user@host", None, None, build_full)
 
 ok = (
     parts_ok
     and cwd_ok
-    and resolved_persisted_newer == "persisted-name"
+    and resolved_persisted_newer == "persisted-name:user@host"
     and resolved_title_newer == "custom-title:user@host"
     and resolved_neither == "default:user@host"
 )
@@ -204,6 +208,64 @@ print("IDENTITY_OK" if ok else "IDENTITY_FAIL " + repr(
             "name": "Identity resolution",
             "pass": ok,
             "detail": "default name is cwd-basename:user@host and freshest-of-persisted/custom-title wins"
+            if ok
+            else f"stdout={proc.stdout!r} stderr={proc.stderr!r}",
+        }
+    )
+    return results
+
+
+async def test_persisted_name_host_mismatch():
+    """Cross-host identity fix (mirrors bun plugin `resolveStartupName`,
+    commit 288fbe7): a persisted name whose user@host doesn't match the
+    current machine (e.g. its ~/.claude/projects/<sid> directory was
+    copied to a different host to continue the session there) must not
+    be trusted verbatim -- the session label is preserved but rebuilt
+    against the current, real user@host. A name already matching the
+    current host is unaffected, and the freshness-sort against
+    custom_title still applies to the (possibly rebuilt) candidate."""
+    results = []
+
+    code = """
+import _identity as identity
+
+def build_full(session_part):
+    return session_part + ":alice@host"
+
+default_name = "cwd:alice@host"
+
+matching = identity.resolve_startup_name(
+    default_name, ("reviewer:alice@host", 1000.0), None, build_full
+)
+mismatched = identity.resolve_startup_name(
+    default_name, ("reviewer:bob@otherhost", 1000.0), None, build_full
+)
+no_host_segment = identity.resolve_startup_name(
+    default_name, ("justasession", 1000.0), None, build_full
+)
+loses_to_fresher_title = identity.resolve_startup_name(
+    default_name, ("reviewer:bob@otherhost", 1000.0), ("renamed", 2000.0), build_full
+)
+
+ok = (
+    matching == "reviewer:alice@host"
+    and mismatched == "reviewer:alice@host"
+    and no_host_segment == "justasession:alice@host"
+    and loses_to_fresher_title == "renamed:alice@host"
+)
+print("MISMATCH_OK" if ok else "MISMATCH_FAIL " + repr(
+    (matching, mismatched, no_host_segment, loses_to_fresher_title)
+))
+"""
+    proc = _run_mpy_c(code)
+    ok = "MISMATCH_OK" in proc.stdout
+    results.append(
+        {
+            "name": "Persisted name host-mismatch rebuild",
+            "pass": ok,
+            "detail": "host-matching persisted name unchanged; host-mismatched name rebuilds "
+            "its session label against the current user@host; freshness-sort vs "
+            "custom_title still applies to the rebuilt candidate"
             if ok
             else f"stdout={proc.stdout!r} stderr={proc.stderr!r}",
         }
@@ -912,6 +974,7 @@ async def run_ceremony_tests():
     ceremony_tests = [
         test_hub_url_derivation,
         test_identity_resolution,
+        test_persisted_name_host_mismatch,
         test_transcript_discovery,
         test_auto_register_collision_cascade,
         test_register_gating,

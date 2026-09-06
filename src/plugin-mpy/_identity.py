@@ -320,10 +320,31 @@ def resolve_startup_name(default_name, persisted, custom_title, build_full_name)
     or `None`. `build_full_name(session_part)` builds a full
     `session:user@host` name from a sanitized custom-title session part.
     `default_name` always wins when neither other candidate exists.
+
+    A persisted name is only trusted verbatim when its `user@host` still
+    matches `default_name`'s (the current machine). The persisted-name
+    file lives inside `~/.claude/projects/<sid>`; if that whole directory
+    was copied to a different host to continue the session there, the
+    file still names the OLD host. Registering under a name that claims
+    to be on a machine it isn't leaves that identity permanently
+    unreachable there and makes the hub re-probe a pid that will never
+    exist on the host it names. On a mismatch, keep the persisted
+    session label (the human-meaningful part) but rebuild it against the
+    current, real user@host instead of discarding the choice entirely.
+    Mirrors the bun plugin's `resolveStartupName` fix (plugin.ts,
+    commit 288fbe7).
     """
     candidates = []
     if persisted:
-        candidates.append(persisted)
+        name, ts = persisted
+        default_colon = default_name.find(":")
+        host_suffix = default_name[default_colon:] if default_colon >= 0 else ""
+        if host_suffix and name.endswith(host_suffix):
+            candidates.append((name, ts))
+        else:
+            persisted_colon = name.find(":")
+            session_part = name[:persisted_colon] if persisted_colon >= 0 else name
+            candidates.append((build_full_name(session_part), ts))
     if custom_title:
         title, ts = custom_title
         clean = sanitize_session_part(title)

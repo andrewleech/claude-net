@@ -27,18 +27,9 @@ runtime this phase packages.
    stamped at build; a build check asserts embedded PLUGIN_VERSION equals hub
    package.json version (lockstep, replacing plugin.ts's "bump both" comment
    discipline).
-2. Hub serving (Q6): route for the binary (bin-server whitelist extension or
-   `/plugin-bin/<target>`), correct content-type, and a version/hash endpoint
-   so installs can check freshness cheaply.
-3. setup.ts: new install path — download binary to `~/.claude-net/plugin/`
-   (not /tmp: it must survive reboots, unlike the current per-launch .ts
-   fetch), chmod +x, register the MCP server command as the binary (argv/env
-   identical semantics: exec'd so ppid is CC); keep the bun path behind a
-   flag during rollout (e.g. `/setup?runtime=bun`).
-4. Upgrade flow: hub upgrade_hint text already says re-run `/setup` — verify
-   it holds for the binary path; wrapper or launcher re-checks version against
-   the hub endpoint at spawn and re-downloads when stale (decide exact
-   mechanics under Q6; must not add per-launch latency when current).
+2. **Done (2026-09-05).** Hub serving (Q6): dedicated `GET /plugin-bin/:target` + `GET /plugin-bin/:target/version` route in `claude-net/src/hub/plugin-bin-server.ts` (not a bin-server whitelist extension, see DECISIONS.md). `:target` whitelisted to `linux-x64`; version endpoint returns `{version, sha256, target}`, hash cached (keyed on mtime + size + ino, not mtime alone) until the file's identity changes, version read from a `.version` sidecar `sync-plugin-binary.sh` stages alongside the binary rather than from the hub's own package.json.
+3. **Done (2026-09-05).** setup.ts: new `/setup?runtime=mpy` install path, downloads the binary to `~/.claude-net/plugin/` (sha256-verified against the version endpoint before it's trusted), chmod +x, writes the `launch` wrapper, registers the MCP server command as that wrapper (`exec`'d with argv forwarded, so ppid is CC). Its own output states the install is MCP-server-only (not claude-channels/mirror/statusline) and how to revert to the bun path. Deviation from this item's original phrasing: the *default* `/setup` (no param) is unchanged (still bun), and the new binary path is opt-in behind `?runtime=mpy`, not the reverse (`?runtime=bun` gating the old path) as the Q6 spec draft's "later" section had sketched, since flipping the default is explicitly deferred to work item 7 pending a real soak period, not assumed here.
+4. **Done (2026-09-05).** Upgrade flow: no wire-protocol change needed; `ws-plugin.ts`'s existing `upgrade_hint` field is sufficient signal on its own. `plugin.py`'s register-response handler now also writes `~/.claude-net/plugin/.stale` (best-effort, alongside the existing nudge-queue append) when `upgrade_hint` is present. The `launch` wrapper only re-checks the hub's version endpoint when `.stale` is set or the binary is missing, never on every launch. Because `upgrade_hint` fires on a mismatch against the hub's own `PLUGIN_VERSION_CURRENT` rather than what's actually staged, the wrapper compares the version endpoint's full `{version, sha256, target}` response against its own cached copy before downloading anything, and skips the download entirely when they already match (closing a redownload loop a hub/binary version-skew would otherwise cause on every single launch). A real difference still gets sha256-verified before replacing the live binary, and every install step (chmod, mv, sidecar write) is failure-checked so a partial failure can't silently clear `.stale` or report success. A refresh failure is best-effort when a cached binary already exists: the wrapper falls back to exec'ing it rather than aborting the session, backs off via a `.refresh-failed` timestamp on a persistent failure, and only hard-fails when there's no cached binary to fall back to.
 5. install-channels / statusline / mirror-agent interplay: state-file format
    unchanged (statusline.py reads it), `CLAUDE_NET_CHANNELS_PATCHED` export
    honored, docs updated.
@@ -96,14 +87,7 @@ runtime this phase packages.
 ## Open questions consumed
 
 - Q6 — Hub binary-serving route + client-side caching/refresh mechanics.
-  Status per `DECISIONS.md`: OPEN, owner P8, "not needed before P8; left
-  open" — deciding earlier would have been speculative with no packaging or
-  distribution work yet to decide against. This phase is where Q6 gets
-  decided: work item 2 chooses between extending the bin-server whitelist and
-  a dedicated `/plugin-bin/<target>` route; work item 4 chooses between
-  caching at `~/.claude-net/` keyed by version and re-downloading on every
-  upgrade_hint. Record the resolved choice as a new dated entry in
-  `DECISIONS.md` once settled.
+  **Decided 2026-09-05**, see `DECISIONS.md`: dedicated `/plugin-bin/:target` route (not a bin-server whitelist extension), caching at `~/.claude-net/plugin/` gated on the existing `upgrade_hint` signal (no new wire field), deploy via `scripts/sync-plugin-binary.sh` (manual/`workflow_dispatch`, not per-push CI), opt-in via `?runtime=mpy` with the default-flip left to work item 7.
 
 ## Risks
 

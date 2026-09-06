@@ -277,7 +277,7 @@ def read_persisted_agent_name(sid, cwd, home=None):
     return None
 
 
-def _makedirs(path):
+def makedirs(path):
     """Recursive `mkdir -p`. `os.mkdir` on this runtime is single-level
     and raises on an already-existing directory (errno 17, EEXIST) —
     both handled here."""
@@ -289,7 +289,7 @@ def _makedirs(path):
         if exc.args and exc.args[0] == 17:  # EEXIST
             return
         if exc.args and exc.args[0] == 2:  # ENOENT: parent missing
-            _makedirs(os.path.dirname(path))
+            makedirs(os.path.dirname(path))
             try:
                 os.mkdir(path)
             except OSError as exc2:
@@ -305,7 +305,7 @@ def write_persisted_agent_name(sid, cwd, name, ts, home=None, log=None):
     plugin's `writePersistedAgentName`."""
     path = _persisted_name_path(sid, cwd, home)
     try:
-        _makedirs(os.path.dirname(path))
+        makedirs(os.path.dirname(path))
         with open(path, "w") as f:
             f.write(json.dumps({"name": name, "ts": ts}))
     except OSError as exc:

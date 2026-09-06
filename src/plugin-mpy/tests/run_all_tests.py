@@ -6,6 +6,7 @@ Runs:
 1. Parity harness (the key gate)
 2. Ceremony tests (17-item checklist)
 3. Real-hub smoke test
+4. Stale-marker tests (P8/Q6 hub-serving upgrade_hint -> .stale)
 
 Outputs structured results matching the StructuredOutput schema.
 """
@@ -28,6 +29,7 @@ sys.path.insert(0, str(tests_dir))
 from parity_harness import run_parity_test
 from ceremony_tests import run_ceremony_tests
 from real_hub_smoke import test_real_hub
+from stale_marker_tests import run_stale_marker_tests
 
 
 async def run_all_tests():
@@ -110,6 +112,34 @@ async def run_all_tests():
         print(f"Real hub smoke test failed with error: {e}")
         real_hub_result = f"failed({e})"
 
+    # 4. STALE MARKER TESTS (P8/Q6)
+    print("\n" + "=" * 60)
+    print("4. STALE MARKER TESTS (P8/Q6 hub-serving)")
+    print("=" * 60)
+    stale_marker_results = []
+    try:
+        stale_marker_results = await run_stale_marker_tests()
+        stale_marker_pass = all(r.get("pass", False) for r in stale_marker_results)
+
+        print(
+            f"\nStale marker tests: "
+            f"{sum(1 for r in stale_marker_results if r.get('pass'))} / "
+            f"{len(stale_marker_results)} passed"
+        )
+
+        for r in stale_marker_results:
+            all_results.append(
+                {
+                    "name": r["name"],
+                    "pass": r.get("pass", False),
+                    "detail": r.get("detail", ""),
+                }
+            )
+
+    except Exception as e:
+        print(f"Stale marker tests failed with error: {e}")
+        stale_marker_pass = False
+
     # Compute final flags
     parity_clean = parity_result.get("parityClean", False) if parity_result else False
     all_ceremony_pass = all(r.get("pass", False) for r in ceremony_results)
@@ -120,6 +150,7 @@ async def run_all_tests():
     return {
         "parityClean": parity_clean,
         "allCeremonyPass": all_ceremony_pass,
+        "staleMarkerPass": stale_marker_pass,
         "ranOnBinary": ran_on_binary,
         "bunRan": bun_ran,
         "realHubSmoke": real_hub_result or "skipped(unknown)",
@@ -127,9 +158,16 @@ async def run_all_tests():
         "results": all_results,
         "summary": (
             f"All tests passed: parity clean, ceremony {len(ceremony_results)}/{len(ceremony_results)}, "
+            f"stale-marker {len(stale_marker_results)}/{len(stale_marker_results)}, "
             "real hub operational"
-            if (parity_clean and all_ceremony_pass and real_hub_result == "passed")
-            else f"Parity: {parity_clean}, Ceremony: {all_ceremony_pass}, RealHub: {real_hub_result}"
+            if (
+                parity_clean
+                and all_ceremony_pass
+                and stale_marker_pass
+                and real_hub_result == "passed"
+            )
+            else f"Parity: {parity_clean}, Ceremony: {all_ceremony_pass}, "
+            f"StaleMarker: {stale_marker_pass}, RealHub: {real_hub_result}"
         ),
     }
 
@@ -143,6 +181,7 @@ async def main():
     print("=" * 60)
     print(f"Parity clean: {result['parityClean']}")
     print(f"All ceremony pass: {result['allCeremonyPass']}")
+    print(f"Stale marker pass: {result['staleMarkerPass']}")
     print(f"Ran on binary: {result['ranOnBinary']}")
     print(f"Bun ran: {result['bunRan']}")
     print(f"Real hub smoke: {result['realHubSmoke']}")
@@ -172,4 +211,12 @@ if __name__ == "__main__":
     print("=" * 60)
     print(json.dumps(result, indent=2))
 
-    sys.exit(0 if (result["parityClean"] and result["allCeremonyPass"]) else 1)
+    sys.exit(
+        0
+        if (
+            result["parityClean"]
+            and result["allCeremonyPass"]
+            and result["staleMarkerPass"]
+        )
+        else 1
+    )

@@ -156,7 +156,7 @@ marked "spike" (spike results were independently confirmed during the spike).
 | Q3 | Enable hashlib/SHA1 for Sec-WebSocket-Accept verification | .h macro override, small size cost vs skip (non-load-bearing for a client) | Phase 2 (measure, then decide) | DECIDED — see DECISIONS.md |
 | Q4 | Where the reusable libs live | (a) claude-net worktree, shipped via app romfs (b) picolet `packages/` (c) micropython-lib contribution | Phase 0 | DECIDED — see DECISIONS.md |
 | Q5 | Schema-spec surface given no runtime annotations | (a) explicit spec objects in the decorator (`@tool(params={...})` / `Field`-style) as ground truth (b) build-time CPython codegen: read real type hints from source, emit spec literals (c) both, (a) first | Phase 5 | DECIDED — see DECISIONS.md |
-| Q6 | Hub binary-serving route + client-side caching/refresh mechanics | extend bin-server whitelist vs dedicated `/plugin-bin/<target>` route; cache at `~/.claude-net/` keyed by version vs re-download on upgrade_hint | Phase 8 | OPEN |
+| Q6 | Hub binary-serving route + client-side caching/refresh mechanics | extend bin-server whitelist vs dedicated `/plugin-bin/<target>` route; cache at `~/.claude-net/` keyed by version vs re-download on upgrade_hint | Phase 8 | DECIDED — see DECISIONS.md |
 | Q7 | Names for the ws / jsonrpc / schema libs | working names `mpyws`, `mpyjsonrpc`, `mpyschema` (only `mpyfastmcp` is fixed) | Phase 0 | DECIDED — see DECISIONS.md |
 
 ## Phases

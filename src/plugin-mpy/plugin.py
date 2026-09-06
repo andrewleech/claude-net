@@ -196,6 +196,27 @@ def _tool_result(data):
     return {"content": [{"type": "text", "text": text}]}
 
 
+def _mark_plugin_binary_stale(log=None):
+    """Touch `~/.claude-net/plugin/.stale`, the signal the packaged
+    binary's `launch` wrapper checks before `exec`ing, to re-download on
+    its *next* invocation. Written once per version bump (this is only
+    called from the register response's `upgrade_hint` branch, itself
+    only present on a version mismatch), never forces the currently
+    running session to reconnect or exit. Best-effort: failures are
+    logged, never raised, matching every other state-file writer in this
+    codebase (`_identity.write_persisted_agent_name`,
+    `_statusline.write_session_state`)."""
+    home = os.getenv("HOME") or ""
+    plugin_dir = os.path.join(home, ".claude-net", "plugin")
+    try:
+        identity.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, ".stale"), "w") as f:
+            f.write("")
+    except OSError as exc:
+        if log:
+            log("Failed to write plugin .stale marker: %s" % exc)
+
+
 def build_channel_self_test_text(registered_name):
     """Body of the combined registered-as / channel self-test
     notification (`plugin.ts:240-247`)."""
@@ -831,6 +852,7 @@ class ClaudeNetApp:
                     self.pending_nudges.append(
                         {"text": data["upgrade_hint"], "guard": None}
                     )
+                    _mark_plugin_binary_stale(log=self.log)
                 self.stored_name = candidate
                 self.registered_name = candidate
                 self._persist_name(candidate)

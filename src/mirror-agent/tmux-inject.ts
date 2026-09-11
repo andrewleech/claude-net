@@ -243,6 +243,18 @@ export class TmuxInjector {
     return { ok: true };
   }
 
+  /** Kill the pane outright. A pane that is the last in its window takes
+   *  the window with it, and a single-window tmux session ends too - which
+   *  is the point: a terminated Claude Code must not leave a dead shell
+   *  lingering in tmux. */
+  async killPane(pane: string): Promise<InjectResult> {
+    const result = await runTmux(this.tmuxBin, ["kill-pane", "-t", pane]);
+    if (!result.ok) {
+      return { ok: false, code: "tmux_failed", error: result.error };
+    }
+    return { ok: true };
+  }
+
   /** Capture the visible pane content (most recent `lines` lines). Used
    *  post-inject to surface TUI-level rejections like "Unknown command:"
    *  that don't emit a hook event. */

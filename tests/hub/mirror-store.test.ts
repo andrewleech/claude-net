@@ -79,6 +79,37 @@ describe("FileStore", () => {
     expect(store.loadArchived("missing")).toBeNull();
   });
 
+  test("round-trips config_dir through recordOpen/loadArchived", () => {
+    store.recordOpen({
+      sid: "personal-1",
+      owner_agent: "alice:u@h",
+      cwd: "/home/alice/work",
+      created_at: "2026-04-20T10:00:00Z",
+      config_dir: "/home/alice/.claude-personal",
+    });
+    store.recordClose("personal-1", "2026-04-20T10:10:00Z");
+
+    const archived = store.loadArchived("personal-1");
+    expect(archived).not.toBeNull();
+    if (!archived) return;
+    expect(archived.config_dir).toBe("/home/alice/.claude-personal");
+  });
+
+  test("config_dir defaults to empty string when omitted", () => {
+    store.recordOpen({
+      sid: "default-1",
+      owner_agent: "alice:u@h",
+      cwd: "/home/alice/work",
+      created_at: "2026-04-20T10:00:00Z",
+    });
+    store.recordClose("default-1", "2026-04-20T10:10:00Z");
+
+    const archived = store.loadArchived("default-1");
+    expect(archived).not.toBeNull();
+    if (!archived) return;
+    expect(archived.config_dir).toBe("");
+  });
+
   test("sanitizes sids used in filenames", () => {
     store.recordOpen({
       sid: "../oops",

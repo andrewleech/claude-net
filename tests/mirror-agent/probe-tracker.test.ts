@@ -46,6 +46,37 @@ describe("ProbeAttemptTracker", () => {
     expect(t.shouldSkip(123)).toBe(false);
   });
 
+  test("abstained() applies the cooldown without minting a sid", () => {
+    let now = 1_000;
+    let counter = 0;
+    const t = new ProbeAttemptTracker(
+      30_000,
+      () => now,
+      () => `sid-${++counter}`,
+    );
+    t.abstained(123);
+    expect(counter).toBe(0);
+
+    now = 1_000 + 29_000;
+    expect(t.shouldSkip(123)).toBe(true);
+
+    now = 1_000 + 31_000;
+    expect(t.shouldSkip(123)).toBe(false);
+  });
+
+  test("a preassigned sid after an abstain is not shadowed by the empty record", () => {
+    let now = 1_000;
+    const t = new ProbeAttemptTracker(
+      30_000,
+      () => now,
+      () => "minted-sid",
+    );
+    t.abstained(123);
+    now = 1_000 + 31_000;
+    const sid = t.begin(123, "real-sid");
+    expect(sid).toBe("real-sid");
+  });
+
   test("retry after failure reuses the same sid (idempotent against hub dedup)", () => {
     let now = 1_000;
     let counter = 0;

@@ -6,8 +6,34 @@ import {
   discoverRunningCcSessions,
   encodeProjectDirName,
   findActiveSessionForCcPid,
+  processStartMs,
+  readConfigDirFromCcEnv,
   readTmuxPaneFromCcEnv,
+  resolveHookConfigDir,
 } from "@/mirror-agent/agent";
+
+/** Fake /proc/<pid>/stat + /proc/stat pair so processStartMs resolves to
+ *  `startMs` for `pid` under `procRoot`. USER_HZ is 100, so ticks are
+ *  (startMs - btime*1000) / 10. */
+function plantProcessStart(
+  procRoot: string,
+  pid: number,
+  startMs: number,
+  btimeSec: number = Math.floor(startMs / 1000) - 3600,
+): void {
+  const dir = path.join(procRoot, String(pid));
+  fs.mkdirSync(dir, { recursive: true });
+  const ticks = Math.round((startMs - btimeSec * 1000) / 10);
+  const fields = ["S", ...Array(18).fill("0"), String(ticks), "0", "0"];
+  fs.writeFileSync(
+    path.join(dir, "stat"),
+    `${pid} (claude) ${fields.join(" ")}\n`,
+  );
+  fs.writeFileSync(
+    path.join(procRoot, "stat"),
+    `cpu  0 0 0 0\nbtime ${btimeSec}\nprocesses 1\n`,
+  );
+}
 
 describe("encodeProjectDirName", () => {
   test("replaces slashes with hyphens", () => {
@@ -36,12 +62,14 @@ describe("encodeProjectDirName", () => {
 describe("findActiveSessionForCcPid", () => {
   let tmpHome: string;
   let projectsDir: string;
+  let configDir: string;
   const sampleSid = "3d27a058-e598-49f1-abfc-5de63d0a6a46";
   const olderSid = "11111111-2222-3333-4444-555555555555";
 
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "cn-test-home-"));
     projectsDir = path.join(tmpHome, ".claude", "projects");
+    configDir = path.join(tmpHome, ".claude");
     fs.mkdirSync(projectsDir, { recursive: true });
   });
 
@@ -60,19 +88,19 @@ describe("findActiveSessionForCcPid", () => {
   }
 
   test("returns null when projects dir doesn't exist", () => {
-    expect(findActiveSessionForCcPid(123, "/home/alice/work", tmpHome)).toBe(
+    expect(findActiveSessionForCcPid(123, "/home/alice/work", configDir)).toBe(
       null,
     );
   });
 
   test("returns null when cwd is empty", () => {
-    expect(findActiveSessionForCcPid(123, "", tmpHome)).toBe(null);
+    expect(findActiveSessionForCcPid(123, "", configDir)).toBe(null);
   });
 
   test("returns the sole JSONL for a cwd", () => {
     const cwd = "/home/alice/work";
     writeJsonl(cwd, sampleSid, Date.now());
-    const found = findActiveSessionForCcPid(0, cwd, tmpHome);
+    const found = findActiveSessionForCcPid(0, cwd, configDir);
     expect(found).not.toBe(null);
     if (!found) return;
     expect(found.sessionId).toBe(sampleSid);
@@ -86,7 +114,7 @@ describe("findActiveSessionForCcPid", () => {
     const newerMs = Date.now();
     writeJsonl(cwd, olderSid, olderMs);
     writeJsonl(cwd, sampleSid, newerMs);
-    const found = findActiveSessionForCcPid(0, cwd, tmpHome);
+    const found = findActiveSessionForCcPid(0, cwd, configDir);
     expect(found?.sessionId).toBe(sampleSid);
   });
 
@@ -105,7 +133,7 @@ describe("findActiveSessionForCcPid", () => {
       const fdDir = path.join(tmpProc, "999", "fd");
       fs.mkdirSync(fdDir, { recursive: true });
       fs.symlinkSync(heldPath, path.join(fdDir, "10"));
-      const found = findActiveSessionForCcPid(999, cwd, tmpHome, tmpProc);
+      const found = findActiveSessionForCcPid(999, cwd, configDir, tmpProc);
       expect(found?.sessionId).toBe(olderSid);
     } finally {
       fs.rmSync(tmpProc, { recursive: true, force: true });
@@ -123,7 +151,7 @@ describe("findActiveSessionForCcPid", () => {
     const found = findActiveSessionForCcPid(
       999,
       cwd,
-      tmpHome,
+      configDir,
       path.join(tmpHome, "no-such-proc"),
     );
     expect(found?.sessionId).toBe(sampleSid);
@@ -134,7 +162,7 @@ describe("findActiveSessionForCcPid", () => {
     const dir = path.join(projectsDir, encodeProjectDirName(cwd));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "notes.jsonl"), "");
-    const found = findActiveSessionForCcPid(0, cwd, tmpHome);
+    const found = findActiveSessionForCcPid(0, cwd, configDir);
     expect(found).toBe(null);
   });
 
@@ -145,7 +173,7 @@ describe("findActiveSessionForCcPid", () => {
     fs.writeFileSync(path.join(dir, "scratch.txt"), "ignore me");
     fs.writeFileSync(path.join(dir, "scratch.json"), "{}");
     writeJsonl(cwd, sampleSid, Date.now());
-    const found = findActiveSessionForCcPid(0, cwd, tmpHome);
+    const found = findActiveSessionForCcPid(0, cwd, configDir);
     expect(found?.sessionId).toBe(sampleSid);
   });
 
@@ -154,7 +182,7 @@ describe("findActiveSessionForCcPid", () => {
     const dir = path.join(projectsDir, encodeProjectDirName(cwd));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "scratch.txt"), "no transcripts here");
-    expect(findActiveSessionForCcPid(0, cwd, tmpHome)).toBe(null);
+    expect(findActiveSessionForCcPid(0, cwd, configDir)).toBe(null);
   });
 
   test("/proc/<pid>/fd pins to the held transcript over the mtime scan", () => {
@@ -169,7 +197,7 @@ describe("findActiveSessionForCcPid", () => {
       const fdDir = path.join(procRoot, "4242", "fd");
       fs.mkdirSync(fdDir, { recursive: true });
       fs.symlinkSync(heldFile, path.join(fdDir, "5"));
-      const found = findActiveSessionForCcPid(4242, cwd, tmpHome, procRoot);
+      const found = findActiveSessionForCcPid(4242, cwd, configDir, procRoot);
       expect(found?.sessionId).toBe(olderSid);
     } finally {
       fs.rmSync(procRoot, { recursive: true, force: true });
@@ -187,7 +215,7 @@ describe("findActiveSessionForCcPid", () => {
       fs.mkdirSync(fdDir, { recursive: true });
       fs.symlinkSync(older, path.join(fdDir, "5"));
       fs.symlinkSync(newer, path.join(fdDir, "6"));
-      const found = findActiveSessionForCcPid(4242, cwd, tmpHome, procRoot);
+      const found = findActiveSessionForCcPid(4242, cwd, configDir, procRoot);
       expect(found?.sessionId).toBe(sampleSid);
     } finally {
       fs.rmSync(procRoot, { recursive: true, force: true });
@@ -212,7 +240,7 @@ describe("findActiveSessionForCcPid", () => {
         path.join(dir, "cmdline"),
         `/path/claude-patched\0--resume\0${sampleSid}\0`,
       );
-      const found = findActiveSessionForCcPid(888, cwd, tmpHome, tmpProc);
+      const found = findActiveSessionForCcPid(888, cwd, configDir, tmpProc);
       expect(found?.sessionId).toBe(sampleSid);
     } finally {
       fs.rmSync(tmpProc, { recursive: true, force: true });
@@ -237,7 +265,7 @@ describe("findActiveSessionForCcPid", () => {
         path.join(dir, "cmdline"),
         `/path/claude-patched\0--resume\0${sampleSid}\0--fork-session\0`,
       );
-      const found = findActiveSessionForCcPid(999, cwd, tmpHome, tmpProc);
+      const found = findActiveSessionForCcPid(999, cwd, configDir, tmpProc);
       expect(found?.sessionId).not.toBe(sampleSid);
     } finally {
       fs.rmSync(tmpProc, { recursive: true, force: true });
@@ -263,8 +291,103 @@ describe("findActiveSessionForCcPid", () => {
         fs.symlinkSync("/usr/local/bin/claude", path.join(dir, "exe"));
         fs.symlinkSync(cwd, path.join(dir, "cwd"));
       }
-      const found = findActiveSessionForCcPid(7001, cwd, tmpHome, tmpProc);
+      const found = findActiveSessionForCcPid(7001, cwd, configDir, tmpProc);
       expect(found).toBe(null);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("abstains when the newest transcript predates the process start", () => {
+    // A brand-new Claude Code has not written its own JSONL yet; the
+    // newest file in the dir belongs to an earlier, ended session.
+    // Adopting it revived dead sessions on the hub.
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now - 60_000);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-start-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 5_000);
+      expect(findActiveSessionForCcPid(321, cwd, configDir, tmpProc)).toBe(
+        null,
+      );
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("adopts the newest transcript when written after the process started", () => {
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-start-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 60_000);
+      const found = findActiveSessionForCcPid(321, cwd, configDir, tmpProc);
+      expect(found?.sessionId).toBe(sampleSid);
+      expect(found?.source).toBe("mtime");
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("--continue adopts the newest transcript even when older than the process", () => {
+    // `--continue`'s documented behaviour IS "resume the most recent
+    // session in this cwd", so an old transcript legitimately belongs
+    // to the new process.
+    const cwd = "/home/alice/work";
+    const now = Date.now();
+    writeJsonl(cwd, sampleSid, now - 60_000);
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-cont-proc-"));
+    try {
+      plantProcessStart(tmpProc, 321, now - 5_000);
+      fs.writeFileSync(
+        path.join(tmpProc, "321", "cmdline"),
+        "/path/claude-patched\0--continue\0",
+      );
+      const found = findActiveSessionForCcPid(321, cwd, configDir, tmpProc);
+      expect(found?.sessionId).toBe(sampleSid);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("processStartMs", () => {
+  test("derives epoch ms from starttime ticks plus btime", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      const startMs = 1_700_000_123_450;
+      plantProcessStart(tmpProc, 42, startMs, 1_700_000_000);
+      expect(processStartMs(42, tmpProc)).toBe(startMs);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("handles a comm containing spaces and parens", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      const dir = path.join(tmpProc, "43");
+      fs.mkdirSync(dir, { recursive: true });
+      const fields = ["S", ...Array(18).fill("0"), "500", "0", "0"];
+      fs.writeFileSync(
+        path.join(dir, "stat"),
+        `43 (weird) name)) ${fields.join(" ")}\n`,
+      );
+      fs.writeFileSync(path.join(tmpProc, "stat"), "btime 1000\n");
+      expect(processStartMs(43, tmpProc)).toBe(1000 * 1000 + 5000);
+    } finally {
+      fs.rmSync(tmpProc, { recursive: true, force: true });
+    }
+  });
+
+  test("returns null for missing stat files or bogus pids", () => {
+    const tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-psm-proc-"));
+    try {
+      expect(processStartMs(99, tmpProc)).toBe(null);
+      expect(processStartMs(0, tmpProc)).toBe(null);
+      expect(processStartMs(Number.NaN, tmpProc)).toBe(null);
     } finally {
       fs.rmSync(tmpProc, { recursive: true, force: true });
     }
@@ -301,6 +424,93 @@ describe("readTmuxPaneFromCcEnv", () => {
     expect(readTmuxPaneFromCcEnv(Number.NaN)).toBeUndefined();
     expect(readTmuxPaneFromCcEnv(0)).toBeUndefined();
     expect(readTmuxPaneFromCcEnv(-1)).toBeUndefined();
+  });
+});
+
+describe("readConfigDirFromCcEnv", () => {
+  let tmpProc: string;
+
+  beforeEach(() => {
+    tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-environ-proc-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpProc, { recursive: true, force: true });
+  });
+
+  /** Plant a fake /proc/<pid>/environ with the given NUL-separated vars. */
+  function plantEnviron(pid: number, vars: Record<string, string>): void {
+    const dir = path.join(tmpProc, String(pid));
+    fs.mkdirSync(dir, { recursive: true });
+    const entries = Object.entries(vars).map(([k, v]) => `${k}=${v}`);
+    fs.writeFileSync(path.join(dir, "environ"), `${entries.join("\0")}\0`);
+  }
+
+  test("reads CLAUDE_CONFIG_DIR from a fake procRoot", () => {
+    if (process.platform !== "linux") return;
+    plantEnviron(9001, { CLAUDE_CONFIG_DIR: "/home/alice/.claude-personal" });
+    expect(readConfigDirFromCcEnv(9001, tmpProc)).toBe(
+      "/home/alice/.claude-personal",
+    );
+  });
+
+  test("returns undefined when the fake procRoot has no CLAUDE_CONFIG_DIR", () => {
+    if (process.platform !== "linux") return;
+    plantEnviron(9002, { PATH: "/usr/bin", TMUX_PANE: "%3" });
+    expect(readConfigDirFromCcEnv(9002, tmpProc)).toBeUndefined();
+  });
+
+  test("returns undefined when the fake pid has no environ file at all", () => {
+    if (process.platform !== "linux") return;
+    expect(readConfigDirFromCcEnv(9003, tmpProc)).toBeUndefined();
+  });
+});
+
+describe("resolveHookConfigDir with a fake procRoot", () => {
+  let tmpProc: string;
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpProc = fs.mkdtempSync(path.join(os.tmpdir(), "cn-resolve-proc-"));
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "cn-resolve-home-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpProc, { recursive: true, force: true });
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function plantEnviron(pid: number, vars: Record<string, string>): void {
+    const dir = path.join(tmpProc, String(pid));
+    fs.mkdirSync(dir, { recursive: true });
+    const entries = Object.entries(vars).map(([k, v]) => `${k}=${v}`);
+    fs.writeFileSync(path.join(dir, "environ"), `${entries.join("\0")}\0`);
+  }
+
+  test("step 3: falls through to a config dir found via the fake procRoot's environ", () => {
+    if (process.platform !== "linux") return;
+    plantEnviron(9101, { CLAUDE_CONFIG_DIR: "/home/alice/.claude-personal" });
+    const found = resolveHookConfigDir(
+      undefined,
+      undefined,
+      9101,
+      tmpHome,
+      tmpProc,
+    );
+    expect(found).toBe("/home/alice/.claude-personal");
+  });
+
+  test("step 4: no signal anywhere (including the fake procRoot) falls to the default account", () => {
+    if (process.platform !== "linux") return;
+    plantEnviron(9102, { PATH: "/usr/bin" });
+    const found = resolveHookConfigDir(
+      undefined,
+      undefined,
+      9102,
+      tmpHome,
+      tmpProc,
+    );
+    expect(found).toBe(path.join(tmpHome, ".claude"));
   });
 });
 
@@ -345,6 +555,12 @@ describe("discoverRunningCcSessions", () => {
     const fdDir = path.join(tmpProc, String(pid), "fd");
     fs.mkdirSync(fdDir, { recursive: true });
     fs.symlinkSync(target, path.join(fdDir, String(fd)));
+  }
+
+  function makeFakeCmdline(pid: number, args: string[]): void {
+    const dir = path.join(tmpProc, String(pid));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "cmdline"), `${args.join("\0")}\0`);
   }
 
   test("returns [] on non-Linux platforms", () => {
@@ -433,13 +649,28 @@ describe("discoverRunningCcSessions", () => {
     const cwd = path.join(tmpHome, "shared-cwd");
     fs.mkdirSync(cwd, { recursive: true });
     plantJsonl(cwd, matchingSid);
-    // Two processes share the same cwd (fork-session); both resolve
-    // to the same JSONL. We dedup so the agent doesn't open the
-    // session twice.
+    // Two processes name the same sid explicitly (e.g. the same
+    // `--resume` command pasted into two shells). Both resolve to the
+    // same JSONL; dedup so the agent doesn't open the session twice.
     makeFakePid(4444, { exe: "/usr/local/bin/claude", cwd });
     makeFakePid(4445, { exe: "/usr/local/bin/claude", cwd });
+    makeFakeCmdline(4444, ["claude", "--resume", matchingSid]);
+    makeFakeCmdline(4445, ["claude", "--resume", matchingSid]);
     const found = discoverRunningCcSessions(tmpProc, tmpHome);
     expect(found).toHaveLength(1);
+  });
+
+  test("abstains for two live processes sharing a cwd even with a single transcript", () => {
+    if (process.platform !== "linux") return;
+    // The single transcript belongs to ONE of the two processes; the
+    // other adopting it would hijack a running session's sid. Neither
+    // has a stronger signal, so both must abstain.
+    const cwd = path.join(tmpHome, "shared-single");
+    fs.mkdirSync(cwd, { recursive: true });
+    plantJsonl(cwd, matchingSid);
+    makeFakePid(4446, { exe: "/usr/local/bin/claude", cwd });
+    makeFakePid(4447, { exe: "/usr/local/bin/claude", cwd });
+    expect(discoverRunningCcSessions(tmpProc, tmpHome)).toEqual([]);
   });
 
   test("resolves fork siblings sharing a cwd to their own distinct held transcripts", () => {
@@ -536,5 +767,81 @@ describe("discoverRunningCcSessions", () => {
     expect(found).toHaveLength(1);
     expect(found[0]?.sessionId).toBe(matchingSid);
     expect(found[0]?.fromIndex).toBe(false);
+  });
+
+  describe("configDir", () => {
+    test("a derived (non-indexed) session reports the default account's config dir", () => {
+      if (process.platform !== "linux") return;
+      const cwd = path.join(tmpHome, "project-default");
+      fs.mkdirSync(cwd, { recursive: true });
+      plantJsonl(cwd, matchingSid);
+      makeFakePid(8001, { exe: "/usr/local/bin/claude", cwd });
+      const found = discoverRunningCcSessions(tmpProc, tmpHome);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.configDir).toBe(path.join(tmpHome, ".claude"));
+    });
+
+    test("an indexed session recovers its config dir from the recorded transcript path", () => {
+      if (process.platform !== "linux") return;
+      const cwd = path.join(tmpHome, "project-personal");
+      fs.mkdirSync(cwd, { recursive: true });
+      makeFakePid(8002, { exe: "/usr/local/bin/claude", cwd });
+      const personalConfigDir = path.join(tmpHome, ".claude-personal");
+      const transcriptPath = path.join(
+        personalConfigDir,
+        "projects",
+        encodeProjectDirName(cwd),
+        `${matchingSid}.jsonl`,
+      );
+      const index = new Map([
+        [`8002:${cwd}`, { sid: matchingSid, transcriptPath }],
+      ]);
+      const found = discoverRunningCcSessions(tmpProc, tmpHome, (pid, c) =>
+        index.get(`${pid}:${c}`),
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0]?.configDir).toBe(personalConfigDir);
+      expect(found[0]?.fromIndex).toBe(true);
+    });
+
+    /** Plant a fake /proc/<pid>/environ with the given NUL-separated vars. */
+    function plantEnviron(pid: number, vars: Record<string, string>): void {
+      const dir = path.join(tmpProc, String(pid));
+      fs.mkdirSync(dir, { recursive: true });
+      const entries = Object.entries(vars).map(([k, v]) => `${k}=${v}`);
+      fs.writeFileSync(path.join(dir, "environ"), `${entries.join("\0")}\0`);
+    }
+
+    test("a derived (non-indexed) session with no transcript path yet picks up a custom account from the fake procRoot's environ", () => {
+      if (process.platform !== "linux") return;
+      const cwd = path.join(tmpHome, "project-custom");
+      fs.mkdirSync(cwd, { recursive: true });
+      const personalConfigDir = path.join(tmpHome, ".claude-personal");
+      const tDir = path.join(
+        personalConfigDir,
+        "projects",
+        encodeProjectDirName(cwd),
+      );
+      fs.mkdirSync(tDir, { recursive: true });
+      fs.writeFileSync(path.join(tDir, `${matchingSid}.jsonl`), "");
+      makeFakePid(8003, { exe: "/usr/local/bin/claude", cwd });
+      plantEnviron(8003, { CLAUDE_CONFIG_DIR: personalConfigDir });
+      const found = discoverRunningCcSessions(tmpProc, tmpHome);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.configDir).toBe(personalConfigDir);
+      expect(found[0]?.sessionId).toBe(matchingSid);
+    });
+
+    test("a derived session with an environ that has no CLAUDE_CONFIG_DIR falls to the default account", () => {
+      if (process.platform !== "linux") return;
+      const cwd = path.join(tmpHome, "project-default-environ");
+      fs.mkdirSync(cwd, { recursive: true });
+      plantJsonl(cwd, matchingSid);
+      makeFakePid(8004, { exe: "/usr/local/bin/claude", cwd });
+      plantEnviron(8004, { PATH: "/usr/bin" });
+      const found = discoverRunningCcSessions(tmpProc, tmpHome);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.configDir).toBe(path.join(tmpHome, ".claude"));
+    });
   });
 });

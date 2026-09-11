@@ -1,4 +1,8 @@
-import type { DashboardEvent } from "@/shared/types";
+import type {
+  ConfigDirInfo,
+  DashboardEvent,
+  HostRegisterFrame,
+} from "@/shared/types";
 import type { Elysia } from "elysia";
 import type { EventLog } from "./event-log";
 import type { HostRegistry } from "./host-registry";
@@ -42,6 +46,40 @@ function safeJsonParse(s: string): unknown {
 }
 
 /**
+ * Build the typed HostRegisterFrame a raw `host_register` payload
+ * describes, or null when it is missing a required field. The frame is
+ * rebuilt field by field rather than forwarded, so an unrecognised key
+ * from a newer daemon cannot reach the registry. Every field the daemon
+ * sends therefore needs a line here to survive registration.
+ */
+export function parseHostRegisterFrame(
+  frame: Record<string, unknown>,
+): HostRegisterFrame | null {
+  if (
+    typeof frame.host_id !== "string" ||
+    typeof frame.user !== "string" ||
+    typeof frame.hostname !== "string" ||
+    typeof frame.home !== "string"
+  ) {
+    return null;
+  }
+  return {
+    action: "host_register",
+    host_id: frame.host_id,
+    user: frame.user,
+    hostname: frame.hostname,
+    home: frame.home,
+    recent_cwds: Array.isArray(frame.recent_cwds)
+      ? (frame.recent_cwds as string[])
+      : [],
+    allow_dangerous_skip: Boolean(frame.allow_dangerous_skip),
+    config_dirs: Array.isArray(frame.config_dirs)
+      ? (frame.config_dirs as ConfigDirInfo[])
+      : [],
+  };
+}
+
+/**
  * Long-lived WebSocket served to mirror-agent daemons. Each daemon
  * opens one of these on startup and keeps it open for its lifetime.
  *
@@ -73,12 +111,8 @@ export function wsHostPlugin(
       const frame = data as { action: string } & Record<string, unknown>;
 
       if (frame.action === "host_register") {
-        if (
-          typeof frame.host_id !== "string" ||
-          typeof frame.user !== "string" ||
-          typeof frame.hostname !== "string" ||
-          typeof frame.home !== "string"
-        ) {
+        const registerFrame = parseHostRegisterFrame(frame);
+        if (!registerFrame) {
           ws.send(
             JSON.stringify({
               event: "error",
@@ -87,32 +121,19 @@ export function wsHostPlugin(
           );
           return;
         }
-        const entry = hostRegistry.register(
-          {
-            action: "host_register",
-            host_id: frame.host_id,
-            user: frame.user,
-            hostname: frame.hostname,
-            home: frame.home,
-            recent_cwds: Array.isArray(frame.recent_cwds)
-              ? (frame.recent_cwds as string[])
-              : [],
-            allow_dangerous_skip: Boolean(frame.allow_dangerous_skip),
+        const entry = hostRegistry.register(registerFrame, {
+          send: (payload) => {
+            ws.send(payload);
           },
-          {
-            send: (payload) => {
-              ws.send(payload);
-            },
-            wsIdentity: ws.raw,
-            close: () => {
-              try {
-                ws.close();
-              } catch {
-                // ignore
-              }
-            },
+          wsIdentity: ws.raw,
+          close: () => {
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
           },
-        );
+        });
         connMeta.set(ws.raw, {
           hostId: entry.hostId,
           hostname: entry.hostname,
@@ -193,6 +214,18 @@ export function wsHostPlugin(
               reason: "orphaned",
             });
           }
+        }
+        return;
+      }
+
+      // Config-dir list update, sent whenever a rescan finds a change.
+      // Not tied to any pending RPC - update the entry directly and
+      // rebroadcast to dashboards.
+      if (frame.action === "host_config_dirs") {
+        const meta = connMeta.get(ws.raw);
+        if (meta && Array.isArray(frame.config_dirs)) {
+          // biome-ignore lint/suspicious/noExplicitAny: validated at runtime by HostRegistry (array shape only)
+          hostRegistry.updateConfigDirs(meta.hostId, frame.config_dirs as any);
         }
         return;
       }

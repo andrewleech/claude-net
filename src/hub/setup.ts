@@ -56,9 +56,15 @@ fi
 HUB="${hubUrl}"
 INSTALL_DIR="\$HOME/.local/share/claude-channels/bin"
 BIN_DIR="\$HOME/.local/bin"
-SETTINGS="\$HOME/.claude/settings.json"
+# Account config dir: the default (\$HOME/.claude) unless CLAUDE_CONFIG_DIR
+# names another one, e.g. CLAUDE_CONFIG_DIR=~/.claude-personal curl ... | bash
+# to set up a second account. Binaries + statusline.py stay shared across
+# accounts under \$HOME/.claude; only settings.json (hooks, launch config,
+# statusline pointer) is per-account.
+CONFIG_DIR="\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}"
+SETTINGS="\$CONFIG_DIR/settings.json"
 
-mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude"
+mkdir -p "\$INSTALL_DIR" "\$BIN_DIR" "\$HOME/.claude" "\$CONFIG_DIR"
 
 echo "[1/5] Downloading claude-channels + mirror binaries from \${HUB}…"
 for f in claude-channels claude-net-mirror-push claude-net-mirror-agent \\
@@ -157,8 +163,9 @@ with open(settings_path) as f:
     d = json.load(f)
 d.setdefault("hooks", {})
 entry = {"hooks": [{"type": "command", "command": push_bin, "timeout": 1}]}
-for ev in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-           "Stop", "SubagentStop", "Notification", "PreCompact", "PostCompact"):
+for ev in ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+           "PostToolUse", "Stop", "SubagentStop", "Notification", "PreCompact",
+           "PostCompact"):
     existing = d["hooks"].get(ev)
     if isinstance(existing, list):
         already = any(

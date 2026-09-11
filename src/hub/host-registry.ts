@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type {
+  ConfigDirInfo,
   DashboardEvent,
   HostLaunchDoneFrame,
   HostLsDoneFrame,
@@ -36,6 +37,9 @@ export interface HostEntry {
   recentCwds: string[];
   allowDangerousSkip: boolean;
   connectedAt: Date;
+  /** Account config dirs this host knows about, default account first.
+   *  Empty for a pre-rollout daemon that registered without them. */
+  configDirs: ConfigDirInfo[];
   /** Send a frame to the daemon. Thin wrapper over ws.send. */
   send(data: string): void;
   /** Identity token used to match disconnects to entries. */
@@ -98,6 +102,7 @@ export class HostRegistry {
         : [],
       allowDangerousSkip: Boolean(frame.allow_dangerous_skip),
       connectedAt: new Date(),
+      configDirs: Array.isArray(frame.config_dirs) ? frame.config_dirs : [],
       send: conn.send,
       wsIdentity: conn.wsIdentity,
       close: conn.close,
@@ -113,9 +118,26 @@ export class HostRegistry {
       recent_cwds: entry.recentCwds,
       allow_dangerous_skip: entry.allowDangerousSkip,
       connected_at: entry.connectedAt.toISOString(),
+      config_dirs: entry.configDirs,
     });
 
     return entry;
+  }
+
+  /**
+   * Update a connected host's config-dir list from a `host_config_dirs`
+   * frame and broadcast the change to dashboards. No-op for an unknown
+   * host_id (e.g. a frame that arrives after disconnect).
+   */
+  updateConfigDirs(hostId: string, configDirs: ConfigDirInfo[]): void {
+    const entry = this.hosts.get(hostId);
+    if (!entry) return;
+    entry.configDirs = configDirs;
+    this.dashboardBroadcast({
+      event: "host:config_dirs_changed",
+      host_id: hostId,
+      config_dirs: configDirs,
+    });
   }
 
   /**
@@ -202,6 +224,7 @@ export class HostRegistry {
       recent_cwds: h.recentCwds,
       allow_dangerous_skip: h.allowDangerousSkip,
       connected_at: h.connectedAt.toISOString(),
+      config_dirs: h.configDirs,
     }));
   }
 }

@@ -62,6 +62,53 @@ describe("MirrorRegistry", () => {
     expect(reg.sessions.size).toBe(1);
   });
 
+  test("createSession stores configDir on the entry and surfaces it in the summary", () => {
+    const r = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-cfg",
+      "h",
+      null,
+      undefined,
+      "/home/alice/.claude-personal",
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.configDir).toBe("/home/alice/.claude-personal");
+    const summary = reg.listAll().find((s) => s.sid === "sid-cfg");
+    expect(summary?.config_dir).toBe("/home/alice/.claude-personal");
+  });
+
+  test("createSession defaults configDir to empty string, omitted from the summary", () => {
+    const r = reg.createSession("alice:u@h", "/home/alice", "sid-nocfg");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.configDir).toBe("");
+    const summary = reg.listAll().find((s) => s.sid === "sid-nocfg");
+    expect(summary?.config_dir).toBeUndefined();
+  });
+
+  test("a re-POST with configDir fills in a previously-unknown value without clobbering a known one", () => {
+    const r1 = reg.createSession("alice:u@h", "/home/alice", "sid-fill", "h");
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.entry.configDir).toBe("");
+
+    // Pre-rollout re-POST (no configDir) must not erase a value once set.
+    reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-fill",
+      "h",
+      null,
+      undefined,
+      "/home/alice/.claude",
+    );
+    expect(r1.entry.configDir).toBe("/home/alice/.claude");
+    reg.createSession("alice:u@h", "/home/alice", "sid-fill", "h");
+    expect(r1.entry.configDir).toBe("/home/alice/.claude");
+  });
+
   test("createSession treats a stale owner POST on an existing sid as keep-alive", () => {
     // After an MCP rename the mirror-agent keeps re-POSTing the
     // cwd-derived owner because it doesn't track the chosen label —
@@ -187,6 +234,51 @@ describe("MirrorRegistry", () => {
     expect(r1.ok).toBe(true);
     expect(sent.some((s) => s.startsWith("laptop:"))).toBe(true);
     expect(sent.some((s) => s.startsWith("desktop:"))).toBe(false);
+  });
+
+  test("relayTerminate sends a mirror_terminate frame to the bound agent", () => {
+    const sent: string[] = [];
+    reg.createSession("t:u@h", "/t", "sid-term", "laptop", 7);
+    reg.setAgentConnection(
+      "sid-term",
+      {
+        ws: { send: (s: string) => sent.push(s) },
+        wsIdentity: {},
+        close: () => {},
+      },
+      "laptop",
+    );
+    const r = reg.relayTerminate("sid-term", "web", "laptop");
+    expect(r.ok).toBe(true);
+    const frame = JSON.parse(sent[0] ?? "{}");
+    expect(frame.event).toBe("mirror_terminate");
+    expect(frame.sid).toBe("sid-term");
+    expect(frame.origin?.watcher).toBe("web");
+  });
+
+  test("relayTerminate refuses unbound and closed sessions", () => {
+    // Own registry with a retention window so the closed entry stays
+    // resolvable as a gravestone (409) instead of vanishing (404).
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      quick.createSession("t2:u@h", "/t2", "sid-term-2", "laptop", 8);
+      // No agent bound: nothing on the host can act on the request.
+      const unbound = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(unbound.ok).toBe(false);
+      if (!unbound.ok) expect(unbound.status).toBe(503);
+      // Closed: there is no process left to signal.
+      quick.closeSession("sid-term-2", "exit", "laptop");
+      const closed = quick.relayTerminate("sid-term-2", "web", "laptop");
+      expect(closed.ok).toBe(false);
+      if (!closed.ok) expect(closed.status).toBe(409);
+    } finally {
+      quick.stop();
+    }
   });
 
   test("createSession keeps the existing owner on a same-sid re-POST (no relabel, no 409)", () => {
@@ -1196,6 +1288,269 @@ describe("MirrorRegistry", () => {
     expect(entry.entry.lastStatusline?.ctx_pct).toBe(75);
     expect(entry.entry.lastStatusline?.ctx_tokens).toBe(150_000);
   });
+
+  // ── keep-cache-warm state + toggle ─────────────────────────────────
+
+  test("keepWarmState returns null for an unknown sid", () => {
+    expect(reg.keepWarmState("no-such-sid")).toBeNull();
+  });
+
+  test("keepWarmState reflects a fresh session and updates with activity", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+
+    const fresh = reg.keepWarmState(sid);
+    expect(fresh).not.toBeNull();
+    if (!fresh) return;
+    expect(fresh.open).toBe(true);
+    expect(fresh.attached).toBe(false);
+    expect(fresh.awaitingUser).toBe(false);
+    expect(fresh.activity).toBe("awaiting_input");
+    expect(fresh.lastEventAt).toBe(r.entry.createdAt.getTime());
+
+    reg.recordEvent(sid, makeFrame(sid, "u-1"));
+    const busy = reg.keepWarmState(sid);
+    expect(busy).not.toBeNull();
+    if (!busy) return;
+    expect(busy.activity).toBe("busy");
+    expect(busy.lastEventAt).toBeGreaterThanOrEqual(fresh.lastEventAt);
+
+    reg.setAgentConnection(sid, { ws: { send: () => {} }, wsIdentity: {} });
+    const attached = reg.keepWarmState(sid);
+    expect(attached).not.toBeNull();
+    if (!attached) return;
+    expect(attached.attached).toBe(true);
+  });
+
+  // keepWarmState.awaitingUser walks the transcript backward rather than
+  // trusting the live entry.awaitingUser flag, so a background task's
+  // synthetic user_prompt in between doesn't hide an open permission
+  // prompt (see mirror.ts's transcriptAwaitingUser).
+
+  test("keepWarmState.awaitingUser is true for a permission notification with no assistant_message yet", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    // A background task's synthetic prompt, not a real answer.
+    reg.recordEvent(sid, makeFrame(sid, "u1"));
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.awaitingUser is true for a permission notification after a tool call", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "t1", {
+        kind: "tool_call",
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "tu1",
+          tool_name: "Bash",
+          input: {},
+        },
+      }),
+    );
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: { kind: "notification", text: "needs your approval" },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.awaitingUser is false once a top-level assistant_message follows", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    reg.recordEvent(sid, makeFrame(sid, "u1"));
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "a1", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "stop",
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(false);
+  });
+
+  test("keepWarmState.awaitingUser ignores a sub-agent assistant_message in between", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "a1", {
+        kind: "assistant_message",
+        agent_id: "sub-1",
+        payload: {
+          kind: "assistant_message",
+          text: "sub done",
+          stop_reason: "stop",
+          subagent: true,
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.lastUserPromptAt is stamped on the hub clock, not the frame's own ts", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+
+    const before = Date.now();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        // A host clock far behind the hub's - recordEvent must not use
+        // this value, or a lagging client clock could make a real reply
+        // look older than the keep-warm module's own lastPingAt and
+        // never reset its abandoned-streak counter.
+        ts: 1,
+        payload: { kind: "user_prompt", prompt: "hello", cwd: "/a" },
+      }),
+    );
+    const after = Date.now();
+    const stamped = reg.keepWarmState(sid)?.lastUserPromptAt ?? 0;
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(after);
+  });
+
+  test("keepWarmState.lastUserPromptAt excludes the configured keep-warm ping text", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.setKeepWarmText("ping-text");
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        payload: { kind: "user_prompt", prompt: "hello", cwd: "/a" },
+      }),
+    );
+    const first = reg.keepWarmState(sid)?.lastUserPromptAt ?? 0;
+    expect(first).toBeGreaterThan(0);
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p2", {
+        payload: { kind: "user_prompt", prompt: "ping-text", cwd: "/a" },
+      }),
+    );
+    // The keep-warm ping's own reply turn does not advance the timestamp.
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(first);
+  });
+
+  test("keepWarmState.lastUserPromptAt ignores a sub-agent user_prompt frame", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        agent_id: "sub-1",
+        payload: { kind: "user_prompt", prompt: "hi", cwd: "/a" },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+  });
+
+  test("keepWarmState.lastUserPromptAt ignores a synthetic task-notification prompt", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        payload: {
+          kind: "user_prompt",
+          prompt:
+            "<task-notification>\n<task-id>t1</task-id>\n" +
+            "<status>completed</status>\n</task-notification>",
+          cwd: "/a",
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+  });
+
+  test("setKeepWarm flips the flag, the summary, and broadcasts once per change", () => {
+    const events: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+
+    reg.setKeepWarm(sid, true);
+    let summary = reg.listAll().find((s) => s.sid === sid);
+    expect(summary?.keep_warm).toBe(true);
+    let warmEvents = events.filter((e) => e.event === "mirror:keep_warm");
+    expect(warmEvents).toHaveLength(1);
+    expect(warmEvents[0]?.enabled).toBe(true);
+
+    // Idempotent: setting the same value again broadcasts nothing.
+    reg.setKeepWarm(sid, true);
+    expect(events.filter((e) => e.event === "mirror:keep_warm")).toHaveLength(
+      1,
+    );
+
+    reg.setKeepWarm(sid, false);
+    summary = reg.listAll().find((s) => s.sid === sid);
+    expect(summary).not.toHaveProperty("keep_warm");
+    warmEvents = events.filter((e) => e.event === "mirror:keep_warm");
+    expect(warmEvents).toHaveLength(2);
+    expect(warmEvents[1]?.enabled).toBe(false);
+  });
 });
 
 // Auto-start flow: simulate the mirror-agent POSTing to /api/mirror/session
@@ -1767,6 +2122,121 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
       expect(reopen.restored).toBe(true);
       expect(reopen.entry.closedAt).toBe(null);
       expect(reopen.entry.ccPid).toBe(222);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession refuses to reopen a closed sid on an mtime guess from a different pid", () => {
+    // The revival bug: a fresh Claude Code starts in a directory whose
+    // previous session already ended, the daemon's newest-mtime scan
+    // finds the dead session's transcript, and the re-POST would
+    // resurrect its gravestone relabelled onto the new process.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "dead-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("dead-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "dead-sid",
+        "hostA",
+        222,
+        "mtime",
+      );
+      expect(reopen.ok).toBe(false);
+      const after = quick.getSession("dead-sid", "hostA");
+      expect(after.ok).toBe(true);
+      if (after.ok) expect(after.entry.closedAt).not.toBe(null);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession reopens a closed sid on an mtime re-POST from the SAME pid", () => {
+    // The same process re-asserting its own session (daemon restart
+    // rediscovery) is fine however weak the sid evidence is - the pid
+    // match is the identity proof.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "same-pid-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("same-pid-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "same-pid-sid",
+        "hostA",
+        111,
+        "mtime",
+      );
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+    } finally {
+      quick.stop();
+    }
+  });
+
+  test("createSession reopens a closed sid from a different pid with strong evidence", () => {
+    // POST /:sid/reconnect relaunches `claude --resume <sid>`: new pid,
+    // but the sid is named on the command line, which is authoritative.
+    const quick = new MirrorRegistry({
+      transcriptRing: 10,
+      retentionMs: 60_000,
+      orphanCloseMs: 0,
+      neverActiveMs: 0,
+    });
+    try {
+      const r = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "resumed-strong-sid",
+        "hostA",
+        111,
+      );
+      expect(r.ok).toBe(true);
+      quick.closeSession("resumed-strong-sid", "exit", "hostA");
+
+      const reopen = quick.createSession(
+        "alice:u@h",
+        "/home/alice",
+        "resumed-strong-sid",
+        "hostA",
+        333,
+        "cmdline",
+      );
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.restored).toBe(true);
+      expect(reopen.entry.closedAt).toBe(null);
+      expect(reopen.entry.ccPid).toBe(333);
     } finally {
       quick.stop();
     }

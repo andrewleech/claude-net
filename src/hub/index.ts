@@ -6,6 +6,7 @@ import { binServerPlugin, ensureBundleBuilt } from "./bin-server";
 import { EventLog } from "./event-log";
 import { hostPlugin } from "./host";
 import { HostRegistry } from "./host-registry";
+import { KeepWarm } from "./keep-warm";
 import { LogRing, captureProcessOutput } from "./log-ring";
 import { type LoopLagMonitor, startLoopLagMonitor } from "./loop-lag";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
@@ -130,6 +131,39 @@ export function createHub(options: CreateHubOptions = {}): Hub {
   mirrorRegistry.onSessionClosed((sid) => {
     uploadsRegistry.purgeSession(sid).catch(() => {});
   });
+
+  // Keep-cache-warm timer. Once an opted-in session has seen no activity
+  // for the configured interval, pings it through the same relay as
+  // /inject so Claude Code makes one API call and its prompt cache is
+  // refreshed before it expires.
+  const keepWarm = new KeepWarm({
+    fireInject: (sid, text, watcher, host) => {
+      const r = mirrorRegistry.relayInject(sid, text, watcher, host);
+      return r.ok ? { ok: true } : { ok: false, error: r.error };
+    },
+    getState: (sid, host) => mirrorRegistry.keepWarmState(sid, host),
+  });
+  // recordEvent needs the resolved ping text to exclude a ping's own
+  // reply from lastUserPromptAt. keepWarm.text (not the env-default
+  // constant) so an overridden `text` option can't desync the two; a
+  // plain statement after the const above, not a closure, so there is
+  // no ordering concern reading it here.
+  mirrorRegistry.setKeepWarmText(keepWarm.text);
+  keepWarm.setNotify((action, info) => {
+    if (action === "enabled" || action === "disabled") {
+      mirrorRegistry.setKeepWarm(info.sid, action === "enabled", info.host);
+    }
+    eventLog.push(`mirror.keep_warm.${action}`, {
+      sid: info.sid,
+      ...(info.lastSkipReason ? { reason: info.lastSkipReason } : {}),
+      ...(info.lastError ? { error: info.lastError } : {}),
+    });
+  });
+  // forget: true drops the ping-floor timestamp too, so a session that
+  // later reopens under the same sid doesn't inherit a stale floor.
+  mirrorRegistry.onSessionClosed((sid, host) =>
+    keepWarm.disable(sid, host, { forget: true }),
+  );
 
   // Wire up disconnect timeout to clean up team memberships
   registry.setTimeoutCleanup((fullName, agentTeams) => {
@@ -316,7 +350,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
         loopLag,
       }),
     )
-    .use(mirrorPlugin({ mirrorRegistry, scheduler, hostRegistry }))
+    .use(mirrorPlugin({ mirrorRegistry, scheduler, hostRegistry, keepWarm }))
     .use(
       uploadsPlugin({
         mirrorRegistry,
@@ -401,6 +435,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     stopped = true;
     clearInterval(pingTick);
     scheduler.stop();
+    keepWarm.stop();
     loopLag.stop();
     // Restore the real writers before the process (or the next test's
     // hub) installs its own tee, so captures can't stack.

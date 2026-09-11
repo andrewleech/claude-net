@@ -50,6 +50,9 @@ export interface LaunchOnHostOpts {
   skip_permissions?: boolean;
   continue_session?: boolean;
   resume_sid?: string;
+  /** Account to launch under. Forwarded as-is; the daemon validates it
+   *  against its own reported config-dir list. */
+  config_dir?: string;
 }
 
 export interface LaunchOnHostResult {
@@ -111,6 +114,7 @@ export async function launchOnHost(
         skip_permissions: opts.skip_permissions === true,
         continue_session: opts.continue_session === true,
         ...(opts.resume_sid ? { resume_sid: opts.resume_sid } : {}),
+        ...(opts.config_dir ? { config_dir: opts.config_dir } : {}),
       },
       LAUNCH_TIMEOUT_MS,
     );
@@ -228,6 +232,7 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
         skip_permissions?: boolean;
         continue_session?: boolean;
         resume_sid?: string;
+        config_dir?: string;
       };
       const r = await launchOnHost(hostRegistry, params.id, {
         cwd: payload.cwd ?? "",
@@ -235,6 +240,7 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
         skip_permissions: payload.skip_permissions === true,
         continue_session: payload.continue_session === true,
         resume_sid: payload.resume_sid,
+        config_dir: payload.config_dir,
       });
       set.status = r.status;
       if (r.retryAfter) set.headers["retry-after"] = r.retryAfter;

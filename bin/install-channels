@@ -60,10 +60,21 @@ if command -v uv >/dev/null 2>&1; then
         # source without redefining the --with set, so any co-installed
         # provider (e.g. a separately-installed model-router plugin) is
         # preserved. A --reinstall here would drop those other providers.
+        #
+        # `uv tool upgrade` on its own never refreshes claude-net-patcher:
+        # its version stays 0.1.0 across every source change, so uv reads
+        # the requirement as already satisfied and keeps the wheel it built
+        # earlier. The provider then silently stays on whatever patch
+        # anchors it was installed with, and channel patches start missing
+        # as soon as a Claude Code release moves them. --reinstall-package
+        # rebuilds that one package (it implies --refresh-package, so the
+        # cached wheel is bypassed) and leaves the rest of the environment,
+        # and the recorded --with set, untouched.
         echo "cc-patcher already installed — upgrading (preserves other providers)…"
         # Non-fatal under `set -e`: a patcher upgrade failure (e.g. GitHub
         # unreachable) must not abort the launcher/mirror install below.
-        uv tool upgrade cc-patcher || echo "WARN: cc-patcher upgrade failed; continuing with launcher/mirror install." >&2
+        uv tool upgrade cc-patcher --reinstall-package claude-net-patcher \
+            || echo "WARN: cc-patcher upgrade failed; continuing with launcher/mirror install." >&2
         if ! cc-patcher --list-providers 2>/dev/null | grep -q 'claude-net-patcher'; then
             echo "WARN: cc-patcher is installed but the claude-net channel provider" >&2
             echo "      (claude-net-patcher) is not registered. Add it without" >&2

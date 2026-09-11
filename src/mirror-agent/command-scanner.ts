@@ -4,13 +4,15 @@
 // a deduplicated list of {name, description, source} tuples suitable for
 // the web dashboard's autocomplete popover.
 //
-// Sources checked:
+// Sources checked, all rooted at the session's own account config dir
+// (<home>/.claude for the default account, elsewhere for a custom one)
+// except the project-local tree, which is per-cwd regardless of account:
 // - Claude Code built-ins (hard-coded list below).
-// - ~/.claude/commands/**/*.md     — user commands (recursive).
+// - <configDir>/commands/**/*.md   - user commands (recursive).
 // - <cwd>/.claude/commands/**/*.md — project-local commands (recursive).
 // - Plugins, two on-disk layouts:
-//     ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/{commands,skills}/
-//     ~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/{commands,skills}/
+//     <configDir>/plugins/cache/<marketplace>/<plugin>/<version>/{commands,skills}/
+//     <configDir>/plugins/marketplaces/<marketplace>/plugins/<plugin>/{commands,skills}/
 //   For each plugin we scan BOTH `commands/` and `skills/` (the v2+ plugin
 //   format puts skills at `skills/<skill-name>/SKILL.md`, dispatched as
 //   /<plugin>:<skill-name>).
@@ -31,6 +33,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { defaultConfigDir } from "../shared/config-dir";
 
 export interface SlashCommand {
   name: string;
@@ -79,12 +82,14 @@ const BUILT_INS: SlashCommand[] = [
   { name: "config", description: "Configure Claude Code", source: "builtin" },
 ];
 
-export function scanCommands(cwd: string | undefined): SlashCommand[] {
+export function scanCommands(
+  cwd: string | undefined,
+  configDir: string = defaultConfigDir(os.homedir()),
+): SlashCommand[] {
   const out: SlashCommand[] = [...BUILT_INS];
-  const home = os.homedir();
 
   // User commands (recursive).
-  scanCommandsDir(path.join(home, ".claude", "commands"), "user", out);
+  scanCommandsDir(path.join(configDir, "commands"), "user", out);
 
   // Project-local commands (recursive).
   if (cwd && cwd.length > 0) {
@@ -92,14 +97,9 @@ export function scanCommands(cwd: string | undefined): SlashCommand[] {
   }
 
   // Plugin commands + skills — two tree layouts on disk.
-  const cacheRoot = path.join(home, ".claude", "plugins", "cache");
+  const cacheRoot = path.join(configDir, "plugins", "cache");
   scanCacheRoot(cacheRoot, out);
-  const marketplacesRoot = path.join(
-    home,
-    ".claude",
-    "plugins",
-    "marketplaces",
-  );
+  const marketplacesRoot = path.join(configDir, "plugins", "marketplaces");
   scanMarketplacesRoot(marketplacesRoot, out);
 
   // Deduplicate — first-seen wins so built-ins aren't clobbered by a

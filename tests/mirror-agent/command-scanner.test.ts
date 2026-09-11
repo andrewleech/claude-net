@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import {
   parseCommandFile,
   parseFrontmatter,
   pickLatestVersion,
+  scanCommands,
   scanPluginCommands,
   scanPluginSkills,
 } from "@/mirror-agent/command-scanner";
@@ -171,6 +172,68 @@ describe("scanPluginCommands", () => {
     const out: SlashCommand[] = [];
     scanPluginCommands("/nonexistent/path/here", "x", out);
     expect(out).toHaveLength(0);
+  });
+});
+
+describe("scanCommands", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "cmd-scanner-account-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  /** Plant `<configDir>/commands/<name>.md` and return configDir. */
+  function seedUserCommand(configDir: string, name: string): string {
+    const dir = path.join(configDir, "commands");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${name}.md`),
+      `---\ndescription: ${name} command\n---\nbody`,
+    );
+    return configDir;
+  }
+
+  test("reads user commands from the default account's config dir", () => {
+    const configDir = seedUserCommand(path.join(home, ".claude"), "deploy");
+    const commands = scanCommands(undefined, configDir);
+    expect(commands.map((c) => c.name)).toContain("deploy");
+  });
+
+  test("two accounts' user commands stay isolated from each other", () => {
+    const workDir = seedUserCommand(path.join(home, ".claude"), "work-only");
+    const personalDir = seedUserCommand(
+      path.join(home, ".claude-personal"),
+      "personal-only",
+    );
+
+    const workCommands = scanCommands(undefined, workDir).map((c) => c.name);
+    expect(workCommands).toContain("work-only");
+    expect(workCommands).not.toContain("personal-only");
+
+    const personalCommands = scanCommands(undefined, personalDir).map(
+      (c) => c.name,
+    );
+    expect(personalCommands).toContain("personal-only");
+    expect(personalCommands).not.toContain("work-only");
+  });
+
+  test("built-ins are present regardless of configDir", () => {
+    const commands = scanCommands(undefined, path.join(home, ".claude"));
+    expect(commands.map((c) => c.name)).toContain("help");
+  });
+
+  test("project-local commands are read from the cwd regardless of account", () => {
+    const cwd = path.join(home, "project");
+    const projectCmds = path.join(cwd, ".claude", "commands");
+    fs.mkdirSync(projectCmds, { recursive: true });
+    fs.writeFileSync(path.join(projectCmds, "local.md"), "no fm");
+
+    const commands = scanCommands(cwd, path.join(home, ".claude-personal"));
+    expect(commands.map((c) => c.name)).toContain("local");
   });
 });
 

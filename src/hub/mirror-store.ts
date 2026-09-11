@@ -28,6 +28,9 @@ export interface ArchivedSession {
     ts: number;
     payload: unknown;
   }>;
+  /** Account config dir this session belonged to. "" when unknown
+   *  (pre-rollout session, or a store predating this field). */
+  config_dir: string;
 }
 
 export interface MirrorStore {
@@ -37,6 +40,7 @@ export interface MirrorStore {
     owner_agent: string;
     cwd: string;
     created_at: string;
+    config_dir?: string;
   }): void;
   /** Append one event. */
   appendEvent(sid: string, frame: MirrorEventFrame): void;
@@ -97,6 +101,7 @@ export class FileStore implements MirrorStore {
     owner_agent: string;
     cwd: string;
     created_at: string;
+    config_dir?: string;
   }): void {
     const p = path.join(this.dir, `${safeSid(meta.sid)}.jsonl`);
     // O_APPEND + truncate on first open so restarted sessions get a clean file.
@@ -116,6 +121,7 @@ export class FileStore implements MirrorStore {
       owner_agent: meta.owner_agent,
       cwd: meta.cwd,
       created_at: meta.created_at,
+      config_dir: meta.config_dir ?? "",
     });
     fs.writeSync(fd, `${header}\n`);
   }
@@ -167,6 +173,7 @@ export class FileStore implements MirrorStore {
     let owner_agent = "";
     let cwd = "";
     let created_at = "";
+    let config_dir = "";
     let closed_at: string | null = null;
     const transcript: ArchivedSession["transcript"] = [];
 
@@ -181,6 +188,7 @@ export class FileStore implements MirrorStore {
         owner_agent = (obj.owner_agent as string) ?? "";
         cwd = (obj.cwd as string) ?? "";
         created_at = (obj.created_at as string) ?? "";
+        config_dir = (obj.config_dir as string) ?? "";
         continue;
       }
       if (obj._footer === true) {
@@ -197,7 +205,15 @@ export class FileStore implements MirrorStore {
       }
     }
 
-    return { sid, owner_agent, cwd, created_at, closed_at, transcript };
+    return {
+      sid,
+      owner_agent,
+      cwd,
+      created_at,
+      closed_at,
+      transcript,
+      config_dir,
+    };
   }
 
   async close(): Promise<void> {

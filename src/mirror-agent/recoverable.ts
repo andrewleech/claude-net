@@ -13,6 +13,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RecoverableSession } from "@/shared/types";
+import {
+  claudeJsonPath,
+  discoverConfigDirs,
+  tmuxSessionBase,
+} from "../shared/config-dir";
 
 /** Transcripts above this size are previewed from their tail, not counted. */
 const MAX_FULL_PARSE_BYTES = 32 * 1024 * 1024;
@@ -22,6 +27,14 @@ const PREVIEW_CHARS = 140;
 
 export interface ScanOptions {
   home?: string;
+  /**
+   * Account config dirs to scan, each independently against its own
+   * .claude.json and projects/ tree. Defaults to `discoverConfigDirs(home)`
+   * - callers that also want config dirs seen on live sessions (accounts
+   * `CLAUDE_CONFIG_DIR` points somewhere discovery wouldn't find on its
+   * own) should union those in before calling.
+   */
+  configDirs?: string[];
   /**
    * Only surface transcripts written within this window. `null` means no
    * window at all: every matching transcript is returned regardless of
@@ -67,11 +80,10 @@ export function encodeProjectDirName(cwd: string): string {
  * from a directory basename must apply the same substitution before it is
  * compared against or used to create a tmux session - otherwise a
  * dotted or colon-bearing directory name never matches what tmux actually
- * named the session.
+ * named the session. Re-exported from the shared config-dir module, which
+ * also needs it to build the account-suffixed tmux session base name.
  */
-export function sanitizeTmuxName(name: string): string {
-  return name.replace(/[.:]/g, "_");
-}
+export { sanitizeTmuxName } from "../shared/config-dir";
 
 export function scanRecoverable(opts: ScanOptions = {}): RecoverableSession[] {
   const home = opts.home ?? os.homedir();
@@ -83,42 +95,46 @@ export function scanRecoverable(opts: ScanOptions = {}): RecoverableSession[] {
   const liveSessionIds = opts.liveSessionIds ?? new Set<string>();
   const liveCwds = opts.liveCwds ?? new Set<string>();
   const redact = opts.redact ?? ((s: string) => s);
-
-  const projects = readProjects(path.join(home, ".claude.json"));
-  if (!projects) return [];
+  const configDirs = opts.configDirs ?? discoverConfigDirs(home);
 
   const out: RecoverableSession[] = [];
-  for (const [cwd, meta] of Object.entries(projects)) {
-    if (meta.lastGracefulShutdown !== false) continue;
-    if (liveCwds.has(cwd)) continue;
-    if (!isDirectory(cwd)) continue;
+  for (const configDir of configDirs) {
+    const projects = readProjects(claudeJsonPath(configDir, home));
+    if (!projects) continue;
 
-    const transcript = newestTranscript(
-      path.join(home, ".claude", "projects", encodeProjectDirName(cwd)),
-    );
-    if (!transcript) continue;
-    if (withinMs !== null && now - transcript.mtimeMs > withinMs) continue;
+    for (const [cwd, meta] of Object.entries(projects)) {
+      if (meta.lastGracefulShutdown !== false) continue;
+      if (liveCwds.has(cwd)) continue;
+      if (!isDirectory(cwd)) continue;
 
-    const sessionId = path.basename(transcript.file, ".jsonl");
-    if (liveSessionIds.has(sessionId)) continue;
+      const transcript = newestTranscript(
+        path.join(configDir, "projects", encodeProjectDirName(cwd)),
+      );
+      if (!transcript) continue;
+      if (withinMs !== null && now - transcript.mtimeMs > withinMs) continue;
 
-    const parsed = opts.metadataOnly
-      ? { turns: null, preview: "", title: null }
-      : parseTranscript(transcript.file, transcript.size);
-    const base = path.basename(cwd) || cwd;
-    const tmuxName = sanitizeTmuxName(base);
-    const conflict = opts.tmuxSessionExists?.(tmuxName) ? tmuxName : null;
+      const sessionId = path.basename(transcript.file, ".jsonl");
+      if (liveSessionIds.has(sessionId)) continue;
 
-    out.push({
-      session_id: sessionId,
-      cwd,
-      label: parsed.title || base,
-      last_active: new Date(transcript.mtimeMs).toISOString(),
-      turns: parsed.turns,
-      preview: redact(parsed.preview).slice(0, PREVIEW_CHARS),
-      needs_trust: meta.hasTrustDialogAccepted !== true,
-      tmux_conflict: conflict,
-    });
+      const parsed = opts.metadataOnly
+        ? { turns: null, preview: "", title: null }
+        : parseTranscript(transcript.file, transcript.size);
+      const base = path.basename(cwd) || cwd;
+      const tmuxName = tmuxSessionBase(cwd, configDir, home);
+      const conflict = opts.tmuxSessionExists?.(tmuxName) ? tmuxName : null;
+
+      out.push({
+        session_id: sessionId,
+        cwd,
+        label: parsed.title || base,
+        last_active: new Date(transcript.mtimeMs).toISOString(),
+        turns: parsed.turns,
+        preview: redact(parsed.preview).slice(0, PREVIEW_CHARS),
+        needs_trust: meta.hasTrustDialogAccepted !== true,
+        tmux_conflict: conflict,
+        config_dir: configDir,
+      });
+    }
   }
 
   out.sort((a, b) => b.last_active.localeCompare(a.last_active));

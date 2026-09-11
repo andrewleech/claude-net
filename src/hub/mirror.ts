@@ -17,8 +17,10 @@ import type {
   MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorStopFrame,
+  MirrorTerminateFrame,
   ScheduledInjectInfo,
   ScheduledInjectStatus,
+  SidSource,
 } from "@/shared/types";
 
 interface SlashCommand {
@@ -29,6 +31,11 @@ interface SlashCommand {
 import { Elysia } from "elysia";
 import { launchOnHost } from "./host";
 import type { HostRegistry } from "./host-registry";
+import {
+  KEEP_WARM_INTERVAL_MS,
+  type KeepWarm,
+  type KeepWarmSessionState,
+} from "./keep-warm";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 import type { Scheduler } from "./scheduler";
@@ -37,9 +44,19 @@ import type { Scheduler } from "./scheduler";
 
 const DEFAULT_TRANSCRIPT_RING = 2000;
 const INIT_TRANSCRIPT_WINDOW = 200;
+
+/** Accepted `sid_source` values on POST /api/mirror/session. Anything
+ *  else (or nothing, from pre-rollout daemons) is treated as unknown. */
+const VALID_SID_SOURCES: ReadonlySet<SidSource> = new Set([
+  "hook",
+  "cmdline",
+  "fd",
+  "index",
+  "mtime",
+]);
 /**
  * How long a closed session stays in the registry's in-memory map before
- * being dropped. Default 1 hour — long enough for the user to revisit a
+ * being dropped. Default 6 hours — long enough for the user to revisit a
  * transcript after close, short enough that orphan-swept gravestones
  * don't accumulate in the dashboard sidebar. Closed sessions stay listed
  * (dimmed, offline) for this long so they remain reconnectable from the
@@ -123,6 +140,10 @@ export interface MirrorSessionEntry {
    * when unknown (pre-rollout hook wrapper).
    */
   ccPid: number | null;
+  /** Account config dir the mirror-agent reported on session POST. Empty
+   *  string when unknown (pre-rollout client) - treat as the default
+   *  account. */
+  configDir: string;
   createdAt: Date;
   lastEventAt: Date;
   transcript: MirrorEventFrame[];
@@ -162,6 +183,20 @@ export interface MirrorSessionEntry {
     ctx_window: number;
     ts: number;
   } | null;
+  /** True while the hub is pinging this session to keep its prompt cache
+   *  warm. Mirrors `KeepWarm.isEnabled(sid)`; the module's `notify`
+   *  callback is the only writer. */
+  keepWarm: boolean;
+  /**
+   * Hub-clock timestamp of the most recent top-level user_prompt that
+   * was neither the keep-warm ping's own text nor a synthetic
+   * task-notification. Stamped on the hub rather than read from the
+   * frame's own `ts` (client clock) so a host clock lagging the hub
+   * can't make a real reply look older than it is and let the
+   * keep-warm consecutive-ping cap disable the session as abandoned.
+   * null when the session has had no such prompt.
+   */
+  lastUserPromptAt: Date | null;
 }
 
 /**
@@ -497,6 +532,45 @@ export function nextAwaitingUser(
 }
 
 /**
+ * A more conservative read of "is a permission prompt open" than the
+ * live `entry.awaitingUser` field, for callers where injecting text plus
+ * Enter into an open prompt would answer it. `entry.awaitingUser` clears
+ * on the very next event of any kind, including a background task's
+ * synthetic `<task-notification>` user_prompt - which does not mean the
+ * pane's permission prompt was answered. This instead walks the
+ * transcript backward for the last frame that actually settles the
+ * question: a top-level assistant_message means the turn resolved
+ * (false), a notification matching PERMISSION_NOTIFICATION_RE means a
+ * prompt is open (true). Anything else in between (tool calls/results,
+ * user prompts, non-matching notifications) is not conclusive and is
+ * skipped. Falls back to `entry.awaitingUser` when the transcript ring
+ * holds neither.
+ */
+function transcriptAwaitingUser(entry: MirrorSessionEntry): boolean {
+  for (let i = entry.transcript.length - 1; i >= 0; i--) {
+    const frame = entry.transcript[i];
+    if (!frame) continue;
+    const payload = frame.payload;
+    if (
+      frame.kind === "assistant_message" &&
+      !frame.agent_id &&
+      payload.kind === "assistant_message" &&
+      payload.subagent !== true
+    ) {
+      return false;
+    }
+    if (
+      frame.kind === "notification" &&
+      payload.kind === "notification" &&
+      PERMISSION_NOTIFICATION_RE.test(payload.text)
+    ) {
+      return true;
+    }
+  }
+  return entry.awaitingUser;
+}
+
+/**
  * Fold the base state and the background ledger into the state
  * dashboards render.
  */
@@ -607,6 +681,9 @@ export class MirrorRegistry {
   private boundOrphanCloseMs: number;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
+  /** Set via setKeepWarmText; "" (the default) excludes nothing, since
+   *  no real prompt is ever the empty string. */
+  private keepWarmText = "";
   /**
    * Resolves (host, ccPid) → the full name of the MCP agent that owns
    * that Claude Code process, or null. Used by createSession to apply
@@ -616,7 +693,7 @@ export class MirrorRegistry {
    */
   private agentLookup: ((host: string, ccPid: number) => string | null) | null =
     null;
-  private sessionClosedHooks: Array<(sid: string) => void> = [];
+  private sessionClosedHooks: Array<(sid: string, host?: string) => void> = [];
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
@@ -774,6 +851,15 @@ export class MirrorRegistry {
     this.agentLookup = fn;
   }
 
+  /** Configure the text `recordEvent` excludes from `lastUserPromptAt`
+   *  as the keep-warm ping's own turn rather than a real prompt. Pass
+   *  the live `KeepWarm` instance's resolved text (not the env-default
+   *  constant) so an overridden `text` option can't desync from what
+   *  the registry actually filters. */
+  setKeepWarmText(text: string): void {
+    this.keepWarmText = text;
+  }
+
   /**
    * Called from the MCP register handler whenever an agent (re)registers.
    * Scans all mirror sessions whose (host, ccPid) matches and rewrites
@@ -887,8 +973,11 @@ export class MirrorRegistry {
   }
 
   /** Register a callback to run when any session is closed. Used by the
-   *  uploads registry to purge per-session files. */
-  onSessionClosed(fn: (sid: string) => void): void {
+   *  uploads registry to purge per-session files and by the keep-warm
+   *  timer to stop pinging. `host` is the closed entry's host (empty
+   *  string when unknown), passed so a host-scoped listener can resolve
+   *  the same composite key the entry was stored under. */
+  onSessionClosed(fn: (sid: string, host?: string) => void): void {
     this.sessionClosedHooks.push(fn);
   }
 
@@ -1036,6 +1125,8 @@ export class MirrorRegistry {
     sid?: string,
     host = "",
     ccPid: number | null = null,
+    sidSource?: SidSource,
+    configDir = "",
   ):
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
@@ -1070,13 +1161,37 @@ export class MirrorRegistry {
         // old agent's shutdown sent a /close before the new agent had
         // the chance to reclaim the session, and after
         // POST /:sid/reconnect relaunches `claude --resume <sid>` under a
-        // new pid. Reopening unconditionally is what makes both paths
-        // work; the sid itself is the identity on a trusted network.
+        // new pid (the relaunch names the sid on its command line, so the
+        // daemon re-POSTs with strong evidence).
+        //
+        // The one refusal: a newest-mtime guess from a different pid.
+        // That is exactly the shape of a fresh Claude Code starting in a
+        // directory whose previous session already ended - the daemon's
+        // scan finds the dead session's transcript and would resurrect
+        // its gravestone here, relabelled onto the new process. The same
+        // pid re-asserting its own session is fine (mtime or not);
+        // clients that predate sid_source keep the old reopen behaviour.
+        if (
+          sidSource === "mtime" &&
+          ccPid !== null &&
+          existing.ccPid !== null &&
+          ccPid !== existing.ccPid
+        ) {
+          return {
+            ok: false,
+            error: `Session '${actualSid}' is closed; a newest-mtime scan from a different pid is not enough evidence to reopen it.`,
+          };
+        }
         existing.closedAt = null;
         if (existing.retentionTimerId) {
           clearTimeout(existing.retentionTimerId);
           existing.retentionTimerId = null;
         }
+      }
+      // A pre-rollout daemon's re-POST has no config_dir; don't let
+      // its absence clobber a value we already learned.
+      if (configDir && existing.configDir !== configDir) {
+        existing.configDir = configDir;
       }
       this.reconcileIdentity(existing, host, ccPid);
       return {
@@ -1122,6 +1237,7 @@ export class MirrorRegistry {
       cwd,
       host,
       ccPid,
+      configDir,
       createdAt: now,
       lastEventAt: now,
       transcript: [],
@@ -1134,6 +1250,8 @@ export class MirrorRegistry {
       activityState: "awaiting_input",
       pendingBackground: new Map(),
       awaitingUser: false,
+      keepWarm: false,
+      lastUserPromptAt: null,
     };
     this.setEntry(entry);
 
@@ -1142,6 +1260,7 @@ export class MirrorRegistry {
       owner_agent: resolvedOwner,
       cwd,
       created_at: now.toISOString(),
+      ...(configDir ? { config_dir: configDir } : {}),
     });
 
     this.dashboardBroadcast({
@@ -1191,6 +1310,15 @@ export class MirrorRegistry {
       entry.transcript.splice(0, entry.transcript.length - this.transcriptRing);
     }
     entry.lastEventAt = new Date();
+    if (
+      frame.kind === "user_prompt" &&
+      !frame.agent_id &&
+      frame.payload.kind === "user_prompt" &&
+      frame.payload.prompt !== this.keepWarmText &&
+      parseTaskNotification(frame.payload.prompt) === null
+    ) {
+      entry.lastUserPromptAt = entry.lastEventAt;
+    }
     entry.activityState = nextActivityState(
       entry.activityState,
       frame.kind,
@@ -1394,7 +1522,7 @@ export class MirrorRegistry {
 
     for (const fn of this.sessionClosedHooks) {
       try {
-        fn(sid);
+        fn(sid, entry.host || undefined);
       } catch (err) {
         process.stderr.write(
           `[claude-net/mirror] sessionClosed hook threw for ${sid}: ${String(err)}\n`,
@@ -1611,6 +1739,43 @@ export class MirrorRegistry {
       };
     const frame: MirrorStopFrame = {
       event: "mirror_stop",
+      sid,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** Relay a terminate request to the session's agent: end the Claude
+   *  Code process and remove its tmux pane. Fire and forget - the close
+   *  flows back through the agent's normal close path once the process
+   *  is gone. */
+  relayTerminate(
+    sid: string,
+    watcher: string,
+    host?: string,
+  ): { ok: true } | { ok: false; error: string; status: number } {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is already closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const frame: MirrorTerminateFrame = {
+      event: "mirror_terminate",
       sid,
       origin: { watcher, ts: Date.now() },
     };
@@ -2168,6 +2333,52 @@ export class MirrorRegistry {
       }
     }
   }
+
+  /**
+   * Snapshot of the fields `KeepWarm` needs to decide whether a session
+   * can be pinged. Returns null when the sid is unknown. `lastUserPromptAt`
+   * is `entry.lastUserPromptAt` as recordEvent maintains it (hub-clock
+   * stamped, already excluding the keep-warm ping's own text and
+   * synthetic task-notifications).
+   */
+  keepWarmState(sid: string, host?: string): KeepWarmSessionState | null {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry) return null;
+    const now = Date.now();
+    return {
+      lastEventAt: entry.lastEventAt.getTime(),
+      activity: effectiveActivityState(
+        entry.activityState,
+        entry.pendingBackground,
+        entry.awaitingUser,
+        now,
+      ),
+      awaitingUser: transcriptAwaitingUser(entry),
+      lastUserPromptAt: entry.lastUserPromptAt
+        ? entry.lastUserPromptAt.getTime()
+        : 0,
+      open: entry.closedAt === null,
+      attached: entry.agent !== null,
+    };
+  }
+
+  /**
+   * Set the keep-cache-warm flag mirrored on the entry, broadcasting
+   * `mirror:keep_warm` when the value actually changes. `KeepWarm`'s
+   * `notify` callback is the only caller.
+   */
+  setKeepWarm(sid: string, enabled: boolean, host?: string): void {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry) return;
+    if (entry.keepWarm === enabled) return;
+    entry.keepWarm = enabled;
+    this.dashboardBroadcast({
+      event: "mirror:keep_warm",
+      sid,
+      ...(entry.host ? { host: entry.host } : {}),
+      enabled,
+    });
+  }
 }
 
 function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
@@ -2191,6 +2402,8 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
       now,
     ),
     background: prunePendingBackground(entry.pendingBackground, now),
+    ...(entry.configDir ? { config_dir: entry.configDir } : {}),
+    ...(entry.keepWarm ? { keep_warm: true } : {}),
   };
 }
 
@@ -2203,10 +2416,12 @@ export interface MirrorPluginDeps {
   /** Optional — when absent the reconnect route can't relaunch dead
    *  sessions and returns 501. */
   hostRegistry?: HostRegistry;
+  /** Optional - when absent the keep-warm endpoint returns 501. */
+  keepWarm?: KeepWarm;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry, scheduler, hostRegistry } = deps;
+  const { mirrorRegistry, scheduler, hostRegistry, keepWarm } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })
@@ -2217,6 +2432,8 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           sid?: string;
           host?: string;
           cc_pid?: number | null;
+          sid_source?: string;
+          config_dir?: string;
         };
         if (!payload.owner_agent || !payload.cwd) {
           set.status = 400;
@@ -2255,12 +2472,19 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           typeof payload.cc_pid === "number" && Number.isFinite(payload.cc_pid)
             ? payload.cc_pid
             : null;
+        const sidSource = VALID_SID_SOURCES.has(payload.sid_source as SidSource)
+          ? (payload.sid_source as SidSource)
+          : undefined;
+        const configDir =
+          typeof payload.config_dir === "string" ? payload.config_dir : "";
         const result = mirrorRegistry.createSession(
           payload.owner_agent,
           payload.cwd,
           payload.sid,
           host,
           ccPid,
+          sidSource,
+          configDir,
         );
         if (!result.ok) {
           set.status = 409;
@@ -2338,6 +2562,81 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         // entry.
         mirrorRegistry.closeSession(params.sid, "exit", found.entry.host);
         return { closed: true };
+      })
+
+      /**
+       * POST /:sid/terminate - end the session's Claude Code outright.
+       * Relays to the mirror-agent, which SIGTERMs the process (SIGKILL
+       * as backstop) and removes its tmux pane. The session close itself
+       * flows back through the normal SessionEnd / close path once the
+       * process exits, so this returns "accepted", not "closed".
+       */
+      .post("/:sid/terminate", ({ params, query, set, request }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const watcher = sanitizeWatcher(
+          request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayTerminate(params.sid, watcher, host);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true };
+      })
+
+      /**
+       * POST /:sid/forget - drop a session from the registry immediately,
+       * skipping the retention window. For closed gravestones the user is
+       * done with; on a still-open entry it also force-closes any bound
+       * agent WS (the daemon then recovers and re-creates, so the UI only
+       * offers this on closed rows).
+       */
+      .post("/:sid/forget", ({ params, query, set }) => {
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        mirrorRegistry.closeAndDrop(params.sid, "exit", found.entry.host);
+        return { removed: true };
+      })
+
+      /**
+       * POST /:sid/keep-warm - toggle the per-session keep-cache-warm
+       * ping. While enabled, once the session has seen no activity for
+       * the configured interval the hub sends a tiny inject so Claude
+       * Code makes one API call and its prompt cache is refreshed
+       * before it expires. No rate limit on the toggle itself; the
+       * ping it eventually sends goes through the same relay as
+       * /inject, which is where the limits apply.
+       */
+      .post("/:sid/keep-warm", ({ params, body, query, set }) => {
+        if (!keepWarm) {
+          set.status = 501;
+          return { error: "Keep-warm is not enabled on this hub." };
+        }
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const payload = (body ?? {}) as { enabled?: unknown };
+        if (typeof payload.enabled !== "boolean") {
+          set.status = 400;
+          return { error: "enabled must be a boolean." };
+        }
+        if (payload.enabled) {
+          const result = keepWarm.enable(found.entry.sid, found.entry.host);
+          if (!result.ok) {
+            set.status = result.status;
+            return { error: result.error };
+          }
+          return { enabled: true, interval_ms: keepWarm.intervalMs };
+        }
+        keepWarm.disable(found.entry.sid, found.entry.host);
+        return { enabled: false, interval_ms: keepWarm.intervalMs };
       })
 
       /**
@@ -2688,6 +2987,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         inject_max_kb: Math.floor(MAX_INJECT_BYTES / 1024),
         paste_max_mb: Math.floor(MAX_PASTE_BYTES / (1024 * 1024)),
         inject_rpm: INJECT_RPM,
+        keep_warm_interval_ms: keepWarm?.intervalMs ?? KEEP_WARM_INTERVAL_MS,
       }))
 
       /**
@@ -2756,6 +3056,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const r = await launchOnHost(hostRegistry, hostId, {
           cwd: entry.cwd,
           resume_sid: entry.sid,
+          config_dir: entry.configDir || undefined,
         });
         // A missing host means the daemon isn't connected — surface it as
         // 503 (offline) rather than the generic 404 launchOnHost uses.

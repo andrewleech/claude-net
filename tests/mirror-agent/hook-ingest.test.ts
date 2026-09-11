@@ -32,6 +32,32 @@ describe("ingestHook", () => {
     });
   });
 
+  test("SessionEnd → session_end payload, /clear reason preserved", () => {
+    const out = ingestHook({
+      hook_event_name: "SessionEnd",
+      session_id: "s-1",
+      reason: "clear",
+    });
+    expect(out).not.toBeNull();
+    if (!out) return;
+    expect(out.frame.kind).toBe("session_end");
+    expect(out.frame.payload).toEqual({ kind: "session_end", reason: "clear" });
+  });
+
+  test("SessionEnd collapses non-clear reasons to 'exit'", () => {
+    for (const reason of ["logout", "prompt_input_exit", "other", undefined]) {
+      const out = ingestHook({
+        hook_event_name: "SessionEnd",
+        session_id: "s-1",
+        ...(reason ? { reason } : {}),
+      });
+      expect(out?.frame.payload).toEqual({
+        kind: "session_end",
+        reason: "exit",
+      });
+    }
+  });
+
   test("SessionStart coerces invalid source to 'startup'", () => {
     const out = ingestHook({
       hook_event_name: "SessionStart",
@@ -223,6 +249,72 @@ describe("ingestHook", () => {
     expect(out.frame.sid).toBe("s-42");
     expect(out.frame.uuid).toMatch(/^[0-9a-f-]{36}$/);
     expect(typeof out.frame.ts).toBe("number");
+  });
+
+  describe("config dir signals", () => {
+    test("configDirHint is derived from transcript_path", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        transcript_path:
+          "/home/alice/.claude-personal/projects/-home-alice-work/s-1.jsonl",
+      });
+      expect(out?.configDirHint).toBe("/home/alice/.claude-personal");
+    });
+
+    test("configDirHint falls back to agent_transcript_path when transcript_path is absent", () => {
+      const out = ingestHook({
+        hook_event_name: "SubagentStop",
+        session_id: "s-1",
+        last_assistant_message: "done",
+        stop_reason: "end_turn",
+        agent_id: "agent-7",
+        agent_transcript_path:
+          "/home/alice/.claude/projects/-home-alice-work/s-1/subagents/agent-agent-7.jsonl",
+      });
+      expect(out?.configDirHint).toBe("/home/alice/.claude");
+    });
+
+    test("configDirHint is undefined when neither path has a /projects/ segment", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        transcript_path: "/tmp/scratch.jsonl",
+      });
+      expect(out?.configDirHint).toBeUndefined();
+    });
+
+    test("mirrorEnvConfigDir is read from _mirror_env.CLAUDE_CONFIG_DIR", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        _mirror_env: { CLAUDE_CONFIG_DIR: "/home/alice/.claude-personal" },
+      });
+      expect(out?.mirrorEnvConfigDir).toBe("/home/alice/.claude-personal");
+    });
+
+    test("mirrorEnvConfigDir is undefined when _mirror_env has an empty string", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        _mirror_env: { CLAUDE_CONFIG_DIR: "" },
+      });
+      expect(out?.mirrorEnvConfigDir).toBeUndefined();
+    });
+
+    test("both signals are undefined when absent from the payload", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+      });
+      expect(out?.configDirHint).toBeUndefined();
+      expect(out?.mirrorEnvConfigDir).toBeUndefined();
+    });
   });
 
   describe("PostToolUse — image content blocks", () => {

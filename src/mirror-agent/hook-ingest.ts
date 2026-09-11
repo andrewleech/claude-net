@@ -14,6 +14,7 @@ import type {
   MirrorEventPayload,
   MirrorSessionSource,
 } from "@/shared/types";
+import { configDirFromTranscriptPath } from "../shared/config-dir";
 
 export const MAX_STRING_FIELD_BYTES = 256 * 1024; // 256 KB per field
 
@@ -69,6 +70,8 @@ export interface RawHookPayload {
     TMUX_PANE?: string;
     /** PPID of the hook wrapper — the Claude Code process itself. */
     CC_PID?: number;
+    /** CLAUDE_CONFIG_DIR from the hook wrapper's own environment, when set. */
+    CLAUDE_CONFIG_DIR?: string;
   };
   // Forward-compatible: allow unknown keys.
   [key: string]: unknown;
@@ -83,6 +86,15 @@ export interface IngestedEvent {
   ccPid: number | undefined;
   agentId: string | undefined;
   agentType: string | undefined;
+  /**
+   * Config dir recovered from `transcript_path` (or, failing that,
+   * `agent_transcript_path`) via `configDirFromTranscriptPath`. The
+   * strongest config-dir signal a hook payload declares - present on
+   * every hook once Claude Code has written its first transcript line.
+   */
+  configDirHint: string | undefined;
+  /** Raw CLAUDE_CONFIG_DIR from the hook wrapper's `_mirror_env`, unnormalized. */
+  mirrorEnvConfigDir: string | undefined;
 }
 
 /**
@@ -136,6 +148,15 @@ export function ingestHook(payload: RawHookPayload): IngestedEvent | null {
         : undefined,
     agentId,
     agentType,
+    configDirHint:
+      configDirFromTranscriptPath(payload.transcript_path) ??
+      configDirFromTranscriptPath(payload.agent_transcript_path) ??
+      undefined,
+    mirrorEnvConfigDir:
+      typeof payload._mirror_env?.CLAUDE_CONFIG_DIR === "string" &&
+      payload._mirror_env.CLAUDE_CONFIG_DIR.length > 0
+        ? payload._mirror_env.CLAUDE_CONFIG_DIR
+        : undefined,
   };
 }
 
@@ -150,6 +171,15 @@ function hookToPayload(
         source: coerceSource(p.source),
         transcript_path: stringField(p.transcript_path) ?? "",
         cwd: stringField(p.cwd) ?? "",
+      };
+
+    case "SessionEnd":
+      // Claude Code reports reasons like "clear", "logout",
+      // "prompt_input_exit", "other". Everything that isn't a /clear
+      // rotation collapses to "exit" for the wire payload.
+      return {
+        kind: "session_end",
+        reason: stringField(p.reason) === "clear" ? "clear" : "exit",
       };
 
     case "UserPromptSubmit": {

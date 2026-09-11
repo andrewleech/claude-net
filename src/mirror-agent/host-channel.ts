@@ -9,6 +9,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
+  ConfigDirInfo,
+  HostConfigDirsFrame,
   HostLaunchDoneFrame,
   HostLaunchRequest,
   HostLsDoneFrame,
@@ -25,8 +27,15 @@ import type {
   HostSessionProbeFrame,
   RecoverableSession,
 } from "@/shared/types";
+import {
+  accountLabel,
+  defaultConfigDir,
+  discoverConfigDirs,
+  normalizeConfigDir,
+  tmuxSessionBase,
+} from "../shared/config-dir";
 import { HubClient } from "./hub-client";
-import { sanitizeTmuxName, scanRecoverable } from "./recoverable";
+import { scanRecoverable } from "./recoverable";
 
 export interface HostChannelOptions {
   hubUrl: string;
@@ -56,6 +65,13 @@ export interface HostChannelOptions {
   getLiveSessionIds?: () => Set<string>;
   /** Working directories the daemon currently holds open. */
   getLiveCwds?: () => Set<string>;
+  /**
+   * Account config dirs the daemon currently holds a live session open
+   * against. Unioned into the discovered `.claude-*` list so an account
+   * whose CLAUDE_CONFIG_DIR the on-disk scan wouldn't find still appears
+   * in `host_config_dirs`.
+   */
+  getLiveConfigDirs?: () => Set<string>;
   /**
    * Applied to recoverable-session previews before they leave the host.
    * Transcript prose crossing the network gets the same treatment as
@@ -132,34 +148,112 @@ export interface HostChannelHandle {
    * was never migrated), which nothing here currently attempts.
    */
   reportOrphan(ccPid: number): void;
+  /**
+   * Recompute the known config-dir list (discovered `.claude-*` dirs
+   * unioned with `getLiveConfigDirs()`) and, if it changed, send a
+   * `host_config_dirs` frame. Called after a session opens so an account
+   * whose config dir wasn't discoverable at registration time still shows
+   * up once a session actually uses it.
+   */
+  noteSessionConfigDir(configDir: string): void;
+}
+
+/**
+ * The account config dirs this host currently knows about: every
+ * discovered `.claude-*` dir plus any config dir seen on a live session,
+ * default account first. `CLAUDE_CONFIG_DIR` can point anywhere, so the
+ * on-disk scan alone is a starting point, not the full picture.
+ */
+export function computeConfigDirs(
+  home: string,
+  liveConfigDirs: Set<string>,
+): ConfigDirInfo[] {
+  const defaultDir = normalizeConfigDir(defaultConfigDir(home));
+  const all = new Set(discoverConfigDirs(home));
+  for (const dir of liveConfigDirs) all.add(normalizeConfigDir(dir));
+  const rest = [...all].filter((p) => p !== defaultDir).sort();
+  return [defaultDir, ...rest].map((p) => ({
+    path: p,
+    label: accountLabel(p, home),
+    is_default: p === defaultDir,
+  }));
+}
+
+export function configDirsKey(entries: ConfigDirInfo[]): string {
+  return entries.map((e) => e.path).join(" ");
 }
 
 export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
   const { allowDangerousSkip } = loadHostConfig();
   const hostId = deriveHostId();
+  const home = opts.home ?? os.homedir();
   const recoverableDeps: RecoverableDeps = {
     getLiveSessionIds: opts.getLiveSessionIds,
     getLiveCwds: opts.getLiveCwds,
     redact: opts.redact,
-    home: opts.home,
+    home,
   };
   const wsBase = opts.hubUrl
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:")
     .replace(/\/+$/, "");
 
+  let knownConfigDirs: ConfigDirInfo[] = computeConfigDirs(
+    home,
+    opts.getLiveConfigDirs?.() ?? new Set(),
+  );
+  let lastConfigDirsKey = configDirsKey(knownConfigDirs);
+
+  /** Recompute knownConfigDirs; returns true (and updates the tracked
+   *  key) only when the list actually changed. */
+  const refreshConfigDirs = (): boolean => {
+    const next = computeConfigDirs(
+      home,
+      opts.getLiveConfigDirs?.() ?? new Set(),
+    );
+    knownConfigDirs = next;
+    const key = configDirsKey(next);
+    if (key === lastConfigDirsKey) return false;
+    lastConfigDirsKey = key;
+    return true;
+  };
+
+  /** Send the current knownConfigDirs as a `host_config_dirs` frame,
+   *  without recomputing it first - callers that already refreshed (to
+   *  scan against a current list) use this so the list isn't computed
+   *  twice for one request. */
+  const sendConfigDirsFrame = (): void => {
+    client.send(
+      JSON.stringify({
+        action: "host_config_dirs",
+        config_dirs: knownConfigDirs,
+      } satisfies HostConfigDirsFrame),
+    );
+  };
+
+  /** Recompute and, only on an actual change, send `host_config_dirs`. */
+  const sendConfigDirsIfChanged = (): void => {
+    if (refreshConfigDirs()) sendConfigDirsFrame();
+  };
+
   const client = new HubClient({
     url: `${wsBase}/ws/host`,
     logPrefix: "claude-net/host",
     onOpen: () => {
+      // Re-registering always sends a fresh snapshot (host_register wins
+      // over host_config_dirs on the hub side), so recompute here too -
+      // a reconnect shouldn't have to wait for the next launch/recoverable
+      // round-trip to pick up an account created while disconnected.
+      refreshConfigDirs();
       const frame: HostRegisterFrame = {
         action: "host_register",
         host_id: hostId,
         user: os.userInfo().username || process.env.USER || "user",
         hostname: os.hostname() || "host",
-        home: os.homedir(),
+        home,
         recent_cwds: opts.getRecentCwds().slice(0, 20),
         allow_dangerous_skip: allowDangerousSkip,
+        config_dirs: knownConfigDirs,
       };
       client.send(JSON.stringify(frame));
     },
@@ -201,21 +295,39 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
         const response = await handleHostLaunch(
           frame as HostLaunchRequest,
           allowDangerousSkip,
+          home,
+          knownConfigDirs,
         );
         client.send(JSON.stringify(response));
+        sendConfigDirsIfChanged();
       } else if (frame.action === "host_recoverable") {
+        // Refresh (not just send-if-changed) before scanning: the union
+        // this scan reads from must be current, not whatever was last
+        // reported, or an account seen only via a live session could be
+        // scanned against a stale (missing-it) list.
+        const changed = refreshConfigDirs();
         const response = await handleHostRecoverable(
           frame as HostRecoverableRequest,
-          recoverableDeps,
+          {
+            ...recoverableDeps,
+            configDirs: knownConfigDirs.map((d) => d.path),
+          },
         );
         client.send(JSON.stringify(response));
+        if (changed) sendConfigDirsFrame();
       } else if (frame.action === "host_restore") {
+        const changed = refreshConfigDirs();
         const response = await handleHostRestore(
           frame as HostRestoreRequest,
           allowDangerousSkip,
-          recoverableDeps,
+          {
+            ...recoverableDeps,
+            configDirs: knownConfigDirs.map((d) => d.path),
+          },
+          home,
         );
         client.send(JSON.stringify(response));
+        if (changed) sendConfigDirsFrame();
       } else if (frame.action === "host_session_probe") {
         const probe = frame as HostSessionProbeFrame;
         if (
@@ -239,6 +351,7 @@ export function startHostChannel(opts: HostChannelOptions): HostChannelHandle {
       };
       client.send(JSON.stringify(frame));
     },
+    noteSessionConfigDir: () => sendConfigDirsIfChanged(),
   };
 }
 
@@ -352,6 +465,69 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Shell prefix for a send-keys relaunch line, so the account a session
+ * launches under never depends on whatever CLAUDE_CONFIG_DIR the pane's
+ * shell happens to have inherited. The default account explicitly unsets
+ * it (never `CLAUDE_CONFIG_DIR=$HOME/.claude` - Claude Code would then
+ * look for a ~/.claude/.claude.json that doesn't exist).
+ */
+export function envPrefixForShell(
+  configDir: string,
+  defaultDir: string,
+): string {
+  return configDir === defaultDir
+    ? "unset CLAUDE_CONFIG_DIR; "
+    : `export CLAUDE_CONFIG_DIR=${shellQuote(configDir)}; `;
+}
+
+/**
+ * Argv prefix for the command exec'd inside a freshly created tmux
+ * session. `tmux new-session -e NAME=VALUE` sets a variable for the new
+ * session's environment, which covers the custom-account case; there is
+ * no equivalent `-e` for unsetting one, so the default account instead
+ * wraps the command in `env -u CLAUDE_CONFIG_DIR` - robust even if the
+ * tmux server's own global environment (seeded from whichever shell
+ * first started it) already has a stale value.
+ */
+export function execArgsForAccount(
+  configDir: string,
+  defaultDir: string,
+): string[] {
+  return configDir === defaultDir
+    ? ["env", "-u", "CLAUDE_CONFIG_DIR", "claude-channels"]
+    : ["claude-channels"];
+}
+
+/** `-e` flags to prepend to a `new-session` invocation for a non-default
+ *  account; empty for the default account (nothing to set). */
+export function newSessionEnvFlags(
+  configDir: string,
+  defaultDir: string,
+): string[] {
+  return configDir === defaultDir
+    ? []
+    : ["-e", `CLAUDE_CONFIG_DIR=${configDir}`];
+}
+
+/**
+ * Explicit environment for a spawned tmux client process. Built from
+ * scratch per launch/restore rather than trusting `process.env` as-is:
+ * the daemon deletes its own inherited CLAUDE_CONFIG_DIR at startup, but
+ * a spawned child's env is still built explicitly here so the account a
+ * session launches under is never a question of what happened to be
+ * ambient.
+ */
+export function childEnv(
+  configDir: string,
+  defaultDir: string,
+): NodeJS.ProcessEnv {
+  const { CLAUDE_CONFIG_DIR, ...rest } = process.env;
+  return configDir === defaultDir
+    ? rest
+    : { ...rest, CLAUDE_CONFIG_DIR: configDir };
+}
+
 /** Names of every current tmux session. Empty when tmux isn't running. */
 async function tmuxSessionNames(): Promise<Set<string>> {
   const out = await tmuxCapture(["list-sessions", "-F", "#{session_name}"]);
@@ -384,9 +560,11 @@ const IDLE_SHELLS = new Set([
   "tcsh",
 ]);
 
-async function handleHostLaunch(
+export async function handleHostLaunch(
   req: HostLaunchRequest,
   allowDangerousSkip: boolean,
+  home: string,
+  knownConfigDirs: ConfigDirInfo[],
 ): Promise<HostLaunchDoneFrame> {
   if (req.skip_permissions && !allowDangerousSkip) {
     return {
@@ -394,6 +572,33 @@ async function handleHostLaunch(
       request_id: req.request_id,
       error: "skip_permissions not allowed on this host",
     };
+  }
+  const defaultDir = normalizeConfigDir(defaultConfigDir(home));
+  // Never trust a path from the frame into a child's environment without
+  // checking it against the list this host itself reported - validating
+  // here (not just on the hub) is what stops an unknown path from ever
+  // reaching CLAUDE_CONFIG_DIR. The type-check comes first: req is an
+  // `as`-cast of a parsed WS message, so config_dir can be any JSON
+  // value at runtime regardless of what the type declares, and
+  // normalizeConfigDir()/path.resolve() throw on a non-string.
+  let configDir = defaultDir;
+  if (req.config_dir !== undefined) {
+    if (typeof req.config_dir !== "string" || req.config_dir.length === 0) {
+      return {
+        action: "host_launch_done",
+        request_id: req.request_id,
+        error: "config_dir must be a non-empty string",
+      };
+    }
+    const normalized = normalizeConfigDir(req.config_dir);
+    if (!knownConfigDirs.some((c) => c.path === normalized)) {
+      return {
+        action: "host_launch_done",
+        request_id: req.request_id,
+        error: `unknown config_dir '${req.config_dir}'`,
+      };
+    }
+    configDir = normalized;
   }
   const v = resolveAndValidate(req.cwd);
   if (!v.ok) {
@@ -424,7 +629,7 @@ async function handleHostLaunch(
       };
     }
   }
-  const base = sanitizeTmuxName(path.basename(v.absolute));
+  const base = tmuxSessionBase(v.absolute, configDir, home);
   const taken = await tmuxSessionNames();
 
   // --resume <sid> targets a specific dead session and takes precedence
@@ -462,7 +667,7 @@ async function handleHostLaunch(
       "#{pane_current_command}",
     ]);
     if (IDLE_SHELLS.has(paneCmd)) {
-      const relaunch = `cd ${shellQuote(v.absolute)} && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${sessionArg}`;
+      const relaunch = `${envPrefixForShell(configDir, defaultDir)}cd ${shellQuote(v.absolute)} && claude-channels${req.skip_permissions ? " --dangerously-skip-permissions" : ""}${sessionArg}`;
       await tmuxCapture([
         "send-keys",
         "-t",
@@ -489,8 +694,9 @@ async function handleHostLaunch(
     tmuxSession,
     "-c",
     v.absolute,
+    ...newSessionEnvFlags(configDir, defaultDir),
     "--",
-    "claude-channels",
+    ...execArgsForAccount(configDir, defaultDir),
   ];
   if (req.skip_permissions) args.push("--dangerously-skip-permissions");
   if (resumeSid) {
@@ -502,7 +708,7 @@ async function handleHostLaunch(
     const proc = spawn("tmux", args, {
       detached: true,
       stdio: "ignore",
-      env: process.env,
+      env: childEnv(configDir, defaultDir),
     });
     // tmux new-session -d returns after creating the detached session.
     // Wait briefly for it to exit; a non-zero exit means tmux rejected us
@@ -550,6 +756,14 @@ interface RecoverableDeps {
   getLiveCwds?: () => Set<string>;
   redact?: (text: string) => string;
   home?: string;
+  /**
+   * Account config dirs to scan, same union `host_config_dirs` reports
+   * (discovered ∪ observed on live sessions). Passed fresh by the caller
+   * on every request rather than defaulting inside scanRecoverable, so an
+   * account seen only via a live session (never matching the `.claude-*`
+   * on-disk heuristic) still has its crashed sessions offered for restore.
+   */
+  configDirs?: string[];
 }
 
 interface CollectRecoverableOpts {
@@ -564,6 +778,7 @@ async function collectRecoverable(
   const taken = await tmuxSessionNames();
   return scanRecoverable({
     home: deps.home,
+    configDirs: deps.configDirs,
     withinHours: opts.withinHours,
     metadataOnly: opts.metadataOnly,
     liveSessionIds: deps.getLiveSessionIds?.(),
@@ -632,6 +847,7 @@ async function handleHostRestore(
   req: HostRestoreRequest,
   allowDangerousSkip: boolean,
   deps: RecoverableDeps,
+  home: string,
 ): Promise<HostRestoreDoneFrame> {
   if (req.skip_permissions && !allowDangerousSkip) {
     return {
@@ -689,6 +905,7 @@ async function handleHostRestore(
   const autoTrust =
     req.auto_trust === undefined ? true : req.auto_trust === true;
 
+  const defaultDir = normalizeConfigDir(defaultConfigDir(home));
   const taken = await tmuxSessionNames();
   const results: HostRestoreResult[] = [];
 
@@ -703,12 +920,13 @@ async function handleHostRestore(
       continue;
     }
 
+    const configDir = candidate.config_dir
+      ? normalizeConfigDir(candidate.config_dir)
+      : defaultDir;
     // A same-named tmux session is not evidence the directory is in use -
     // liveCwds/liveSessionIds (a /proc scan) already excluded genuinely
     // live sessions above. freeSessionName always finds a name to use.
-    const base = sanitizeTmuxName(
-      path.basename(candidate.cwd) || candidate.cwd,
-    );
+    const base = tmuxSessionBase(candidate.cwd, configDir, home);
     const tmuxSession = freeSessionName(base, taken);
     taken.add(tmuxSession);
 
@@ -723,8 +941,9 @@ async function handleHostRestore(
       // Claude Code directly instead of wrapping itself a second time.
       "-e",
       "CLAUDE_NET_IN_TMUX_WRAP=1",
+      ...newSessionEnvFlags(configDir, defaultDir),
       "--",
-      "claude-channels",
+      ...execArgsForAccount(configDir, defaultDir),
     ];
     if (req.skip_permissions) args.push("--dangerously-skip-permissions");
     // --resume pins the exact transcript the user ticked. --continue would
@@ -732,7 +951,7 @@ async function handleHostRestore(
     args.push("--resume", candidate.session_id);
 
     try {
-      await spawnDetached(args);
+      await spawnDetached(args, childEnv(configDir, defaultDir));
       results.push({
         session_id: id,
         ok: true,
@@ -765,12 +984,15 @@ async function handleHostRestore(
   };
 }
 
-function spawnDetached(args: string[]): Promise<void> {
+function spawnDetached(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const proc = spawn("tmux", args, {
       detached: true,
       stdio: "ignore",
-      env: process.env,
+      env,
     });
     proc.on("exit", (code) => {
       if (code === 0 || code === null) resolve();

@@ -249,6 +249,86 @@ describe("scanRecoverable", () => {
     expect(found[0].session_id).toBe(SID_A);
     expect(found[0].needs_trust).toBe(false);
   });
+
+  test("every result reports the default account's config dir", () => {
+    seed({ name: "alpha", sid: SID_A });
+    const found = scanRecoverable({ home });
+    expect(found[0].config_dir).toBe(path.join(home, ".claude"));
+  });
+
+  describe("multi-account", () => {
+    const personalConfigDir = () => path.join(home, ".claude-personal");
+
+    /** Seed a second account's own .claude.json (the marker
+     *  `discoverConfigDirs` requires) plus its projects tree. */
+    function seedPersonal(opts: {
+      name: string;
+      sid: string;
+      lastGracefulShutdown?: boolean;
+    }): string {
+      const configDir = personalConfigDir();
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(path.join(configDir, "settings.json"), "{}");
+
+      const cwd = path.join(home, "personal-projects", opts.name);
+      fs.mkdirSync(cwd, { recursive: true });
+
+      const tDir = path.join(configDir, "projects", encodeProjectDirName(cwd));
+      fs.mkdirSync(tDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tDir, `${opts.sid}.jsonl`),
+        `${JSON.stringify({ type: "user", message: { content: "hi from personal" } })}\n`,
+      );
+
+      const cfgPath = path.join(configDir, ".claude.json");
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({
+          projects: {
+            [cwd]: {
+              lastGracefulShutdown: opts.lastGracefulShutdown ?? false,
+              hasTrustDialogAccepted: true,
+            },
+          },
+        }),
+      );
+      return cwd;
+    }
+
+    test("scans both the default and a second discovered account, each reporting its own config_dir", () => {
+      const workCwd = seed({ name: "work-alpha", sid: SID_A });
+      const personalCwd = seedPersonal({ name: "personal-alpha", sid: SID_B });
+
+      const found = scanRecoverable({ home });
+      expect(found).toHaveLength(2);
+      const byCwd = new Map(found.map((s) => [s.cwd, s]));
+      expect(byCwd.get(workCwd)?.config_dir).toBe(path.join(home, ".claude"));
+      expect(byCwd.get(personalCwd)?.config_dir).toBe(personalConfigDir());
+    });
+
+    test("a second account's tmux_conflict is the account-suffixed name", () => {
+      const personalCwd = seedPersonal({ name: "shared-name", sid: SID_B });
+      const suffixed = `${path.basename(personalCwd)}-personal`;
+      const found = scanRecoverable({
+        home,
+        tmuxSessionExists: (name) => name === suffixed,
+      });
+      expect(found).toHaveLength(1);
+      expect(found[0].tmux_conflict).toBe(suffixed);
+    });
+
+    test("an explicit configDirs list scans only the accounts named", () => {
+      seed({ name: "work-alpha", sid: SID_A });
+      seedPersonal({ name: "personal-alpha", sid: SID_B });
+
+      const found = scanRecoverable({
+        home,
+        configDirs: [personalConfigDir()],
+      });
+      expect(found).toHaveLength(1);
+      expect(found[0].session_id).toBe(SID_B);
+    });
+  });
 });
 
 describe("sanitizeTmuxName", () => {

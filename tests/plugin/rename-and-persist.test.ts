@@ -51,17 +51,21 @@ describe("findActiveSessionForCcPid", () => {
     return file;
   }
 
+  // Passed explicitly so the assertions don't depend on whatever
+  // CLAUDE_CONFIG_DIR happens to be set in the ambient shell environment.
+  const noEnv = {};
+
   test("returns null when projects dir doesn't exist", () => {
-    expect(findActiveSessionForCcPid(0, "/home/alice/work", tmpHome)).toBe(
-      null,
-    );
+    expect(
+      findActiveSessionForCcPid(0, "/home/alice/work", tmpHome, noEnv),
+    ).toBe(null);
   });
 
   test("returns the most recently-modified JSONL", () => {
     const cwd = "/home/alice/work";
     writeJsonl(cwd, olderSid, Date.now() - 10_000);
     writeJsonl(cwd, sampleSid, Date.now());
-    const found = findActiveSessionForCcPid(0, cwd, tmpHome);
+    const found = findActiveSessionForCcPid(0, cwd, tmpHome, noEnv);
     expect(found?.sessionId).toBe(sampleSid);
     expect(found?.transcriptPath).toContain(`${sampleSid}.jsonl`);
   });
@@ -71,7 +75,24 @@ describe("findActiveSessionForCcPid", () => {
     const dir = path.join(projectsDir, encodeProjectDirName(cwd));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "scratch.jsonl"), "");
-    expect(findActiveSessionForCcPid(0, cwd, tmpHome)).toBe(null);
+    expect(findActiveSessionForCcPid(0, cwd, tmpHome, noEnv)).toBe(null);
+  });
+
+  test("uses CLAUDE_CONFIG_DIR instead of <home>/.claude when set", () => {
+    const cwd = "/home/alice/work";
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "cn-plugin-acct-"));
+    const dir = path.join(configDir, "projects", encodeProjectDirName(cwd));
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${sampleSid}.jsonl`);
+    fs.writeFileSync(file, "");
+    try {
+      const found = findActiveSessionForCcPid(0, cwd, tmpHome, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      expect(found?.sessionId).toBe(sampleSid);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -172,18 +193,29 @@ describe("readPersistedAgentName / writePersistedAgentName", () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
+  // Passed explicitly so the assertions don't depend on whatever
+  // CLAUDE_CONFIG_DIR happens to be set in the ambient shell environment.
+  const noEnv = {};
+
   test("returns null when no persisted file exists", () => {
-    expect(readPersistedAgentName(sid, cwd, tmpHome)).toBe(null);
+    expect(readPersistedAgentName(sid, cwd, tmpHome, noEnv)).toBe(null);
   });
 
   test("round-trips name and timestamp", () => {
-    writePersistedAgentName(sid, cwd, "reviewer:alice@host", 1000, tmpHome);
-    const got = readPersistedAgentName(sid, cwd, tmpHome);
+    writePersistedAgentName(
+      sid,
+      cwd,
+      "reviewer:alice@host",
+      1000,
+      tmpHome,
+      noEnv,
+    );
+    const got = readPersistedAgentName(sid, cwd, tmpHome, noEnv);
     expect(got).toEqual({ name: "reviewer:alice@host", ts: 1000 });
   });
 
   test("creates the project dir as needed", () => {
-    writePersistedAgentName(sid, cwd, "x:y@z", 1, tmpHome);
+    writePersistedAgentName(sid, cwd, "x:y@z", 1, tmpHome, noEnv);
     const dir = path.join(
       tmpHome,
       ".claude",
@@ -202,7 +234,7 @@ describe("readPersistedAgentName / writePersistedAgentName", () => {
     );
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${sid}.claude-net.json`), "not json");
-    expect(readPersistedAgentName(sid, cwd, tmpHome)).toBe(null);
+    expect(readPersistedAgentName(sid, cwd, tmpHome, noEnv)).toBe(null);
   });
 
   test("returns null when required fields are missing", () => {
@@ -217,7 +249,26 @@ describe("readPersistedAgentName / writePersistedAgentName", () => {
       path.join(dir, `${sid}.claude-net.json`),
       JSON.stringify({ name: "x" }), // missing ts
     );
-    expect(readPersistedAgentName(sid, cwd, tmpHome)).toBe(null);
+    expect(readPersistedAgentName(sid, cwd, tmpHome, noEnv)).toBe(null);
+  });
+
+  test("uses CLAUDE_CONFIG_DIR instead of <home>/.claude when set", () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "cn-plugin-acct-"));
+    try {
+      writePersistedAgentName(sid, cwd, "reviewer:alice@host", 1000, tmpHome, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      const dir = path.join(configDir, "projects", encodeProjectDirName(cwd));
+      expect(fs.existsSync(path.join(dir, `${sid}.claude-net.json`))).toBe(
+        true,
+      );
+      const got = readPersistedAgentName(sid, cwd, tmpHome, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      expect(got).toEqual({ name: "reviewer:alice@host", ts: 1000 });
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
 

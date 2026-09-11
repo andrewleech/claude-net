@@ -217,6 +217,8 @@ The installer retires the stale daemon (`pkill` + remove `/tmp/claude-net/mirror
 
 **Orphan sessions.** Mirror sessions don't auto-close when a claude process exits without a clean `session_end`, or when `/clear` starts a fresh session_id and leaves the previous one behind. The hub runs a sweep every minute that closes sessions whose daemon-agent WS has been unbound AND whose last event is older than `orphanCloseMs` (default 30 min). Still-live sessions are never touched.
 
+**Keep cache warm.** Right-click (or long-press) a live session in the sidebar and pick `☕ Keep cache warm` to have the hub ping it after `CLAUDE_NET_KEEP_WARM_MINUTES` (default 50) minutes of idle time, so Claude Code makes one API call and its prompt cache is refreshed before it expires. The prompt sent is `CLAUDE_NET_KEEP_WARM_TEXT`. The toggle lives in hub memory only and does not survive a hub restart.
+
 ## Launching sessions from the web
 
 Every host running `claude-channels` opens a long-lived control socket to the hub (`/ws/host`) separate from the per-session mirror sockets. The dashboard sidebar groups sessions under their host and exposes a **`+ launch`** button per host. Clicking it opens a modal with:

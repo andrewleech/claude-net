@@ -1703,6 +1703,8 @@
   .cn-session-row.is-dead .cn-session-title,
   .cn-session-row.is-dead .cn-session-cwd { color: var(--text-muted); }
   .cn-session-dead { color: var(--text-muted); }
+  .cn-session-warm { font-size: 11px; line-height: 1; cursor: default; }
+  .cn-session-row.is-dead .cn-session-warm { color: var(--text-muted); }
 
   /* Transient toast for context-menu action feedback (reconnect result). */
   .cn-toast {
@@ -2269,7 +2271,7 @@
      mostly solid (~70% of the cycle) and dips twice in quick
      succession, then rests.
 
-     Infinite by design: renderAgents() rebuilds the sidebar via
+     Infinite by design: paintAgents() rebuilds the sidebar via
      innerHTML on every mirror:activity, which would restart any
      iteration-capped animation across ALL sessions whenever ANY
      session emits a frame — making a finite count behave erratically.
@@ -2630,6 +2632,21 @@
   }
   .cn-host-row.is-offline { color: var(--text-muted); }
   .cn-host-row .cn-host-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Account row - only rendered when a host reports more than one config
+     dir; sits between the host row and that account's session rows. */
+  .cn-account-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px 6px 22px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    color: var(--text-muted);
+  }
+  .cn-account-row.is-offline { color: var(--text-dim); }
+  .cn-account-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cn-launch-btn {
     background: transparent;
     color: var(--text-accent);
@@ -3266,6 +3283,7 @@
   document.addEventListener('click', function(e) {
     if (e.target.closest && e.target.closest('[data-theme-toggle]')) toggleTheme();
   });
+
   syncThemeLabel();
 
   // --- Tool-call visibility toggle ---
@@ -3328,16 +3346,63 @@
     });
     return match;
   }
-  const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at }
+  // Idle threshold before the hub pings a keep-warm session, used for
+  // the sidebar badge's "next ping in" tooltip. The literal is only the
+  // fallback until the one-time fetch below resolves.
+  var keepWarmIntervalMs = 50 * 60 * 1000;
+  fetch('/api/mirror/config')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(cfg) {
+      if (cfg && typeof cfg.keep_warm_interval_ms === 'number' && cfg.keep_warm_interval_ms > 0) {
+        keepWarmIntervalMs = cfg.keep_warm_interval_ms;
+      }
+    })
+    .catch(function() { /* keep the fallback */ });
+  const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at, config_dirs }
   const recoverableCounts = new Map(); // host_id -> number of crashed sessions in the default window
-  const pendingLaunches = []; // { hostId, launchKey, startedAt } — ghost rows replaced by real sessions
+  const recoverableCountsByAccount = new Map(); // "host_id configDir" -> number of crashed sessions in that account
+  const pendingLaunches = []; // { hostId, launchKey, startedAt, configDir } - ghost rows replaced by real sessions
+
+  // Key for recoverableCountsByAccount. A space can't appear in a host_id or
+  // a filesystem path, so this can't collide across the two parts.
+  function accountKey(hostId, configDir) {
+    return hostId + ' ' + configDir;
+  }
+
+  function clearAccountRecoverableCounts(hostId) {
+    var prefix = hostId + ' ';
+    Array.from(recoverableCountsByAccount.keys()).forEach(function(k) {
+      if (k.indexOf(prefix) === 0) recoverableCountsByAccount.delete(k);
+    });
+  }
+
+  // The config dir a session/recoverable-entry belongs to, falling back to
+  // the host's default account when the field is absent (pre-rollout
+  // daemon) or empty.
+  function defaultConfigDirPath(host) {
+    if (!host || !Array.isArray(host.config_dirs)) return '';
+    var d = host.config_dirs.find(function(d) { return d.is_default; });
+    return d ? d.path : '';
+  }
+  function configDirOf(item, host) {
+    return (item && item.config_dir) || defaultConfigDirPath(host);
+  }
+
+  // "~/.claude-personal"-style display for an account's absolute path.
+  function accountDisplayPath(host, dirPath) {
+    var home = (host && host.home) || '';
+    if (home && dirPath.indexOf(home) === 0) {
+      return '~' + dirPath.slice(home.length);
+    }
+    return dirPath;
+  }
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
   // Trailing-edge debounce: a burst of events (host:connected +
   // mirror:session_started + agent:connected fired when a mirror-agent
   // reconnects) all coalesce into a single render after 150ms of quiet.
-  // renderAgents() rebuilds the sidebar via innerHTML, so each call
+  // paintAgents() rebuilds the sidebar via innerHTML, so each call
   // destroys/recreates animation state — debouncing eliminates the
   // visible flicker that comes from rapid back-to-back rebuilds.
   var renderAgentsTimer = null;
@@ -3345,6 +3410,40 @@
     if (renderAgentsTimer) clearTimeout(renderAgentsTimer);
     renderAgentsTimer = setTimeout(function() { renderAgentsTimer = null; renderAgents(); }, 150);
   }
+
+  // A repaint replaces every row node. A browser only synthesises `click`
+  // when mousedown and mouseup land on the same live node, so a repaint
+  // between the two drops the click entirely and the row never navigates.
+  // Hold repaints while a pointer is pressed on the sidebar and flush on
+  // release. The flush is a macrotask so the click (which follows pointerup
+  // synchronously) still sees the row it was pressed on.
+  var agentsRepaintHeld = false;
+  var agentsRepaintPending = false;
+  var agentsRepaintWatchdog = null;
+  // Release outside the window can swallow pointerup; without this the
+  // sidebar would stay frozen for the rest of the page's life.
+  var AGENTS_REPAINT_HOLD_MAX_MS = 3000;
+  function renderAgents() {
+    if (agentsRepaintHeld) { agentsRepaintPending = true; return; }
+    paintAgents();
+  }
+  function releaseAgentsRepaint() {
+    if (agentsRepaintWatchdog) { clearTimeout(agentsRepaintWatchdog); agentsRepaintWatchdog = null; }
+    if (!agentsRepaintHeld) return;
+    agentsRepaintHeld = false;
+    if (agentsRepaintPending) {
+      agentsRepaintPending = false;
+      setTimeout(paintAgents, 0);
+    }
+  }
+  document.addEventListener('pointerdown', function(e) {
+    if (!(e.target.closest && e.target.closest('#agent-list'))) return;
+    agentsRepaintHeld = true;
+    if (agentsRepaintWatchdog) clearTimeout(agentsRepaintWatchdog);
+    agentsRepaintWatchdog = setTimeout(releaseAgentsRepaint, AGENTS_REPAINT_HOLD_MAX_MS);
+  }, true);
+  document.addEventListener('pointerup', releaseAgentsRepaint, true);
+  document.addEventListener('pointercancel', releaseAgentsRepaint, true);
 
   // --- DOM refs ---
   const agentListEl = document.getElementById('agent-list');
@@ -3505,6 +3604,7 @@
           allow_dangerous_skip: !!event.allow_dangerous_skip,
           online: true,
           connected_at: event.connected_at,
+          config_dirs: Array.isArray(event.config_dirs) ? event.config_dirs : [],
         });
         renderAgentsDebounced();
         refreshRecoverableCount(event.host_id);
@@ -3515,6 +3615,19 @@
         var h = hosts.get(event.host_id);
         if (h) { h.online = false; renderAgentsDebounced(); }
         recoverableCounts.delete(event.host_id);
+        clearAccountRecoverableCounts(event.host_id);
+        break;
+      }
+
+      // Sent when a host's config-dir list changes after registration
+      // (an account created while the daemon was already connected).
+      case 'host:config_dirs_changed': {
+        var chHost = hosts.get(event.host_id);
+        if (chHost) {
+          chHost.config_dirs = Array.isArray(event.config_dirs) ? event.config_dirs : [];
+          renderAgentsDebounced();
+          refreshRecoverableCount(event.host_id);
+        }
         break;
       }
 
@@ -3529,6 +3642,15 @@
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
           if (event.activity_state) entry.activity_state = event.activity_state;
           if (event.background) entry.background = event.background;
+          renderAgentsDebounced();
+        }
+        break;
+      }
+
+      case 'mirror:keep_warm': {
+        var kw = findMirrorEntry(event.sid, event.host);
+        if (kw) {
+          kw.keep_warm = !!event.enabled;
           renderAgentsDebounced();
         }
         break;
@@ -3667,7 +3789,7 @@
   // extra row at the end of their host group. This handles the case
   // where several claude processes in the same cwd share one
   // owner_agent — each session gets its own row regardless.
-  function renderAgents() {
+  function paintAgents() {
     // Bucket mirror sessions by host (derived from owner_agent's user@host
     // suffix). Dead sessions (closed, or source-detached) stay listed —
     // dimmed and reconnectable — until the hub ages them out of retention.
@@ -3748,18 +3870,50 @@
     for (var h = 0; h < hostIds.length; h++) {
       var hid = hostIds[h];
       var host = hosts.get(hid);
-      html += renderHostRow(host);
       var sessions = sessionsByHost.get(hid) || [];
-      for (var s = 0; s < sessions.length; s++) {
-        html += renderSessionRow(sessions[s], ownerCounts);
-      }
       var extras = mcpByHost.get(hid) || [];
-      for (var e = 0; e < extras.length; e++) {
-        html += renderMcpOnlyRow(extras[e]);
+      var ghosts = pendingLaunches.filter(function(p) { return p.hostId === hid; });
+      var accountDirs = Array.isArray(host.config_dirs) ? host.config_dirs : [];
+
+      // A host reporting only one config dir (or none - a pre-rollout
+      // daemon) renders exactly as it always has: one row, no account
+      // grouping. Multiple accounts split the host's rows into a group
+      // per account, each with its own +launch / restore controls.
+      if (accountDirs.length <= 1) {
+        html += renderHostRow(host, true);
+        for (var s = 0; s < sessions.length; s++) {
+          html += renderSessionRow(sessions[s], ownerCounts);
+        }
+        for (var e = 0; e < extras.length; e++) {
+          html += renderMcpOnlyRow(extras[e]);
+        }
+        for (var g = 0; g < ghosts.length; g++) {
+          html += renderGhostLaunch(ghosts[g]);
+        }
+        continue;
       }
-      for (var p = 0; p < pendingLaunches.length; p++) {
-        if (pendingLaunches[p].hostId === hid) {
-          html += renderGhostLaunch(pendingLaunches[p]);
+
+      html += renderHostRow(host, false);
+      for (var d = 0; d < accountDirs.length; d++) {
+        var dir = accountDirs[d];
+        html += renderAccountRow(host, dir);
+        for (var as = 0; as < sessions.length; as++) {
+          if (configDirOf(sessions[as], host) === dir.path) {
+            html += renderSessionRow(sessions[as], ownerCounts);
+          }
+        }
+        // MCP-only registrations have no account information (messaging
+        // registration is independent of the mirror-agent's config dir),
+        // so they render under the default account row.
+        if (dir.is_default) {
+          for (var ae = 0; ae < extras.length; ae++) {
+            html += renderMcpOnlyRow(extras[ae]);
+          }
+        }
+        for (var ag2 = 0; ag2 < ghosts.length; ag2++) {
+          if ((ghosts[ag2].configDir || defaultConfigDirPath(host)) === dir.path) {
+            html += renderGhostLaunch(ghosts[ag2]);
+          }
         }
       }
     }
@@ -3778,21 +3932,54 @@
     agentListEl.innerHTML = html;
   }
 
-  function renderHostRow(host) {
+  // `showControls` is false when this host has more than one account:
+  // +launch/restore move onto each renderAccountRow instead. A host with
+  // a single account (or none reported, e.g. a pre-rollout daemon)
+  // renders no account row, so its host row has the controls itself.
+  function renderHostRow(host, showControls) {
     var offlineCls = host.online ? '' : ' is-offline';
-    var launchBtn = host.online
-      ? '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" type="button" title="Launch a new claude-channels session on this host">+ launch</button>'
-      : '<span class="row-hint">offline</span>';
-    // Only rendered when there is something to recover, so its presence
-    // is how the user finds out a shutdown ate their sessions.
-    var recoverable = recoverableCounts.get(host.host_id) || 0;
-    var restoreBtn = (host.online && recoverable > 0)
-      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + escapeAttr(String(recoverable)) + ' session(s) on this host exited without a clean shutdown">↻ restore ' + escapeHtml(String(recoverable)) + '</button>'
-      : '';
+    var launchBtn = '';
+    var restoreBtn = '';
+    if (!host.online) {
+      // The offline marker belongs on the host row itself whether or not
+      // +launch/restore live here - a multi-account host still needs
+      // somewhere to show it went offline even after its controls moved
+      // to the per-account rows.
+      launchBtn = '<span class="row-hint">offline</span>';
+    } else if (showControls) {
+      launchBtn = '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" type="button" title="Launch a new claude-channels session on this host">+ launch</button>';
+      // Only rendered when there is something to recover, so its presence
+      // is how the user finds out a shutdown ate their sessions.
+      var recoverable = recoverableCounts.get(host.host_id) || 0;
+      restoreBtn = recoverable > 0
+        ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" type="button" title="' + escapeAttr(String(recoverable)) + ' session(s) on this host exited without a clean shutdown">↻ restore ' + escapeHtml(String(recoverable)) + '</button>'
+        : '';
+    }
     return (
       '<div class="cn-host-row' + offlineCls + '">'
       + '<span class="agent-dot ' + (host.online ? 'online' : 'offline') + '"></span>'
       + '<span class="cn-host-name">' + escapeHtml(host.user + '@' + host.hostname) + '</span>'
+      + restoreBtn
+      + launchBtn
+      + '</div>'
+    );
+  }
+
+  // One row per account under a multi-account host, between the host row
+  // and that account's session rows. Has its own +launch / restore
+  // controls, scoped to `dir` via data-launch-account/data-restore-account.
+  function renderAccountRow(host, dir) {
+    var offlineCls = host.online ? '' : ' is-offline';
+    var launchBtn = host.online
+      ? '<button class="cn-launch-btn" data-launch-host="' + escapeAttr(host.host_id) + '" data-launch-account="' + escapeAttr(dir.path) + '" type="button" title="Launch a new claude-channels session in this account">+ launch</button>'
+      : '';
+    var recoverable = recoverableCountsByAccount.get(accountKey(host.host_id, dir.path)) || 0;
+    var restoreBtn = (host.online && recoverable > 0)
+      ? '<button class="cn-restore-btn" data-restore-host="' + escapeAttr(host.host_id) + '" data-restore-account="' + escapeAttr(dir.path) + '" type="button" title="' + escapeAttr(String(recoverable)) + ' session(s) in this account exited without a clean shutdown">↻ restore ' + escapeHtml(String(recoverable)) + '</button>'
+      : '';
+    return (
+      '<div class="cn-account-row' + offlineCls + '">'
+      + '<span class="cn-account-name" title="' + escapeAttr(dir.path) + '">' + escapeHtml(accountDisplayPath(host, dir.path)) + '</span>'
       + restoreBtn
       + launchBtn
       + '</div>'
@@ -3838,6 +4025,8 @@
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
       + ' data-host="' + escapeAttr(sess.host || '') + '"'
       + ' data-dead="' + (dead ? '1' : '0') + '"'
+      + ' data-closed="' + (sess.closed_at ? '1' : '0') + '"'
+      + ' data-keepwarm="' + (sess.keep_warm ? '1' : '0') + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
       + '<span class="' + dotCls + '"' + (dotTitle ? ' title="' + escapeAttr(dotTitle) + '"' : '') + '></span>'
       + '<div class="cn-session-body">'
@@ -3845,11 +4034,25 @@
       +   '<div class="cn-session-sub">'
       +     '<span class="cn-session-cwd">' + escapeHtml(cwdShort) + '</span>'
       +     (age ? ' <span class="cn-session-age">· ' + escapeHtml(age) + '</span>' : '')
+      // Shown for a detached-but-not-closed row too, so there is still a
+      // way to turn the ping off before the session reconnects.
+      +     (sess.keep_warm && !sess.closed_at ? ' <span class="cn-session-warm" title="' + escapeAttr(keepWarmTitle(sess)) + '">☕</span>' : '')
       +     (dead ? ' <span class="cn-session-dead">· offline</span>' : '')
       +   '</div>'
       + '</div>'
       + '</a>'
     );
+  }
+
+  // Tooltip for the keep-warm badge: how long until the hub's next idle
+  // check would fire a ping, derived from last_event_at the same way
+  // the hub itself measures idle time.
+  function keepWarmTitle(sess) {
+    var last = Date.parse(sess.last_event_at || '');
+    if (!isFinite(last)) return 'Keeping cache warm';
+    var due = last + keepWarmIntervalMs - Date.now();
+    if (due <= 0) return 'Keeping cache warm · ping due now';
+    return 'Keeping cache warm · next ping in about ' + formatElapsed(Math.round(due / 1000));
   }
 
   // Bucket a duration given in seconds into the short form shared by
@@ -4197,6 +4400,67 @@
       cnToast('Reconnect failed: ' + (err && err.message ? err.message : 'network error'), 'err');
     });
   }
+  function setKeepWarm(sid, host, label, enabled) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/keep-warm' + q, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status === 200) {
+        var mins = Math.round((res.body.interval_ms || keepWarmIntervalMs) / 60000);
+        cnToast(enabled
+          ? 'Keeping ' + label + ' warm: ping after ' + mins + 'm idle'
+          : 'Stopped keeping ' + label + ' warm', 'ok');
+      } else {
+        cnToast('Keep warm failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Keep warm failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
+  function terminateSession(sid, host, label) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    cnToast('Closing ' + (label || sid) + '…', '');
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/terminate' + q, {
+      method: 'POST',
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        cnToast('Close signal sent - the row ends once the process exits.', 'ok');
+      } else {
+        cnToast('Close failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Close failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
+  function forgetSession(sid, host, label) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/forget' + q, {
+      method: 'POST',
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status >= 200 && res.status < 300) {
+        // Drop the row locally too - the hub deleted its entry, so no
+        // session_ended broadcast will follow for dashboards that already
+        // saw this sid as closed.
+        mirrorBySid.forEach(function(s, key) {
+          if (s.sid === sid && (!host || s.host === host)) mirrorBySid.delete(key);
+        });
+        renderAgentsDebounced();
+        cnToast('Removed ' + (label || sid) + ' from the list.', 'ok');
+      } else {
+        cnToast('Remove failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Remove failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text)
@@ -4259,6 +4523,8 @@
     var sid = row.getAttribute('data-sid') || '';
     var host = row.getAttribute('data-host') || '';
     var dead = row.getAttribute('data-dead') === '1';
+    var closed = row.getAttribute('data-closed') === '1';
+    var warm = row.getAttribute('data-keepwarm') === '1';
     var cwd = row.getAttribute('data-cwd') || '';
     var hostId = row.getAttribute('data-hostid') || '';
     var name = row.getAttribute('data-name') || sid || '';
@@ -4283,7 +4549,30 @@
         closeCtxMenu();
         reconnectSession(sid, host, label);
       });
-      if (!dead) addCtxNote(cnCtxMenu, 'session appears live');
+      // Offered for a detached-but-not-closed row too (dead && !closed):
+      // otherwise a session that keeps pinging on reattach has no way
+      // to be switched off until it reconnects.
+      if (!closed) {
+        addCtxItem(cnCtxMenu, warm ? '☕ Stop keeping warm' : '☕ Keep cache warm', function() {
+          closeCtxMenu();
+          setKeepWarm(sid, host, label, !warm);
+        });
+      }
+      if (dead) {
+        // Gravestone: the process is already gone, just drop the row
+        // instead of waiting out the retention window.
+        addCtxItem(cnCtxMenu, '✕ Remove from list', function() {
+          closeCtxMenu();
+          forgetSession(sid, host, label);
+        });
+      } else {
+        addCtxItem(cnCtxMenu, '✕ Close session', function() {
+          closeCtxMenu();
+          if (!window.confirm('Close ' + label + '? This ends its Claude Code process and removes its tmux pane (if it has one).')) return;
+          terminateSession(sid, host, label);
+        });
+        addCtxNote(cnCtxMenu, 'session appears live');
+      }
     } else if (cwd && hostId) {
       // Registered agent with no mirror session (e.g. launched outside
       // claude-channels) — relaunch in its cwd to get a mirrored session.
@@ -4393,6 +4682,7 @@
   var launchErrorEl = document.getElementById('launch-error');
   var launchState = {
     hostId: null,
+    configDir: null,   // account to launch under; null = the host's default
     lsCache: {},       // parent-path → [{name, is_dir}]
     lsCacheExpiry: 0,
     entries: [],        // currently-displayed suggestion entries
@@ -4402,12 +4692,14 @@
     touchMode: false,
   };
 
-  function openLaunchModal(hostId) {
+  function openLaunchModal(hostId, configDir) {
     var host = hosts.get(hostId);
     if (!host || !host.online) return;
     launchState.hostId = hostId;
+    launchState.configDir = configDir || null;
     launchState.lsCache = {};
-    launchTitleEl.textContent = 'Launch in ' + host.user + '@' + host.hostname;
+    launchTitleEl.textContent = 'Launch in ' + host.user + '@' + host.hostname
+      + (configDir ? ' (' + accountDisplayPath(host, configDir) + ')' : '');
     launchErrorEl.textContent = '';
     // Initial input: most-recent cwd → env-var override → host home dir
     var initial = (host.recent_cwds && host.recent_cwds[0]) || '__LAUNCH_DEFAULT_PATH__' || host.home;
@@ -4433,6 +4725,7 @@
   function closeLaunchModal() {
     launchModal.classList.remove('is-open');
     launchState.hostId = null;
+    launchState.configDir = null;
     if (launchState.debounceTimer) {
       clearTimeout(launchState.debounceTimer);
       launchState.debounceTimer = null;
@@ -4540,6 +4833,7 @@
   function launchSubmit() {
     if (!launchState.hostId || !launchInput.value) return;
     var hostId = launchState.hostId;
+    var configDir = launchState.configDir;
     var cwd = launchInput.value.trim();
     var host = hosts.get(hostId);
     // Tilde-expand for the server-side call using the host's home.
@@ -4557,6 +4851,7 @@
         create_if_missing: true,
         skip_permissions: launchSkipChk.checked && host.allow_dangerous_skip,
         continue_session: launchContinueChk.checked,
+        config_dir: configDir || undefined,
       }),
     })
       .then(function(r) {
@@ -4578,6 +4873,7 @@
           startedAt: Date.now(),
           cwd: cwd,
           cwdShort: cwdParts.slice(-2).join('/') || cwd,
+          configDir: configDir,
         });
         setTimeout(function() {
           var i = pendingLaunches.findIndex(function(p) { return p.launchKey === launchKey; });
@@ -4610,7 +4906,7 @@
   var restoreTitleEl = document.getElementById('restore-title');
   var restoreErrorEl = document.getElementById('restore-error');
   var restoreResultsEl = document.getElementById('restore-results');
-  var restoreState = { hostId: null, sessions: [], selected: null, requestToken: 0, triggerEl: null };
+  var restoreState = { hostId: null, configDir: null, sessions: [], selected: null, requestToken: 0, triggerEl: null };
 
   function fetchRecoverable(hostId, withinHours) {
     var url = '/api/host/' + encodeURIComponent(hostId)
@@ -4633,7 +4929,22 @@
       .then(function(sessions) {
         var prev = recoverableCounts.get(hostId) || 0;
         recoverableCounts.set(hostId, sessions.length);
-        if (sessions.length !== prev) renderAgentsDebounced();
+        var changed = sessions.length !== prev;
+        var host = hosts.get(hostId);
+        var byAccount = new Map();
+        sessions.forEach(function(s) {
+          var dir = configDirOf(s, host);
+          byAccount.set(dir, (byAccount.get(dir) || 0) + 1);
+        });
+        if (host && Array.isArray(host.config_dirs)) {
+          host.config_dirs.forEach(function(d) {
+            var key = accountKey(hostId, d.path);
+            var count = byAccount.get(d.path) || 0;
+            if ((recoverableCountsByAccount.get(key) || 0) !== count) changed = true;
+            recoverableCountsByAccount.set(key, count);
+          });
+        }
+        if (changed) renderAgentsDebounced();
       })
       .catch(function() {});
   }
@@ -4660,14 +4971,16 @@
   // re-check whenever the user comes back to it.
   window.addEventListener('focus', refreshAllRecoverableCountsOnFocus);
 
-  function openRestoreModal(hostId, triggerEl) {
+  function openRestoreModal(hostId, triggerEl, configDir) {
     var host = hosts.get(hostId);
     if (!host || !host.online) return;
     restoreState.hostId = hostId;
+    restoreState.configDir = configDir || null;
     restoreState.sessions = [];
     restoreState.selected = null;
     restoreState.triggerEl = triggerEl || null;
-    restoreTitleEl.textContent = 'Restore on ' + host.user + '@' + host.hostname;
+    restoreTitleEl.textContent = 'Restore on ' + host.user + '@' + host.hostname
+      + (configDir ? ' (' + accountDisplayPath(host, configDir) + ')' : '');
     restoreErrorEl.textContent = '';
     restoreResultsEl.innerHTML = '';
     restoreWindowSel.value = String(RESTORE_DEFAULT_WINDOW_HOURS);
@@ -4689,6 +5002,7 @@
   function closeRestoreModal() {
     restoreModal.classList.remove('is-open');
     restoreState.hostId = null;
+    restoreState.configDir = null;
     var triggerEl = restoreState.triggerEl;
     restoreState.triggerEl = null;
     if (triggerEl && document.body.contains(triggerEl)) {
@@ -4706,9 +5020,18 @@
     // Captured per-request so a slower, older response (overlapping window
     // changes, or a reopen of the same host) can never clobber a newer one.
     var token = ++restoreState.requestToken;
+    var configDir = restoreState.configDir;
+    var host = hosts.get(hostId);
     fetchRecoverable(hostId, hours)
       .then(function(sessions) {
         if (restoreState.requestToken !== token) return;
+        // A restore triggered from an account row only offers that
+        // account's sessions - restoreSubmit still sends bare session
+        // ids, so filtering here is what keeps the two accounts' crashed
+        // sessions from being offered together.
+        if (configDir) {
+          sessions = sessions.filter(function(s) { return configDirOf(s, host) === configDir; });
+        }
         restoreState.sessions = sessions;
         // Everything ticked by default: after a crash the usual intent is
         // "all of it", and unticking a couple beats ticking the rest.
@@ -4806,11 +5129,17 @@
         }
         var results = (res.body && res.body.results) || [];
         var failures = results.filter(function(r) { return !r.ok; });
+        var restoredCount = results.length - failures.length;
         results.filter(function(r) { return r.ok; }).forEach(function(r) {
           var s = byId[r.session_id];
           addRestoreGhost(hostId, s ? s.cwd : r.session_id, r, autoTrust);
+          var dir = r.config_dir || (s && configDirOf(s, host));
+          if (dir) {
+            var key = accountKey(hostId, dir);
+            recoverableCountsByAccount.set(key, Math.max(0, (recoverableCountsByAccount.get(key) || 0) - 1));
+          }
         });
-        recoverableCounts.set(hostId, Math.max(0, (recoverableCounts.get(hostId) || 0) - (results.length - failures.length)));
+        recoverableCounts.set(hostId, Math.max(0, (recoverableCounts.get(hostId) || 0) - restoredCount));
         renderAgents();
         if (failures.length) {
           // Keep the modal open on partial failure; closing it would hide
@@ -4846,6 +5175,7 @@
       cwd: cwd,
       cwdShort: parts.slice(-2).join('/') || cwd,
       verb: waitingOnTrust ? 'waiting on trust prompt' : 'restoring',
+      configDir: result && result.config_dir,
     });
     // A row waiting on a human answering the trust prompt gets a long
     // leash, but every ghost must eventually clear even if its session
@@ -4898,7 +5228,11 @@
     if (restoreBtn) {
       e.preventDefault();
       dismissMobileSidebar();
-      openRestoreModal(restoreBtn.getAttribute('data-restore-host'), restoreBtn);
+      openRestoreModal(
+        restoreBtn.getAttribute('data-restore-host'),
+        restoreBtn,
+        restoreBtn.getAttribute('data-restore-account')
+      );
       return;
     }
     if (e.target.closest && e.target.closest('[data-restore-close]')) {
@@ -4913,7 +5247,10 @@
     if (launchBtn) {
       e.preventDefault();
       dismissMobileSidebar();
-      openLaunchModal(launchBtn.getAttribute('data-launch-host'));
+      openLaunchModal(
+        launchBtn.getAttribute('data-launch-host'),
+        launchBtn.getAttribute('data-launch-account')
+      );
       return;
     }
     if (e.target.closest && e.target.closest('[data-launch-close]')) {
@@ -8353,6 +8690,8 @@
 
     var mws = null;
     var mReconnectTimer = null;
+    var mConnectTimeout = null;
+    var MIRROR_CONNECT_TIMEOUT_MS = 8000;
     var teardownCalled = false;
     function mConnect() {
       if (teardownCalled) return;
@@ -8367,7 +8706,21 @@
         statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
         return;
       }
+      // A connection that is dropping packets rather than refusing them
+      // stays in CONNECTING for as long as the OS keeps retransmitting —
+      // minutes, with no onclose and so no reconnect. Bound the wait and
+      // force the close ourselves; onclose then drives the normal retry.
+      if (mConnectTimeout) clearTimeout(mConnectTimeout);
+      mConnectTimeout = setTimeout(function() {
+        mConnectTimeout = null;
+        if (teardownCalled) return;
+        if (!mws || mws.readyState === 1) return;
+        statusEl.className = 'mirror-status error';
+        statusEl.textContent = 'Connection timed out — retrying…';
+        try { mws.close(); } catch (e) { /* ignore */ }
+      }, MIRROR_CONNECT_TIMEOUT_MS);
       mws.onopen = function() {
+        if (mConnectTimeout) { clearTimeout(mConnectTimeout); mConnectTimeout = null; }
         watcherConnected = true;
         refreshConnState();
         statusEl.textContent = '';
@@ -8415,6 +8768,20 @@
       };
       mws.onerror = function() { /* close will follow */ };
     }
+    // The pane's header and transcript are otherwise written only by
+    // applyInit, i.e. only once mirror:init arrives. A socket that stalls
+    // (a black-holed connection never fires onclose) would leave the
+    // PREVIOUS session on screen indefinitely, so every click reads as
+    // "nothing happened". Paint what the sidebar already knows now; init
+    // overwrites it with the authoritative copy when it lands.
+    ownerEl.textContent = (resolvedEntry && resolvedEntry.owner_agent) || '';
+    cwdEl.textContent = (resolvedEntry && resolvedEntry.cwd) || '';
+    transcriptEl.innerHTML = '';
+    rendered = Object.create(null);
+    activeSubagents = Object.create(null);
+    resetAgentTabsUi();
+    disconnectTailObserver();
+
     mConnect();
 
     // Wire up the teardown closure so a subsequent attach (or detach) can
@@ -8427,6 +8794,7 @@
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       closeImageLightbox();
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
+      if (mConnectTimeout) { clearTimeout(mConnectTimeout); mConnectTimeout = null; }
       if (virtualizeTimer) { clearTimeout(virtualizeTimer); virtualizeTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       // Delayed-send: stop the countdown ticker and wipe the per-session

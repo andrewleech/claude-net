@@ -115,7 +115,21 @@ describe("Setup endpoint", () => {
     expect(body).toContain("bun run");
     // new bits added in the full-installer rewrite
     expect(body).toContain("claude-net-mirror-push");
-    expect(body).toContain(".claude/settings.json");
+    expect(body).toContain('CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"');
+    expect(body).toContain('SETTINGS="$CONFIG_DIR/settings.json"');
+  });
+
+  test("statusline.py installs to the shared ~/.claude regardless of CLAUDE_CONFIG_DIR", async () => {
+    const resp = await fetch(`${baseUrl}/setup`);
+    const body = await resp.text();
+
+    // The account config dir (settings.json, hooks, launch config) can
+    // move with CLAUDE_CONFIG_DIR, but the statusline script itself
+    // stays shared at the fixed $HOME/.claude location referenced by
+    // both accounts' settings.json.
+    expect(body).toContain(
+      'curl -fsSL "$HUB/bin/statusline.py" -o "$HOME/.claude/statusline.py"',
+    );
   });
 
   test("response content-type is text/plain", async () => {

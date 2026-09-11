@@ -514,6 +514,18 @@ export interface MirrorControlFrame {
   op: "pause" | "resume" | "close";
 }
 
+/**
+ * Hub → agent request to end the session's Claude Code outright: SIGTERM
+ * the process (SIGKILL as backstop) and remove its tmux pane, so a
+ * forgotten session doesn't idle in tmux forever. Fire and forget - the
+ * session close flows back through the normal SessionEnd / close path.
+ */
+export interface MirrorTerminateFrame {
+  event: "mirror_terminate";
+  sid: string;
+  origin: { watcher: string; ts: number };
+}
+
 export type HubFrame =
   | ResponseFrame
   | InboundMessageFrame
@@ -526,7 +538,8 @@ export type HubFrame =
   | MirrorHistoryRequestFrame
   | MirrorStopFrame
   | MirrorKeysFrame
-  | MirrorControlFrame;
+  | MirrorControlFrame
+  | MirrorTerminateFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────
 
@@ -675,6 +688,18 @@ export interface MirrorActivityEvent {
 }
 
 /**
+ * Broadcast to the dashboard socket when a session's keep-cache-warm
+ * toggle changes, so the sidebar badge and tooltip update without a
+ * reload.
+ */
+export interface MirrorKeepWarmEvent {
+  event: "mirror:keep_warm";
+  sid: string;
+  host?: string;
+  enabled: boolean;
+}
+
+/**
  * Broadcast to the dashboard socket when a session's mirror-agent binding
  * changes (source went away / came back). Lets the sidebar flip a session
  * to dimmed/offline (reconnect candidate) the moment the source dies,
@@ -703,6 +728,17 @@ export interface MirrorOwnerRenamedEvent {
 // ── Host channel (daemon → hub long-lived WS at /ws/host) ────────────────
 
 /**
+ * One account config dir a host knows about. `label` is `""` for the
+ * default account, otherwise a short display name (`~/.claude-personal`
+ * → "personal").
+ */
+export interface ConfigDirInfo {
+  path: string;
+  label: string;
+  is_default: boolean;
+}
+
+/**
  * First frame the daemon sends on /ws/host after opening. Identifies the
  * host + advertises its launch policy so the dashboard knows which RPCs
  * to expose for it.
@@ -715,6 +751,22 @@ export interface HostRegisterFrame {
   home: string;
   recent_cwds: string[];
   allow_dangerous_skip: boolean;
+  /** Account config dirs this host knows about. Optional so a
+   *  pre-rollout daemon still registers. */
+  config_dirs?: ConfigDirInfo[];
+}
+
+/**
+ * Daemon → hub: an updated config-dir list, sent whenever a rescan finds
+ * a change (a `host_launch`/`host_recoverable`/`host_restore` round-trip,
+ * or a session opening against an unlisted dir). Re-sending
+ * `host_register` is not an option - `HostRegistry.register` closes the
+ * existing entry for a duplicate `host_id`, which would drop the
+ * daemon's own socket.
+ */
+export interface HostConfigDirsFrame {
+  action: "host_config_dirs";
+  config_dirs: ConfigDirInfo[];
 }
 
 // Hub → daemon RPC requests, all replied to by the matching _done frame.
@@ -741,6 +793,11 @@ export interface HostLaunchRequest {
    *  Takes precedence over `continue_session`. Ignored when the cwd was
    *  freshly created (nothing to resume). */
   resume_sid?: string;
+  /** Account to launch under. The daemon validates this against the
+   *  config dirs it last reported before it ever reaches a child's
+   *  environment; omitted or unrecognised falls back to the default
+   *  account. */
+  config_dir?: string;
 }
 
 export interface HostLsDoneFrame {
@@ -786,6 +843,9 @@ export interface RecoverableSession {
   needs_trust: boolean;
   /** Name of an existing tmux session that already owns this directory. */
   tmux_conflict: string | null;
+  /** Account config dir this session belongs to. Optional so a
+   *  pre-rollout daemon's recoverable listing still parses. */
+  config_dir?: string;
 }
 
 export interface HostRecoverableRequest {
@@ -822,6 +882,8 @@ export interface HostRestoreResult {
   /** Project had never accepted Claude Code's folder-trust dialog. */
   needs_trust?: boolean;
   error?: string;
+  /** Account config dir this session was restored into. */
+  config_dir?: string;
 }
 
 export interface HostRestoreDoneFrame {
@@ -868,11 +930,21 @@ export interface HostConnectedEvent {
   recent_cwds: string[];
   allow_dangerous_skip: boolean;
   connected_at: string;
+  config_dirs?: ConfigDirInfo[];
 }
 
 export interface HostDisconnectedEvent {
   event: "host:disconnected";
   host_id: string;
+}
+
+/** Broadcast to dashboard sockets when a host's `host_config_dirs` list
+ *  changes after registration, so the sidebar's account rows update
+ *  live instead of waiting for the next page load. */
+export interface HostConfigDirsChangedEvent {
+  event: "host:config_dirs_changed";
+  host_id: string;
+  config_dirs: ConfigDirInfo[];
 }
 
 /** Real-time broadcast of every EventLog entry to dashboard clients. */
@@ -892,6 +964,7 @@ export interface HostSummary {
   recent_cwds: string[];
   allow_dangerous_skip: boolean;
   connected_at: string;
+  config_dirs?: ConfigDirInfo[];
 }
 
 export type DashboardEvent =
@@ -905,10 +978,12 @@ export type DashboardEvent =
   | MirrorWatcherJoinedEvent
   | MirrorWatcherLeftEvent
   | MirrorActivityEvent
+  | MirrorKeepWarmEvent
   | MirrorAgentStateEvent
   | MirrorOwnerRenamedEvent
   | HostConnectedEvent
   | HostDisconnectedEvent
+  | HostConfigDirsChangedEvent
   | SystemEvent;
 
 // ── Data model types ──────────────────────────────────────────────────────
@@ -949,6 +1024,19 @@ export type MirrorEventKind =
   | "history_text";
 
 export type MirrorSessionSource = "startup" | "resume" | "clear" | "compact";
+
+/**
+ * How the mirror-agent learned a session's sid, sent as `sid_source` on
+ * POST /api/mirror/session. Ordered by evidence strength:
+ * - "hook": the sid arrived in a hook payload from Claude Code itself.
+ * - "cmdline": an explicit `--resume <uuid>` / `--session-id <uuid>` on
+ *   the process's command line.
+ * - "fd": the process holds the transcript open (/proc/<pid>/fd).
+ * - "index": the daemon's persisted session index, originally hook-fed.
+ * - "mtime": newest-mtime transcript in the project dir - a guess. The
+ *   hub refuses to reopen a closed session on this evidence alone.
+ */
+export type SidSource = "hook" | "cmdline" | "fd" | "index" | "mtime";
 
 export interface MirrorSessionStartPayload {
   kind: "session_start";
@@ -1068,4 +1156,10 @@ export interface MirrorSessionSummary {
   activity_state: MirrorActivityState;
   /** Outstanding background work; empty unless state is `background`. */
   background: MirrorBackgroundTask[];
+  /** Account config dir this session belongs to. Optional so a
+   *  pre-rollout mirror-agent's sessions still parse. */
+  config_dir?: string;
+  /** True while the hub is pinging this session to keep its prompt cache
+   *  warm. Absent from pre-rollout hubs. */
+  keep_warm?: boolean;
 }

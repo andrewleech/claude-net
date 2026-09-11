@@ -65,8 +65,9 @@ async function main(): Promise<void> {
 }
 
 function enrichPayload(raw: string): string {
-  // Splice a `_mirror_env` field carrying TMUX / TMUX_PANE into the JSON body
-  // so the mirror-agent can discover the tmux target for remote injection.
+  // Splice a `_mirror_env` field with TMUX / TMUX_PANE / CLAUDE_CONFIG_DIR
+  // into the JSON body so the mirror-agent can discover the tmux target for
+  // remote injection and which account's config dir this session belongs to.
   // Never throws — if the payload isn't valid JSON, pass it through untouched.
   try {
     const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -75,6 +76,7 @@ function enrichPayload(raw: string): string {
         TMUX: process.env.TMUX ?? "",
         TMUX_PANE: process.env.TMUX_PANE ?? "",
         CC_PID: resolveCcPid(),
+        CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? "",
       };
       return JSON.stringify(obj);
     }

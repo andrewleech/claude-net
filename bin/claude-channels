@@ -28,6 +28,60 @@ set -euo pipefail
 
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
+# ── Multi-account config dir resolution ───────────────────────────────────
+# The default account uses $HOME/.claude; CLAUDE_CONFIG_DIR (set by e.g. a
+# `claude-personal` alias) points a second account at a sibling directory.
+# Every place below that would otherwise hard-code ~/.claude or
+# ~/.claude.json goes through these three instead, so a personal-account
+# launch reads its own MCP servers, settings.json and hub URL rather than
+# the default account's.
+
+# Resolve a path the same way src/shared/config-dir.ts's normalizeConfigDir
+# does: absolute, no trailing slash, symlinks resolved when the target
+# exists. Needed so CLAUDE_CONFIG_DIR=$HOME/.claude, a trailing-slash
+# variant of it, and a symlink to the same directory all compare equal to
+# the default account - the launcher and the daemon must agree on which
+# account a session belongs to, and accountLabel() on the daemon side
+# normalises the same way.
+_cn_normalize_path() {
+    local p="$1"
+    p="${p%/}"
+    [ -z "$p" ] && p="/"
+    case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+    if readlink -f "$p" >/dev/null 2>&1; then
+        readlink -f "$p"
+        return
+    fi
+    # BSD/macOS readlink has no -f. cd + pwd -P resolves symlinks the same
+    # way when the directory exists; a not-yet-created config dir falls
+    # back to the merely-absolute form, which still compares and sorts
+    # consistently (it just can't detect a symlink that isn't there yet).
+    if [ -d "$p" ]; then
+        (cd "$p" 2>/dev/null && pwd -P) || echo "$p"
+    else
+        echo "$p"
+    fi
+}
+
+CN_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CN_CONFIG_DIR_RESOLVED="$(_cn_normalize_path "$CN_CONFIG_DIR")"
+CN_IS_DEFAULT_ACCOUNT=false
+[ "$CN_CONFIG_DIR_RESOLVED" = "$(_cn_normalize_path "$HOME/.claude")" ] && CN_IS_DEFAULT_ACCOUNT=true
+
+# The .claude.json path is asymmetric: the default account's project
+# metadata lives at $HOME/.claude.json (there is no ~/.claude/.claude.json
+# on a normal install) and falls back there when it hasn't got its own; a
+# custom config dir always keeps its own .claude.json alongside
+# settings.json inside the dir itself, never the default account's.
+if [ -f "$CN_CONFIG_DIR/.claude.json" ]; then
+    CN_CLAUDE_JSON="$CN_CONFIG_DIR/.claude.json"
+elif $CN_IS_DEFAULT_ACCOUNT; then
+    CN_CLAUDE_JSON="$HOME/.claude.json"
+else
+    CN_CLAUDE_JSON="$CN_CONFIG_DIR/.claude.json"
+fi
+CN_SETTINGS="$CN_CONFIG_DIR/settings.json"
+
 # ── Resolve, patch, and cache the Claude Code binary ─────────────────────
 # `cc_patcher.launch.resolve_patched_binary()` finds the real binary
 # (honouring $CLAUDE_CLI_PATH, falling back to well-known install
@@ -55,7 +109,7 @@ CLI_PATH=$(cc-patcher resolve) || exit 1
 # ── Auto-detect channel MCP servers ──────────────────────────────────────
 
 find_channel_servers() {
-    local config="$HOME/.claude.json"
+    local config="$CN_CLAUDE_JSON"
     [ -f "$config" ] || return
 
     CLAUDE_JSON="$config" PROJECT_DIR="$(pwd)" python3 -c "
@@ -107,7 +161,7 @@ fi
 
 mirror_injection_mode() {
     # Echo the configured injection mode ("tmux" | "none" | "patch"), default "tmux".
-    local config="$HOME/.claude/settings.json"
+    local config="$CN_SETTINGS"
     if [ ! -f "$config" ]; then
         echo "tmux"
         return
@@ -124,20 +178,12 @@ except Exception:
 " 2>/dev/null
 }
 
-resolve_hub_url() {
-    # Hub URL resolution:
-    #   1. CLAUDE_NET_HUB env var (explicit override)
-    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
-    #      (this is where the plugin already gets its URL, so the mirror-agent
-    #      ends up pointing at the same hub without extra configuration)
-    #   3. http://localhost:4815 as a last-ditch default — warned loudly,
-    #      because a daemon spawned against the wrong hub mirrors nothing
-    #      while still answering /health.
-    # Echoes the URL with trailing slashes stripped so it compares exactly
-    # against the daemon's normalized value from /health.
-    local hub_url="${CLAUDE_NET_HUB:-}"
-    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
-        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
+_hub_url_from_claude_json() {
+    # Echoes env.CLAUDE_NET_HUB on any "claude-net" MCP server in the given
+    # .claude.json, or nothing if the file is missing/unparsable/lacks one.
+    local claude_json="$1"
+    [ -f "$claude_json" ] || return
+    CLAUDE_JSON="$claude_json" python3 -c "
 import json, os
 try:
     with open(os.environ['CLAUDE_JSON']) as f:
@@ -150,10 +196,39 @@ try:
             break
 except Exception:
     pass
-" 2>/dev/null)
+" 2>/dev/null
+}
+
+resolve_hub_url() {
+    # Hub URL resolution:
+    #   1. CLAUDE_NET_HUB env var (explicit override)
+    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in this
+    #      account's own .claude.json (this is where the plugin already
+    #      gets its URL, so the mirror-agent ends up pointing at the same
+    #      hub without extra configuration)
+    #   3. Same lookup against the DEFAULT account's ~/.claude.json, when
+    #      this account isn't the default one. A personal account with no
+    #      claude-net MCP entry of its own (item 0's prerequisite skipped)
+    #      still finds the work account's hub instead of falling through
+    #      to the localhost warning below - which matters because there is
+    #      only one mirror-agent daemon per UID (see start_mirror_agent):
+    #      a personal launch that resolved localhost:4815 here would judge
+    #      the work account's already-running daemon a "wrong hub" and
+    #      kill it.
+    #   4. http://localhost:4815 as a last-ditch default - warned loudly,
+    #      because a daemon spawned against the wrong hub mirrors nothing
+    #      while still answering /health.
+    # Echoes the URL with trailing slashes stripped so it compares exactly
+    # against the daemon's normalized value from /health.
+    local hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ]; then
+        hub_url=$(_hub_url_from_claude_json "$CN_CLAUDE_JSON")
+    fi
+    if [ -z "$hub_url" ] && [ "$CN_CLAUDE_JSON" != "$HOME/.claude.json" ]; then
+        hub_url=$(_hub_url_from_claude_json "$HOME/.claude.json")
     fi
     if [ -z "$hub_url" ]; then
-        echo "[claude-net/mirror] WARNING: hub URL not found in CLAUDE_NET_HUB or ~/.claude.json — falling back to http://localhost:4815" >&2
+        echo "[claude-net/mirror] WARNING: hub URL not found in CLAUDE_NET_HUB or $CN_CLAUDE_JSON - falling back to http://localhost:4815" >&2
         hub_url="http://localhost:4815"
     fi
     while [ "${hub_url%/}" != "$hub_url" ]; do hub_url="${hub_url%/}"; done
@@ -373,7 +448,56 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
     && [ "$(mirror_injection_mode)" = "tmux" ] \
     && command -v tmux >/dev/null 2>&1; then
     export CLAUDE_NET_IN_TMUX_WRAP=1
-    tmux_session_base="$(basename "$PWD")"
+
+    # tmux rewrites "." and ":" to "_" in a -s session name (both are
+    # target-syntax delimiters), so a name derived from a directory
+    # basename must apply the same substitution before it's compared
+    # against or used to create a tmux session. Mirrors sanitizeTmuxName
+    # in src/shared/config-dir.ts.
+    tmux_session_base="$(printf '%s' "$(basename "$PWD")" | tr '.:' '__')"
+
+    # Account suffix, mirroring accountLabel()/tmuxSessionBase() in
+    # src/shared/config-dir.ts: "" for the default account, else the
+    # config dir's basename with a leading "." and "claude-" stripped
+    # (~/.claude-personal → "personal"). Without this the two accounts
+    # would collide on the same tmux session name in a shared cwd.
+    # Derived from the resolved path so a symlink or trailing-slash form
+    # of a custom config dir still produces the label the daemon would
+    # compute for the same directory.
+    cn_account_label=""
+    if ! $CN_IS_DEFAULT_ACCOUNT; then
+        cn_account_label="$(basename "$CN_CONFIG_DIR_RESOLVED")"
+        cn_account_label="${cn_account_label#.}"
+        cn_account_label="${cn_account_label#claude-}"
+    fi
+    [ -n "$cn_account_label" ] && tmux_session_base="${tmux_session_base}-${cn_account_label}"
+
+    # CLAUDE_CONFIG_DIR must never leak between accounts via the tmux
+    # server's global environment or an unrelated pane's shell env. Two
+    # distinct leak paths, two distinct fixes:
+    #   - A brand-new tmux server seeds its global environment from
+    #     whichever process's `tmux new-session` first starts it. If this
+    #     script still had CLAUDE_CONFIG_DIR in its own env at that point,
+    #     the value would stick in the server's global environment for
+    #     every future session on the machine, regardless of account. The
+    #     `exec env -u CLAUDE_CONFIG_DIR tmux new-session ...` call below
+    #     is what prevents that - it strips the variable from the process
+    #     that starts (or talks to) the server, not just the session.
+    #   - The session (and its panes) still needs the right value once it
+    #     exists: cn_tmux_env_flags/cn_exec_prefix/cn_shell_env_prefix set
+    #     it per session via `-e` for a custom account, or unset it via
+    #     `env -u`/`unset` for the default one - never leave
+    #     CLAUDE_CONFIG_DIR=$HOME/.claude, Claude Code would then look for
+    #     a ~/.claude/.claude.json that doesn't exist.
+    if $CN_IS_DEFAULT_ACCOUNT; then
+        cn_tmux_env_flags=()
+        cn_exec_prefix=(env -u CLAUDE_CONFIG_DIR)
+        cn_shell_env_prefix="unset CLAUDE_CONFIG_DIR; "
+    else
+        cn_tmux_env_flags=(-e "CLAUDE_CONFIG_DIR=$CN_CONFIG_DIR_RESOLVED")
+        cn_exec_prefix=()
+        cn_shell_env_prefix="export CLAUDE_CONFIG_DIR=$(printf '%q' "$CN_CONFIG_DIR_RESOLVED"); "
+    fi
 
     # A fork/branch/resume is a *second* Claude in the *same directory*, so it
     # collides with the first session's cwd-derived name. If we reattached to the
@@ -419,9 +543,10 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
         # original put and reachable and keeps this launch's args.
         tmux_session_name="$(_free_tmux_session_name)"
         echo "[claude-net/mirror] '$tmux_session_base' in use; starting distinct session '$tmux_session_name'" >&2
-        exec tmux new-session -s "$tmux_session_name" \
+        exec env -u CLAUDE_CONFIG_DIR tmux new-session -s "$tmux_session_name" \
             -e CLAUDE_NET_IN_TMUX_WRAP=1 \
-            -- "$SELF" "$@"
+            ${cn_tmux_env_flags[@]+"${cn_tmux_env_flags[@]}"} \
+            -- ${cn_exec_prefix[@]+"${cn_exec_prefix[@]}"} "$SELF" "$@"
     elif _tmux_has_session "$tmux_session_base"; then
         # Coming back to this project's session. If its claude has exited,
         # cd to the current directory and relaunch in place; the `&& exec`
@@ -429,7 +554,7 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
         # process becomes claude, not a shell parent. A busy pane is left
         # undisturbed — just attach to it.
         if _tmux_pane_is_idle_shell "$tmux_session_base"; then
-            relaunch="cd $(printf '%q' "$PWD") && exec"
+            relaunch="${cn_shell_env_prefix}cd $(printf '%q' "$PWD") && exec"
             for a in "$SELF" "$@"; do relaunch="$relaunch $(printf '%q' "$a")"; done
             tmux send-keys -t "=${tmux_session_base}:" "$relaunch" Enter
         fi
@@ -437,9 +562,10 @@ if [ -z "${CLAUDE_NET_NO_TMUX_WRAP:-}" ] \
         exec tmux attach-session -t "=$tmux_session_base"
     else
         echo "[claude-net/mirror] wrapping in tmux session '$tmux_session_base' (set CLAUDE_NET_NO_TMUX_WRAP=1 to disable)" >&2
-        exec tmux new-session -s "$tmux_session_base" \
+        exec env -u CLAUDE_CONFIG_DIR tmux new-session -s "$tmux_session_base" \
             -e CLAUDE_NET_IN_TMUX_WRAP=1 \
-            -- "$SELF" "$@"
+            ${cn_tmux_env_flags[@]+"${cn_tmux_env_flags[@]}"} \
+            -- ${cn_exec_prefix[@]+"${cn_exec_prefix[@]}"} "$SELF" "$@"
     fi
 fi
 
